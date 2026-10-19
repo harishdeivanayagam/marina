@@ -1,0 +1,1051 @@
+// ---------------------------------------------------------------------------
+// Lambdas
+// ---------------------------------------------------------------------------
+
+// Lambda layout: executor params first (Plain ABI only), then captured
+// variables. Callback lambdas take their parameters as IR arguments, so
+// only captures occupy env slots.
+function mgLambdaSlots(g: Gen, li: Int32): Array<LamSlot> {
+    let lam = g.c.lambdas[li]
+    let slots: Array<LamSlot> = []
+    if (lam.abi == mchek.abPlain()) {
+        let i = 0
+        while (i < lam.pids.length) {
+            let s = new LamSlot()
+            s.id = lam.pids[i]
+            s.ty = lam.ptys[i]
+            slots.push(s)
+            i = i + 1
+        }
+    }
+    let j = 0
+    while (j < lam.cids.length) {
+        let s = new LamSlot()
+        s.id = lam.cids[j]
+        s.ty = lam.ctys[j]
+        slots.push(s)
+        j = j + 1
+    }
+    return slots
+}
+
+function mgEnvTypeDef(g: Gen, li: Int32): string {
+    let ty = `%env.${li}`
+    let done = false
+    if (li < g.envTypesDone.length) {
+        done = g.envTypesDone[li]
+    }
+    if (!done) {
+        while (g.envTypesDone.length <= li) {
+            g.envTypesDone.push(false)
+        }
+        g.envTypesDone[li] = true
+        let slots = mgLambdaSlots(g, li)
+        let tys: Array<string> = []
+        let i = 0
+        while (i < slots.length) {
+            tys.push(cgMemOf(cgTyOfTy(slots[i].ty)))
+            i = i + 1
+        }
+        let joined = ""
+        let j = 0
+        while (j < tys.length) {
+            if (j > 0) {
+                joined = `${joined}, `
+            }
+            joined = `${joined}${tys[j]}`
+            j = j + 1
+        }
+        g.typeDefs.push(`${ty} = type { ${joined} }`)
+    }
+    return ty
+}
+
+// Class id of a builtin std-module class (http_Server, ...).
+function mgBuiltinClass(g: Gen, name: string): Int32 {
+    let i = 0
+    while (i < g.c.classes.length) {
+        if (g.c.classes[i].name == name) {
+            return i
+        }
+        i = i + 1
+    }
+    return -1
+}
+
+// Allocate + populate a closure environment for lambda `li`.
+// hasPreset/preset fills env slot 0 directly (the executor's promise).
+function mgBuildEnv(g: Gen, li: Int32, hasPreset: bool, preset: string): string {
+    let slots = mgLambdaSlots(g, li)
+    let ty = mgEnvTypeDef(g, li)
+    let sz = ""
+    if (slots.length == 0) {
+        sz = "i64 8"
+    } else {
+        sz = `i64 ptrtoint (ptr getelementptr inbounds (${ty}, ptr null, i64 1) to i64)`
+    }
+    let envp = mgFresh(g, "en")
+    mgEmit(g, `${envp} = call ptr @marina_closure_alloc(${sz})`)
+    let i = 0
+    while (i < slots.length) {
+        let id = slots[i].id
+        let t = slots[i].ty
+        let ct = cgTyOfTy(t)
+        // address this env directly (g.env is not set in the enclosing
+        // function, so we can't use gep_ssa here)
+        let gep = mgFresh(g, "eg")
+        mgEmit(g, `${gep} = getelementptr inbounds ${ty}, ptr ${envp}, i64 0, i32 ${i}`)
+        if (i == 0 && hasPreset) {
+            // env slots own their refs: retain the preset promise
+            let r = mgFresh(g, "ep")
+            mgEmit(g, `${r} = call ptr @marina_retain(ptr ${preset})`)
+            mgEmit(g, `store ptr ${r}, ptr ${gep}`)
+            i = i + 1
+            continue
+        }
+        let a = mgAccessFor(g, id)
+        let v = mgLoadAccess(g, a)
+        if (cgIsPtr(ct)) {
+            let r = mgFresh(g, "cp")
+            mgEmit(g, `${r} = call ptr @marina_retain(ptr ${v.ir})`)
+            mgEmit(g, `store ptr ${r}, ptr ${gep}`)
+        } else {
+            mgEmit(g, `store ${cgIrOf(ct)} ${v.ir}, ptr ${gep}`)
+        }
+        i = i + 1
+    }
+    return envp
+}
+
+function mgGenLambda(g: Gen, li: Int32): void {
+    let lam = g.c.lambdas[li]
+    if (lam.isAsync && lam.abi == mchek.abListen()) {
+        // async route handler: shim + promise state machine
+        mgGenAsyncListenLambda(g, li)
+        return
+    }
+    let abi = lam.abi
+    let lret = lam.ret
+    let slots = mgLambdaSlots(g, li)
+    let body = lam.body
+    let ty = mgEnvTypeDef(g, li)
+
+    // ---- lambda body ----
+    // IR signature depends on the callback ABI; extra params are raw
+    // pointers to MValues passed by the runtime.
+    let irParams: Array<string> = []
+    irParams.push("ptr %env")
+    if (abi == mchek.abForEach()) {
+        irParams.push("ptr %item")
+    } else if (abi == mchek.abMapFilter()) {
+        irParams.push("ptr %item")
+        irParams.push("ptr %out")
+    } else if (abi == mchek.abReduce()) {
+        irParams.push("ptr %acc")
+        irParams.push("ptr %item")
+        irParams.push("ptr %out")
+    } else if (abi == mchek.abListen()) {
+        irParams.push("ptr %req")
+        irParams.push("ptr %res")
+    }
+    mgPushFn(g, mgNewIrFn(`lambda.${li}`, "void", irParams))
+    g.curRet = cgVoid()
+    let exitB = mgNewBlockFixed(g, "exit")
+    g.hasLambdaExit = true
+    g.lambdaExit = exitB
+    g.hasEnv = true
+    g.env = mgNewEnvInfo(ty)
+    let i = 0
+    while (i < slots.length) {
+        g.env.slotTys.push(cgTyOfTy(slots[i].ty))
+        g.env.ids.push(slots[i].id)
+        g.env.idxs.push(i)
+        i = i + 1
+    }
+    i = 0
+    while (i < slots.length) {
+        mgScopeInsert(g.scopes[0], slots[i].id, mgNewAccess(accEnv(), "", i, cgTyOfTy(slots[i].ty)))
+        i = i + 1
+    }
+    // Callback parameters arrive as MValue pointers; unpack them into
+    // allocas owned by the lambda body. The runtime retains string/array
+    // payloads before the call, so these start out owned.
+    if (abi != mchek.abPlain()) {
+        let lamParams = lam.pids
+        let lamPtys = lam.ptys
+        let i2 = 0
+        while (i2 < lamParams.length) {
+            let ct = cgTyOfTy(lamPtys[i2])
+            let a = mgAlloca(g, cgMemOf(ct))
+            let src = "%item"
+            if (abi == mchek.abForEach()) {
+                src = "%item"
+            } else if (abi == mchek.abMapFilter()) {
+                src = "%item"
+            } else if (abi == mchek.abReduce()) {
+                if (i2 == 0) {
+                    src = "%acc"
+                } else {
+                    src = "%item"
+                }
+            } else if (abi == mchek.abListen()) {
+                if (i2 == 0) {
+                    src = "%req"
+                } else {
+                    src = "%res"
+                }
+            }
+            mgStoreFromMv(g, src, ct, a)
+            mgScopeInsert(g.scopes[0], lamParams[i2], mgNewAccess(accAlloca(), a, 0, ct))
+            i2 = i2 + 1
+        }
+        if (abi == mchek.abMapFilter() || abi == mchek.abReduce()) {
+            g.hasLambdaOut = true
+            g.lambdaOut = "%out"
+            g.hasLambdaRet = true
+            g.lambdaRet = cgTyOfTy(lret)
+        }
+    }
+    mgCgBody(g, body)
+    if (!mgTerminated(g)) {
+        if (g.hasLambdaOut) {
+            // fell off the end of a map/filter/reduce callback: write a
+            // void value (the checker requires a return; defensive)
+            let out = g.lambdaOut
+            mgEmit(g, `store i32 0, ptr ${out}`)
+            let g1 = mgMvField(g, out, 1)
+            mgEmit(g, `store i32 0, ptr ${g1}`)
+            mgFlushPending(g)
+            mgReleaseScopeVars(g)
+            let el = mgLabelOf(g, exitB)
+            mgTerm(g, `br label %${el}`)
+        } else {
+            mgSyncEpilogue(g, false, null)
+        }
+    }
+    mgSwitchBlock(g, exitB)
+    mgTerm(g, "ret void")
+    g.hasEnv = false
+    g.hasLambdaOut = false
+    g.hasLambdaExit = false
+    g.hasLambdaRet = false
+
+    // ---- drop function (called by the runtime when the env dies) ----
+    mgPushFn(g, mgNewIrFn(`lambda.${li}.drop`, "void", ["ptr %env"]))
+    g.hasEnv = true
+    g.env = mgNewEnvInfo(ty)
+    let j = 0
+    while (j < slots.length) {
+        g.env.slotTys.push(cgTyOfTy(slots[j].ty))
+        g.env.ids.push(slots[j].id)
+        g.env.idxs.push(j)
+        j = j + 1
+    }
+    j = 0
+    while (j < slots.length) {
+        let ct = cgTyOfTy(slots[j].ty)
+        if (cgIsPtr(ct)) {
+            let gep = mgGepSsa(g, mgNewAccess(accEnv(), "", j, ct))
+            let v = mgFresh(g, "dl")
+            mgEmit(g, `${v} = load ptr, ptr ${gep}`)
+            mgEmit(g, `call void @marina_release(ptr ${v})`)
+        }
+        j = j + 1
+    }
+    mgEmit(g, "call void @marina_closure_free(ptr %env)")
+    mgTerm(g, "ret void")
+    g.hasEnv = false
+}
+
+// ---------------------------------------------------------------------------
+// Sync functions
+// ---------------------------------------------------------------------------
+
+function mgGenSyncFnInto(g: Gen, name: string, pids: Array<Int32>, ptys: Array<Ty>, ret: Ty, body: Array<CSt>): void {
+    let irRet = cgIrOf(cgTyOfTy(ret))
+    let irParams: Array<string> = []
+    let i = 0
+    while (i < pids.length) {
+        irParams.push(`${cgIrOf(cgTyOfTy(ptys[i]))} %a${i}`)
+        i = i + 1
+    }
+    mgPushFn(g, mgNewIrFn(name, irRet, irParams))
+    g.curRet = cgTyOfTy(ret)
+    i = 0
+    while (i < pids.length) {
+        let ct = cgTyOfTy(ptys[i])
+        let a = mgNewAccess(accAlloca(), mgAlloca(g, cgMemOf(ct)), 0, ct)
+        mgStoreAccess(g, a, `%a${i}`, ct)
+        mgScopeInsert(g.scopes[0], pids[i], a)
+        i = i + 1
+    }
+    mgCgBody(g, body)
+    if (!mgTerminated(g)) {
+        mgSyncEpilogue(g, false, null)
+    }
+}
+
+function mgGenSyncFn(g: Gen, f: CFn): void {
+    mgGenSyncFnInto(g, `fn.${f.name}`, f.pids, f.ptys, f.ret, f.body)
+}
+
+// ---------------------------------------------------------------------------
+// Async functions
+// ---------------------------------------------------------------------------
+
+// Split an async body into linear segments at await points.
+function mgTransform(g: Gen, stmts: Array<CSt>, segs: Array<Segment>): void {
+    let cur = mchek.emptyCSts()
+    let i = 0
+    let stopped = false
+    while (i < stmts.length && !stopped) {
+        let s = stmts[i]
+        if (s.k == mchek.csLet() && s.hasE1 && s.e1.k == mchek.ceAwait()) {
+            let seg = new Segment()
+            seg.stmts = cur
+            seg.endKind = seAwait()
+            seg.endExpr = s.e1.kids[0]
+            seg.hasTarget = true
+            seg.targetId = s.id
+            seg.targetTy = s.ty
+            seg.next = segs.length + 1
+            segs.push(seg)
+            cur = mchek.emptyCSts()
+        } else if (s.k == mchek.csExpr() && s.hasE1 && s.e1.k == mchek.ceAwait()) {
+            let seg = new Segment()
+            seg.stmts = cur
+            seg.endKind = seAwait()
+            seg.endExpr = s.e1.kids[0]
+            seg.hasTarget = false
+            seg.targetId = 0
+            seg.targetTy = mchek.mkTy(mchek.tvVoid())
+            seg.next = segs.length + 1
+            segs.push(seg)
+            cur = mchek.emptyCSts()
+        } else if (s.k == mchek.csReturn() && s.hasE1 && s.retKind == mchek.rkPlain()) {
+            if (s.e1.k == mchek.ceAwait()) {
+                // `return await e` == await then resolve
+                let tmp = mgFreshVarId(g)
+                let seg = new Segment()
+                seg.stmts = cur
+                seg.endKind = seAwait()
+                seg.endExpr = s.e1.kids[0]
+                seg.hasTarget = true
+                seg.targetId = tmp
+                seg.targetTy = s.e1.ty
+                seg.next = segs.length + 1
+                segs.push(seg)
+                let seg2 = new Segment()
+                seg2.stmts = mchek.emptyCSts()
+                seg2.endKind = seResolve()
+                seg2.endExpr = null
+                seg2.hasTarget = false
+                seg2.targetId = tmp
+                seg2.targetTy = s.e1.ty
+                seg2.next = 0
+                segs.push(seg2)
+            } else {
+                let seg = new Segment()
+                seg.stmts = cur
+                seg.endKind = seRetExpr()
+                seg.endExpr = s.e1
+                seg.hasTarget = false
+                seg.targetId = 0
+                seg.targetTy = mchek.mkTy(mchek.tvVoid())
+                seg.next = 0
+                segs.push(seg)
+            }
+            stopped = true
+        } else if (s.k == mchek.csReturn() && s.hasE1 && s.retKind == mchek.rkFlatten()) {
+            // `return promiseExpr`: await the inner promise, then
+            // resolve our own promise with its value (JS flattening).
+            let inner = s.ty
+            let tmp = mgFreshVarId(g)
+            let seg = new Segment()
+            seg.stmts = cur
+            seg.endKind = seAwait()
+            seg.endExpr = s.e1
+            seg.hasTarget = true
+            seg.targetId = tmp
+            seg.targetTy = inner
+            seg.next = segs.length + 1
+            segs.push(seg)
+            let seg2 = new Segment()
+            seg2.stmts = mchek.emptyCSts()
+            seg2.endKind = seResolve()
+            seg2.endExpr = null
+            seg2.hasTarget = false
+            seg2.targetId = tmp
+            seg2.targetTy = inner
+            seg2.next = 0
+            segs.push(seg2)
+            stopped = true
+        } else if (s.k == mchek.csReturn() && !s.hasE1) {
+            let seg = new Segment()
+            seg.stmts = cur
+            seg.endKind = seRetVoid()
+            seg.endExpr = null
+            seg.hasTarget = false
+            seg.targetId = 0
+            seg.targetTy = mchek.mkTy(mchek.tvVoid())
+            seg.next = 0
+            segs.push(seg)
+            stopped = true
+        } else {
+            cur.push(s)
+        }
+        i = i + 1
+    }
+    if (!stopped) {
+        let seg = new Segment()
+        seg.stmts = cur
+        seg.endKind = seRetVoid()
+        seg.endExpr = null
+        seg.hasTarget = false
+        seg.targetId = 0
+        seg.targetTy = mchek.mkTy(mchek.tvVoid())
+        seg.next = 0
+        segs.push(seg)
+    }
+}
+
+// compile segments into a resume function; shared by gen_async_fn and the
+// async-listen lambda. entryName = name of the entry fn (resume target).
+function mgGenResumeInto(g: Gen, entryName: string, resumeName: string, segs: Array<Segment>, lret: Ty, innerTy: Ty): void {
+    mgPushFn(g, mgNewIrFn(resumeName, "void", ["ptr %fr", "i32 %st", "ptr %val"]))
+    g.curRet = cgVoid()
+
+    // pre-create segment blocks with stable labels
+    let vblock: Array<Int32> = []
+    let vHas: Array<bool> = []
+    let sblock: Array<Int32> = []
+    let k = 0
+    while (k < segs.length) {
+        if (k > 0) {
+            vblock.push(mgNewBlockFixed(g, `seg.${k}v`))
+            vHas.push(true)
+        } else {
+            vblock.push(0)
+            vHas.push(false)
+        }
+        sblock.push(mgNewBlockFixed(g, `seg.${k}`))
+        k = k + 1
+    }
+    // await targets: target of segment k-1 is materialized in segment k
+    let atIds: Array<Int32> = []
+    let atTys: Array<Ty> = []
+    let atHas: Array<bool> = []
+    k = 0
+    while (k < segs.length) {
+        let seg = segs[k]
+        if (seg.endKind == seAwait() && seg.hasTarget) {
+            atIds.push(seg.targetId)
+            atTys.push(seg.targetTy)
+            atHas.push(true)
+        } else {
+            atIds.push(0)
+            atTys.push(mchek.mkTy(mchek.tvVoid()))
+            atHas.push(false)
+        }
+        k = k + 1
+    }
+    k = 0
+    while (k < segs.length) {
+        let seg = segs[k]
+        if (k > 0) {
+            mgSwitchBlock(g, vblock[k])
+            if (atHas[k - 1]) {
+                mgMaterializeAwaitValue(g, atIds[k - 1], atTys[k - 1])
+            }
+            let sl = mgLabelOf(g, sblock[k])
+            mgTerm(g, `br label %${sl}`)
+        }
+        mgSwitchBlock(g, sblock[k])
+        g.scopes.push(mgNewScopeMap())
+        mgCgBody(g, seg.stmts)
+        if (!mgTerminated(g)) {
+            if (seg.endKind == seAwait()) {
+                let v = mgCgExpr(g, seg.endExpr)
+                v = mgToOwned(g, v)
+                mgEmit(g, `call void @marina_await(ptr ${v.ir}, ptr @${resumeName}, ptr %fr, i32 ${seg.next})`)
+                mgFlushPending(g)
+                mgTerm(g, "ret void")
+            } else if (seg.endKind == seRetExpr()) {
+                let v = mgCgExpr(g, seg.endExpr)
+                v = mgCoerceVal(g, v, cgTyOfTy(lret))
+                mgFinishAsync(g, true, v)
+            } else if (seg.endKind == seRetVoid()) {
+                mgFinishAsync(g, false, null)
+            } else {
+                // ResolveReturn
+                let ct = cgTyOfTy(seg.targetTy)
+                let slot = mgSlotFor(g, seg.targetId, ct)
+                let a = mgNewAccess(accFrame(), "", slot, ct)
+                let v = mgLoadAccess(g, a)
+                mgFinishAsync(g, true, mgNewVal(ct, v.ir, false))
+            }
+        }
+        mgPopScope(g)
+        k = k + 1
+    }
+
+    // switch on state in the prologue block
+    let sw = `switch i32 %st, label %${mgLabelOf(g, sblock[0])} [`
+    let j = 1
+    while (j < sblock.length) {
+        let vl = mgLabelOf(g, vblock[j])
+        sw = `${sw} i32 ${j}, label %${vl}`
+        j = j + 1
+    }
+    sw = `${sw} ]`
+    mgSwitchBlock(g, 0)
+    mgTerm(g, sw)
+}
+
+function mgGenAsyncFn(g: Gen, f: CFn): void {
+    let fname = `fn.${f.name}`
+    let body = f.body
+
+    // 1. transform into segments
+    let segs: Array<Segment> = []
+    mgTransform(g, body, segs)
+
+    // 2. frame layout: slot 0 = promise
+    let fty = `%frame.${fname}`
+    g.hasFrame = true
+    g.frame = mgNewFrameInfo(fty)
+    g.frame.slots.push(cgPromise())
+
+    // 3. entry function
+    let irParams: Array<string> = []
+    let i = 0
+    while (i < f.pids.length) {
+        irParams.push(`${cgIrOf(cgTyOfTy(f.ptys[i]))} %a${i}`)
+        i = i + 1
+    }
+    let entry = mgNewIrFn(fname, "ptr", irParams)
+    entry.hasFrame = true
+    entry.frameTy = fty
+    mgPushFn(g, entry)
+    g.curRet = cgPromise()
+    let pr = mgFresh(g, "pr")
+    mgEmit(g, `${pr} = call ptr @marina_promise_create()`)
+    let fracc = mgNewAccess(accFrame(), "", 0, cgPromise())
+    mgStoreAccess(g, fracc, pr, cgPromise())
+    i = 0
+    while (i < f.pids.length) {
+        let ct = cgTyOfTy(f.ptys[i])
+        let slot = mgSlotFor(g, f.pids[i], ct)
+        let gep = mgGepSsa(g, mgNewAccess(accFrame(), "", slot, ct))
+        mgEmit(g, `store ${cgIrOf(ct)} %a${i}, ptr ${gep}`)
+        i = i + 1
+    }
+    let rv = mgFresh(g, "rv")
+    mgEmit(g, `${rv} = call ptr @marina_retain(ptr ${pr})`)
+    mgEmit(g, `call void @${fname}.resume(ptr %fr, i32 0, ptr null)`)
+    mgTerm(g, `ret ptr ${rv}`)
+
+    // 4. resume function (state machine)
+    // inner return type: Promise(t) -> t, else void
+    let innerTy = mchek.mkTy(mchek.tvVoid())
+    if (f.ret.k == mchek.tvPromise()) {
+        innerTy = f.ret.elem
+    }
+    mgGenResumeInto(g, fname, `${fname}.resume`, segs, f.ret, innerTy)
+
+    // 5. emit the frame type def (slot count now final)
+    let slots = g.frame.slots
+    let tys: Array<string> = []
+    let j = 0
+    while (j < slots.length) {
+        tys.push(cgMemOf(slots[j]))
+        j = j + 1
+    }
+    let joined = ""
+    j = 0
+    while (j < tys.length) {
+        if (j > 0) {
+            joined = `${joined}, `
+        }
+        joined = `${joined}${tys[j]}`
+        j = j + 1
+    }
+    g.typeDefs.push(`${fty} = type { ${joined} }`)
+    g.hasFrame = false
+}
+
+// Materialize the awaited value (in `%val`) into `id`'s frame slot.
+function mgMaterializeAwaitValue(g: Gen, id: Int32, ty: Ty): void {
+    let ct = cgTyOfTy(ty)
+    let slot = mgSlotFor(g, id, ct)
+    let gep = mgGepSsa(g, mgNewAccess(accFrame(), "", slot, ct))
+    let vgep2 = mgMvField(g, "%val", 2)
+    let vgep3 = mgMvField(g, "%val", 3)
+    let vgep4 = mgMvField(g, "%val", 4)
+    if (ct == cgInt()) {
+        let l = mgFresh(g, "aw")
+        mgEmit(g, `${l} = load i64, ptr ${vgep2}`)
+        let t = mgFresh(g, "at")
+        mgEmit(g, `${t} = trunc i64 ${l} to i32`)
+        mgEmit(g, `store i32 ${t}, ptr ${gep}`)
+    } else if (ct == cgFloat()) {
+        let l = mgFresh(g, "aw")
+        mgEmit(g, `${l} = load double, ptr ${vgep3}`)
+        mgEmit(g, `store double ${l}, ptr ${gep}`)
+    } else if (ct == cgStr()) {
+        let l = mgFresh(g, "aw")
+        mgEmit(g, `${l} = load ptr, ptr ${vgep4}`)
+        let r = mgFresh(g, "ar")
+        mgEmit(g, `${r} = call ptr @marina_retain(ptr ${l})`)
+        mgEmit(g, `store ptr ${r}, ptr ${gep}`)
+    } else if (ct == cgBool()) {
+        let l = mgFresh(g, "aw")
+        mgEmit(g, `${l} = load i64, ptr ${vgep2}`)
+        let t = mgFresh(g, "at")
+        mgEmit(g, `${t} = trunc i64 ${l} to i1`)
+        let z = mgFresh(g, "az")
+        mgEmit(g, `${z} = zext i1 ${t} to i8`)
+        mgEmit(g, `store i8 ${z}, ptr ${gep}`)
+    } else if (ct == cgStream()) {
+        let l = mgFresh(g, "aw")
+        mgEmit(g, `${l} = load i64, ptr ${vgep2}`)
+        mgEmit(g, `store i64 ${l}, ptr ${gep}`)
+    } else if (ct == cgArray() || ct == cgObject() || ct == cgPromise() || ct == cgResolver()) {
+        // Reference values: the waiter task hands us a retained copy
+        // (marina_promise_resolve retains per waiter), so retain again
+        // for the frame slot — the slot releases it when the frame dies
+        // and run_waiter drops the task's copy. Stream values are plain
+        // integer handles (no payload to move).
+        let l = mgFresh(g, "aw")
+        mgEmit(g, `${l} = load ptr, ptr ${vgep4}`)
+        let r = mgFresh(g, "ar")
+        mgEmit(g, `${r} = call ptr @marina_retain(ptr ${l})`)
+        mgEmit(g, `store ptr ${r}, ptr ${gep}`)
+    }
+}
+
+// An `async (req, res) => { ... }` route handler compiles to:
+//   * `lambda.N` — the Listen-ABI shim the runtime registers; returns
+//     the handler's promise,
+//   * `lambda.N.async` — state machine entry: creates the promise,
+//     copies captures + (req, res) into the frame, runs segment 0,
+//   * `lambda.N.async.resume` — continuations after each await,
+//   * `lambda.N.drop` — env cleanup (unchanged).
+function mgGenAsyncListenLambda(g: Gen, li: Int32): void {
+    let lam = g.c.lambdas[li]
+    let lret = lam.ret
+    let captures = mgLambdaSlots(g, li) // Listen ABI: captures only
+    let lamPids = lam.pids
+    let lamPtys = lam.ptys
+    let body = lam.body
+    let fty = `%frame.lambda.${li}`
+    let entryName = `lambda.${li}.async`
+
+    // ---- 1. shim: the runtime calls this; it returns the promise ----
+    mgPushFn(g, mgNewIrFn(`lambda.${li}`, "ptr", ["ptr %env", "ptr %req", "ptr %res"]))
+    g.curRet = cgPromise()
+    let sp = mgFresh(g, "sp")
+    mgEmit(g, `${sp} = call ptr @${entryName}(ptr %env, ptr %req, ptr %res)`)
+    mgTerm(g, `ret ptr ${sp}`)
+
+    // ---- 2. state machine frame ----
+    g.hasFrame = true
+    g.frame = mgNewFrameInfo(fty)
+    g.frame.slots.push(cgPromise())
+    let envTy = mgEnvTypeDef(g, li)
+    g.hasEnv = true
+    g.env = mgNewEnvInfo(envTy)
+    let ci = 0
+    while (ci < captures.length) {
+        g.env.slotTys.push(cgTyOfTy(captures[ci].ty))
+        g.env.ids.push(captures[ci].id)
+        g.env.idxs.push(ci)
+        ci = ci + 1
+    }
+
+    // ---- 3. entry: create promise + frame, unpack, run segment 0 ----
+    let entry = mgNewIrFn(entryName, "ptr", ["ptr %env", "ptr %req", "ptr %res"])
+    entry.hasFrame = true
+    entry.frameTy = fty
+    mgPushFn(g, entry)
+    g.curRet = cgPromise()
+    let pr = mgFresh(g, "pr")
+    mgEmit(g, `${pr} = call ptr @marina_promise_create()`)
+    let fracc = mgNewAccess(accFrame(), "", 0, cgPromise())
+    mgStoreAccess(g, fracc, pr, cgPromise())
+    // captures: the env owns its refs; the frame gets its own (retained)
+    ci = 0
+    while (ci < captures.length) {
+        let ct = cgTyOfTy(captures[ci].ty)
+        let slot = mgSlotFor(g, captures[ci].id, ct)
+        let gep = mgGepSsa(g, mgNewAccess(accFrame(), "", slot, ct))
+        let egep = mgGepSsa(g, mgNewAccess(accEnv(), "", ci, ct))
+        if (cgIsPtr(ct)) {
+            let v = mgFresh(g, "cv")
+            mgEmit(g, `${v} = load ptr, ptr ${egep}`)
+            let r = mgFresh(g, "cr")
+            mgEmit(g, `${r} = call ptr @marina_retain(ptr ${v})`)
+            mgEmit(g, `store ptr ${r}, ptr ${gep}`)
+        } else {
+            let v = mgFresh(g, "cv")
+            mgEmit(g, `${v} = load ${cgIrOf(ct)}, ptr ${egep}`)
+            mgEmit(g, `store ${cgIrOf(ct)} ${v}, ptr ${gep}`)
+        }
+        ci = ci + 1
+    }
+    // Listen-ABI params arrive as pointers to MValues (rc 1 handed over)
+    let pi = 0
+    while (pi < lamPids.length) {
+        let ct = cgTyOfTy(lamPtys[pi])
+        let slot = mgSlotFor(g, lamPids[pi], ct)
+        let gep = mgGepSsa(g, mgNewAccess(accFrame(), "", slot, ct))
+        let src = "%req"
+        if (pi == 1) {
+            src = "%res"
+        }
+        mgStoreFromMv(g, src, ct, gep)
+        pi = pi + 1
+    }
+    let rv = mgFresh(g, "rv")
+    mgEmit(g, `${rv} = call ptr @marina_retain(ptr ${pr})`)
+    mgEmit(g, `call void @${entryName}.resume(ptr %fr, i32 0, ptr null)`)
+    mgTerm(g, `ret ptr ${rv}`)
+
+    // ---- 4. resume: continuations (mirrors gen_async_fn) ----
+    let segs: Array<Segment> = []
+    mgTransform(g, body, segs)
+    mgGenResumeInto(g, entryName, `${entryName}.resume`, segs, lret, lret)
+
+    let slots = g.frame.slots
+    let tys: Array<string> = []
+    let j = 0
+    while (j < slots.length) {
+        tys.push(cgMemOf(slots[j]))
+        j = j + 1
+    }
+    let joined = ""
+    j = 0
+    while (j < tys.length) {
+        if (j > 0) {
+            joined = `${joined}, `
+        }
+        joined = `${joined}${tys[j]}`
+        j = j + 1
+    }
+    g.typeDefs.push(`${fty} = type { ${joined} }`)
+    g.hasFrame = false
+
+    // ---- 5. drop function (env cleanup, same as sync lambdas) ----
+    mgPushFn(g, mgNewIrFn(`lambda.${li}.drop`, "void", ["ptr %env"]))
+    g.hasEnv = true
+    g.env = mgNewEnvInfo(envTy)
+    let dj = 0
+    while (dj < captures.length) {
+        g.env.slotTys.push(cgTyOfTy(captures[dj].ty))
+        g.env.ids.push(captures[dj].id)
+        g.env.idxs.push(dj)
+        dj = dj + 1
+    }
+    dj = 0
+    while (dj < captures.length) {
+        let ct = cgTyOfTy(captures[dj].ty)
+        if (cgIsPtr(ct)) {
+            let gep = mgGepSsa(g, mgNewAccess(accEnv(), "", dj, ct))
+            let v = mgFresh(g, "dl")
+            mgEmit(g, `${v} = load ptr, ptr ${gep}`)
+            mgEmit(g, `call void @marina_release(ptr ${v})`)
+        }
+        dj = dj + 1
+    }
+    mgEmit(g, "call void @marina_closure_free(ptr %env)")
+    mgTerm(g, "ret void")
+    g.hasEnv = false
+}
+
+// ---------------------------------------------------------------------------
+// Program entry point
+// ---------------------------------------------------------------------------
+
+function mgGenMain(g: Gen): void {
+    mgPushFn(g, mgNewIrFn("main", "i32", []))
+    mgEmit(g, "call void @marina_event_loop_start()")
+    // register class metadata (name + field names) so the runtime can
+    // print objects and keep classes self-describing
+    let id = 0
+    while (id < g.c.classes.length) {
+        let def = g.c.classes[id]
+        let bytes: Array<Int32> = []
+        let n = 0
+        while (n < def.name.length) {
+            bytes.push(def.name.charAt(n))
+            n = n + 1
+        }
+        bytes.push(0)
+        let fi = 0
+        while (fi < def.fnames.length) {
+            let fname = def.fnames[fi]
+            let m = 0
+            while (m < fname.length) {
+                bytes.push(fname.charAt(m))
+                m = m + 1
+            }
+            bytes.push(0)
+            fi = fi + 1
+        }
+        let l = bytes.length
+        let gname = `@.classmeta.${id}`
+        g.globals.push(`${gname} = private constant [${l} x i8] c"${mgEscapeBytes(bytes)}", align 8`)
+        mgEmit(g, `call void @marina_class_register(i32 ${id}, ptr getelementptr inbounds ([${l} x i8], ptr ${gname}, i64 0, i64 0), i64 ${l})`)
+        id = id + 1
+    }
+    if (g.c.hasToplevel) {
+        mgEmit(g, "call void @fn.__toplevel()")
+    }
+    if (g.c.hasSyncMain && !g.c.explicitMain) {
+        let rty = cgVoid()
+        let sig = mgSigOf(g, "main")
+        let hasSig = false
+        let si = 0
+        while (si < g.sigNames.length) {
+            if (g.sigNames[si] == "main") {
+                hasSig = true
+                si = g.sigNames.length
+            } else {
+                si = si + 1
+            }
+        }
+        if (hasSig) {
+            rty = sig.ret
+        }
+        mgEmit(g, `call ${cgIrOf(rty)} @fn.main()`)
+    }
+    if (g.c.hasAsyncMain && !g.c.explicitMain) {
+        let mp = mgFresh(g, "mp")
+        mgEmit(g, `${mp} = call ptr @fn.main()`)
+        mgEmit(g, `call void @marina_release(ptr ${mp})`)
+    }
+    let r = mgFresh(g, "mr")
+    mgEmit(g, `${r} = call i32 @marina_event_loop_run()`)
+    mgTerm(g, `ret i32 ${r}`)
+}
+
+// ---------------------------------------------------------------------------
+// Module rendering
+// ---------------------------------------------------------------------------
+
+const MG_DECLARES = `declare ptr @marina_frame_alloc(i64)
+declare void @marina_frame_free(ptr)
+declare ptr @marina_promise_create()
+declare void @marina_promise_resolve(ptr, ptr)
+declare void @marina_await(ptr, ptr, ptr, i32)
+declare ptr @marina_promise_run_executor(ptr, ptr, ptr, ptr)
+declare void @marina_set_timeout(ptr, ptr, ptr, i64)
+declare ptr @marina_closure_alloc(i64)
+declare void @marina_closure_free(ptr)
+declare ptr @marina_retain(ptr)
+declare void @marina_release(ptr)
+declare ptr @marina_string_literal(ptr, i64)
+declare ptr @marina_string_concat(ptr, ptr)
+declare i64 @marina_string_len(ptr)
+declare i64 @marina_string_charcode_at(ptr, i64)
+declare ptr @marina_string_substring(ptr, i64, i64)
+declare ptr @marina_args()
+declare ptr @marina_to_string(ptr)
+declare void @marina_print(ptr)
+declare ptr @marina_array_new(i32)
+declare i64 @marina_array_len(ptr)
+declare i64 @marina_array_push(ptr, ptr)
+declare void @marina_array_pop(ptr, ptr)
+declare void @marina_array_shift(ptr, ptr)
+declare i64 @marina_array_unshift(ptr, ptr)
+declare void @marina_array_get(ptr, i64, ptr)
+declare void @marina_array_set(ptr, i64, ptr)
+declare ptr @marina_array_splice(ptr, i64, i64)
+declare ptr @marina_array_slice(ptr, i64, i64)
+declare ptr @marina_array_concat(ptr, ptr)
+declare ptr @marina_array_join(ptr, ptr)
+declare ptr @marina_array_reverse(ptr)
+declare ptr @marina_array_sort(ptr)
+declare void @marina_array_foreach(ptr, ptr, ptr, ptr)
+declare ptr @marina_array_map(ptr, ptr, ptr, ptr, i32)
+declare ptr @marina_array_filter(ptr, ptr, ptr, ptr)
+declare void @marina_array_reduce(ptr, ptr, ptr, ptr, ptr, ptr)
+declare void @marina_class_register(i32, ptr, i64)
+declare ptr @marina_object_new(i32, i64)
+declare void @marina_object_get(ptr, i64, ptr)
+declare void @marina_object_set(ptr, i64, ptr)
+declare void @marina_object_get_field(ptr, ptr, ptr)
+declare void @marina_object_set_field(ptr, ptr, ptr)
+declare void @marina_fs_read_file(ptr, ptr)
+declare void @marina_fs_write_file(ptr, ptr)
+declare void @marina_fs_exists(ptr, ptr)
+declare void @marina_fs_read_dir(ptr, ptr)
+declare void @marina_fs_mkdir(ptr, ptr)
+declare void @marina_fs_remove(ptr, ptr)
+declare void @marina_crypto_sha256(ptr, ptr)
+declare void @marina_crypto_base64(i1, ptr, ptr)
+declare void @marina_crypto_random_hex(i64, ptr)
+declare void @marina_crypto_uuid(ptr)
+declare void @marina_net_connect(ptr, ptr, ptr)
+declare void @marina_net_write(ptr, ptr)
+declare void @marina_net_read_all(ptr, ptr)
+declare void @marina_net_close(ptr)
+declare i1 @marina_str_eq(ptr, ptr)
+declare void @marina_http_request(ptr, ptr, ptr, ptr, i32)
+declare void @marina_http_listen(ptr, ptr, ptr, ptr, i32, i32)
+declare void @marina_http_res_send(ptr, ptr)
+declare void @marina_http_res_json(ptr, ptr)
+declare void @marina_http_router_bind(ptr, ptr)
+declare void @marina_http_route_add(ptr, ptr, ptr, ptr, ptr, ptr)
+declare void @marina_http_server_listen(ptr, ptr, ptr, i32, i32)
+declare void @marina_http_validator_init(ptr, ptr)
+declare void @marina_http_field_init(ptr, i32)
+declare void @marina_http_field_op(ptr, i32, ptr)
+declare void @marina_http_validate(ptr, ptr, i32, ptr)
+declare void @marina_sql_open(ptr, ptr, i32, ptr)
+declare void @marina_sql_execute(ptr, ptr, i64, ptr, i32, ptr)
+declare void @marina_sql_query(ptr, ptr, i64, ptr, ptr)
+declare void @marina_sql_close(ptr)
+declare ptr @marina_sql_execute_async(ptr, ptr, i64, ptr, i32)
+declare ptr @marina_sql_query_async(ptr, ptr, i64, ptr)
+declare ptr @marina_fs_read_file_async(ptr)
+declare ptr @marina_fs_write_file_async(ptr, ptr)
+declare ptr @marina_fs_exists_async(ptr)
+declare ptr @marina_fs_read_dir_async(ptr)
+declare ptr @marina_fs_mkdir_async(ptr)
+declare ptr @marina_fs_remove_async(ptr)
+declare ptr @marina_net_connect_async(ptr, ptr)
+declare ptr @marina_net_write_async(ptr, ptr)
+declare ptr @marina_net_read_all_async(ptr)
+declare ptr @marina_net_close_async(ptr)
+declare ptr @marina_http_request_async(ptr, ptr, ptr, i32)
+declare void @marina_event_loop_start()
+declare i32 @marina_event_loop_run()`
+
+// render one IR function into the output lines
+function mgRenderFn(f: IrFn, out: Array<string>): void {
+    let params = ""
+    let i = 0
+    while (i < f.params.length) {
+        if (i > 0) {
+            params = `${params}, `
+        }
+        params = `${params}${f.params[i]}`
+        i = i + 1
+    }
+    out.push(`define ${f.ret} @${f.name}(${params}) {`)
+    let b0 = f.blocks[0]
+    out.push(`${b0.label}:`)
+    if (f.hasFrame) {
+        out.push(`  %fr = call ptr @marina_frame_alloc(i64 ptrtoint (ptr getelementptr inbounds (${f.frameTy}, ptr null, i64 1) to i64))`)
+    }
+    let ai = 0
+    while (ai < f.allocas.length) {
+        out.push(`  ${f.allocas[ai]}`)
+        ai = ai + 1
+    }
+    let ii = 0
+    while (ii < b0.lines.length) {
+        out.push(`  ${b0.lines[ii]}`)
+        ii = ii + 1
+    }
+    out.push(`  ${b0.term}`)
+    let bi = 1
+    while (bi < f.blocks.length) {
+        let b = f.blocks[bi]
+        out.push("")
+        out.push(`${b.label}:`)
+        let jj = 0
+        while (jj < b.lines.length) {
+            out.push(`  ${b.lines[jj]}`)
+            jj = jj + 1
+        }
+        out.push(`  ${b.term}`)
+        bi = bi + 1
+    }
+    out.push("}")
+    out.push("")
+}
+
+function mgRender(g: Gen): string {
+    let out: Array<string> = []
+    out.push("; ModuleID = 'marina'")
+    out.push("; generated by the marina compiler v0.1")
+    out.push("")
+    out.push("%mv = type { i32, i32, i64, double, ptr }")
+    out.push("")
+    let i = 0
+    while (i < g.typeDefs.length) {
+        out.push(g.typeDefs[i])
+        i = i + 1
+    }
+    if (g.typeDefs.length > 0) {
+        out.push("")
+    }
+    i = 0
+    while (i < g.globals.length) {
+        out.push(g.globals[i])
+        i = i + 1
+    }
+    if (g.globals.length > 0) {
+        out.push("")
+    }
+    // DECLARES is emitted as one blob with a trailing blank line
+    out.push(MG_DECLARES)
+    out.push("")
+    i = 0
+    while (i < g.fns.length) {
+        mgRenderFn(g.fns[i], out)
+        i = i + 1
+    }
+    out.push("")
+    return out.join("\n")
+}
+
+// ---------------------------------------------------------------------------
+// Entry point
+// ---------------------------------------------------------------------------
+
+function generate(c: ChkResult): string {
+    let g = mgNewGen(c)
+    let i = 0
+    while (i < c.fns.length) {
+        let f = c.fns[i]
+        let s = new Sig2()
+        s.ret = cgTyOfTy(f.ret)
+        s.ptys = []
+        let j = 0
+        while (j < f.ptys.length) {
+            s.ptys.push(cgTyOfTy(f.ptys[j]))
+            j = j + 1
+        }
+        s.isAsync = f.isAsync
+        mgInsertSig(g, f.name, s)
+        i = i + 1
+    }
+    // top-level code runs first AND declares its variables as globals, so it
+    // must be generated before the lambdas and functions that reference those
+    // variables (lambda bodies read top-level vars through the globals)
+    if (c.hasToplevel) {
+        g.toplevelGen = true
+        mgGenSyncFnInto(g, "fn.__toplevel", mast.emptyInts(), mchek.emptyTys(), mchek.mkTy(mchek.tvVoid()), c.toplevel)
+        g.toplevelGen = false
+    }
+    i = 0
+    while (i < c.lambdas.length) {
+        mgGenLambda(g, i)
+        i = i + 1
+    }
+    i = 0
+    while (i < c.fns.length) {
+        let f = c.fns[i]
+        if (f.isAsync) {
+            mgGenAsyncFn(g, f)
+        } else {
+            mgGenSyncFn(g, f)
+        }
+        i = i + 1
+    }
+    mgGenMain(g)
+    return mgRender(g)
+}

@@ -1,0 +1,50 @@
+// comp.tsm — self-hosted marina compiler driver.
+//
+// Usage: comp <file.tsm>
+// Lexes, parses, checks and generates LLVM IR for the given source file,
+// writing the result to ./out.ll (diff against the Rust compiler's .ll).
+//
+//   WAVE_REGISTRY=selfhost/registry cargo run -q -p wave -- build selfhost/comp.tsm
+//   ./.marina/comp examples/hello-world.tsm
+//   diff out.ll .marina/hello-world.ll
+
+use malex
+use mpars
+use mchek
+use mgen
+use fs
+
+async function run(args: Array<string>): void {
+    if (args.length < 1) {
+        console.log(`usage: comp <file.tsm>`)
+        return
+    }
+    let path = args[0]
+    let src = await fs.readFile(path)
+    let lr = malex.lex(src)
+    if (!lr.ok) {
+        console.log(`LEXERR ${lr.msg} @${lr.line}:${lr.col}`)
+        return
+    }
+    let pr = mpars.parse(lr.toks)
+    if (!pr.ok) {
+        console.log(`PARSEERR ${pr.msg} @${pr.line}:${pr.col}`)
+        return
+    }
+    let r = mchek.ckCheck(pr.prog)
+    if (!r.ok) {
+        let di = 0
+        while (di < r.msgs.length) {
+            let d = r.msgs[di]
+            console.log(`DIAG ${d.msg} @${d.line}:${d.col}`)
+            di = di + 1
+        }
+        return
+    }
+    let ll = mgen.generate(r)
+    await fs.writeFile("./out.ll", ll)
+}
+
+function main(args: Array<string>): void {
+    run(args)
+}

@@ -1,0 +1,1204 @@
+// mgen — LLVM IR code generator for the self-hosted marina compiler
+// (port of crates/marina/src/codegen.rs).
+//
+// Emits textual LLVM IR (.ll). Every `async` function is lowered to:
+//   * `@fn.<name>`           — entry: allocates a frame + promise, runs state 0
+//   * `@fn.<name>.resume`    — state machine: one block per continuation
+//
+// Rust enums become kind-tag Int32 constants; HashMaps become parallel
+// arrays with linear scans; multi-value returns become small result classes.
+
+use mast
+use malex
+use mchek
+
+// ---------------------------------------------------------------------------
+// CgTy
+// ---------------------------------------------------------------------------
+
+function cgVoid(): Int32 { return 0 }
+function cgInt(): Int32 { return 1 }
+function cgFloat(): Int32 { return 2 }
+function cgBool(): Int32 { return 3 }
+function cgStr(): Int32 { return 4 }
+function cgPromise(): Int32 { return 5 }
+function cgResolver(): Int32 { return 6 }
+function cgArray(): Int32 { return 7 }
+function cgObject(): Int32 { return 8 }
+function cgStream(): Int32 { return 9 }
+
+function cgIrOf(k: Int32): string {
+    if (k == cgVoid()) { return "void" }
+    if (k == cgInt()) { return "i32" }
+    if (k == cgFloat()) { return "double" }
+    if (k == cgBool()) { return "i1" }
+    if (k == cgStream()) { return "i64" }
+    return "ptr"
+}
+
+// Type used for memory slots (allocas / frame / env fields).
+function cgMemOf(k: Int32): string {
+    if (k == cgBool()) { return "i8" }
+    return cgIrOf(k)
+}
+
+function cgIsPtr(k: Int32): bool {
+    return k == cgStr() || k == cgPromise() || k == cgResolver() || k == cgArray() || k == cgObject()
+}
+
+// CgTy of a checked type.
+function cgTyOfTy(t: Ty): Int32 {
+    if (t.k == mchek.tvVoid()) { return cgVoid() }
+    if (t.k == mchek.tvInt()) { return cgInt() }
+    if (t.k == mchek.tvFloat()) { return cgFloat() }
+    if (t.k == mchek.tvBool()) { return cgBool() }
+    if (t.k == mchek.tvStr()) { return cgStr() }
+    if (t.k == mchek.tvPromise()) { return cgPromise() }
+    if (t.k == mchek.tvResolver()) { return cgResolver() }
+    if (t.k == mchek.tvArray()) { return cgArray() }
+    if (t.k == mchek.tvObject()) { return cgObject() }
+    if (t.k == mchek.tvIface()) { return cgObject() }
+    return cgStream()
+}
+
+// MValue tag for a checked type (used when creating arrays / map results).
+function cgMvTagOfTy(t: Ty): Int32 {
+    let k = cgTyOfTy(t)
+    if (k == cgInt()) { return 1 }
+    if (k == cgFloat()) { return 2 }
+    if (k == cgStr()) { return 3 }
+    if (k == cgBool()) { return 4 }
+    if (k == cgArray()) { return 5 }
+    if (k == cgObject()) { return 6 }
+    if (k == cgStream()) { return 7 }
+    return 1
+}
+
+function cgDefaultValue(k: Int32): string {
+    if (k == cgInt()) { return "0" }
+    if (k == cgFloat()) { return "0.0" }
+    if (k == cgBool()) { return "false" }
+    if (k == cgStream()) { return "0" }
+    if (k == cgVoid()) { return "void" }
+    return "null"
+}
+
+// ---------------------------------------------------------------------------
+// Float formatting: reproduce Rust `{:?}` (Debug) for f64.
+//
+// Doubles are dyadic rationals. We recover the EXACT decimal digits:
+//   value = M * 2^k'  (M a 53-bit integer)
+//   k' >= 0: digits of N = M * 2^k' (an exact integer)
+//   k' <  0: digits of N = M * 5^(-k'); value = N / 10^(-k')
+// Bignums are little-endian base-1000 limb arrays (Int32 arithmetic stays
+// well below 2^31). Shortest-round-trip digits are found by trying d = 1..17
+// and parsing the candidate back with the same hand parser malex uses for
+// literals, so `parse(fmt(f)) == f` is self-consistent with the checker.
+// ---------------------------------------------------------------------------
+
+// floor(x) for x in [lo, hi+1) with lo/hi Int32, via binary search
+function mgFloorRange(x: Float64, lo: Int32, hi: Int32): Int32 {
+    let a = lo
+    let b = hi
+    while (a < b) {
+        let mid = (a + b + 1) / 2
+        if (x >= mid * 1.0) {
+            a = mid
+        } else {
+            b = mid - 1
+        }
+    }
+    return a
+}
+
+// bignum: little-endian base-1000 limbs
+function mgBnNew(): Array<Int32> {
+    let a: Array<Int32> = []
+    a.push(0)
+    return a
+}
+
+// in-place: a = a * m + add   (m < 2^21, add < 2^21; base 1000 keeps
+// limb*mul + carry <= 999*2097152 + 2097151 < 2^31)
+function mgBnMulAdd(a: Array<Int32>, m: Int32, add: Int32): void {
+    let carry = add
+    let i = 0
+    while (i < a.length) {
+        let t = a[i] * m + carry
+        a[i] = t % 1000
+        carry = t / 1000
+        i++
+    }
+    while (carry > 0) {
+        a.push(carry % 1000)
+        carry = carry / 1000
+    }
+    // strip top zero limbs
+    let top = a.length - 1
+    while (top > 0) {
+        if (a[top] == 0) {
+            a.pop()
+            top = top - 1
+        } else {
+            top = 0
+        }
+    }
+}
+
+// in-place: a = a * small  (small = 2 or 5)
+function mgBnMulSmall(a: Array<Int32>, small: Int32): void {
+    mgBnMulAdd(a, small, 0)
+}
+
+function mgBnToString(a: Array<Int32>): string {
+    let out = `${a[a.length - 1]}`
+    let i = a.length - 2
+    while (i >= 0) {
+        let d = a[i]
+        if (d < 10) {
+            out = `${out}00${d}`
+        } else if (d < 100) {
+            out = `${out}0${d}`
+        } else {
+            out = `${out}${d}`
+        }
+        i = i - 1
+    }
+    return out
+}
+
+class MgdCand {
+    s: string
+    e: Int32
+}
+
+function mgNewCand(s: string, e: Int32): MgdCand {
+    let c = new MgdCand()
+    c.s = s
+    c.e = e
+    return c
+}
+
+// digits of |f|: significant decimal digits (no leading zeros) and exponent
+// e, such that the value is d1.d2..dn x 10^e
+class MgdDigits {
+    digits: string
+    e: Int32
+}
+
+function mgNewDigits(): MgdDigits {
+    let d = new MgdDigits()
+    d.digits = ""
+    d.e = 0
+    return d
+}
+
+function mgDigitsOf(a: Float64): MgdDigits {
+    let res = mgNewDigits()
+    // normalize: a = m * 2^k with m in [1, 2)
+    let k = 0
+    let m = a
+    while (m >= 2.0) {
+        m = m / 2.0
+        k = k + 1
+    }
+    while (m < 1.0) {
+        m = m * 2.0
+        k = k - 1
+    }
+    // M = m * 2^52 (exact double), so a = M * 2^(k-52)
+    let M = m * 4503599627370496.0
+    // decompose M into Int32 chunks of 21 bits: M = hi*2^42 + mid*2^21 + lo
+    let hi = mgFloorRange(M / 4398046511104.0, 1024, 2047)
+    let rem1 = M - hi * 4398046511104.0
+    let mid = mgFloorRange(rem1 / 2097152.0, 0, 2097151)
+    let lo = mgFloorRange(rem1 - mid * 2097152.0, 0, 2097151)
+    let bn = mgBnNew()
+    mgBnMulAdd(bn, 2097152, hi)
+    mgBnMulAdd(bn, 2097152, mid)
+    mgBnMulAdd(bn, 2097152, lo)
+    let kp = k - 52
+    let shift = 0
+    if (kp >= 0) {
+        let i = 0
+        while (i < kp) {
+            mgBnMulSmall(bn, 2)
+            i++
+        }
+    } else {
+        shift = -kp
+        let i = 0
+        while (i < shift) {
+            mgBnMulSmall(bn, 5)
+            i++
+        }
+    }
+    let full = mgBnToString(bn)
+    // value = full / 10^shift (no leading zeros: M >= 2^52)
+    res.digits = full
+    res.e = full.length - shift - 1
+    return res
+}
+
+// Render digits + exponent in Rust Debug style.
+function mgDebugText(s: string, e: Int32): string {
+    if (e >= -4 && e <= 15) {
+        if (e >= 0) {
+            let intLen = e + 1
+            let intPart = ""
+            let frac = ""
+            if (s.length >= intLen) {
+                intPart = s.substring(0, intLen)
+                frac = s.substring(intLen, s.length)
+            } else {
+                intPart = s
+                let z = intLen - s.length
+                let i = 0
+                while (i < z) {
+                    intPart = `${intPart}0`
+                    i++
+                }
+            }
+            if (frac.length == 0) {
+                frac = "0"
+            }
+            return `${intPart}.${frac}`
+        }
+        let zeros = -e - 1
+        let zstr = ""
+        let i = 0
+        while (i < zeros) {
+            zstr = `${zstr}0`
+            i++
+        }
+        return `0.${zstr}${s}`
+    }
+    let fracPart = ""
+    if (s.length > 1) {
+        fracPart = `.${s.substring(1, s.length)}`
+    }
+    return `${s.substring(0, 1)}${fracPart}e${e}`
+}
+
+// round the digit string up at position d (keep d digits): "1999" d=1 -> "2"
+// (with exponent bumped when all kept digits carry over)
+function mgRoundUp(full: string, d: Int32, e: Int32): MgdCand {
+    let ds = full.substring(0, d)
+    let bytes: Array<Int32> = []
+    let i = 0
+    while (i < ds.length) {
+        bytes.push(ds.charAt(i))
+        i++
+    }
+    let pos = d - 1
+    let carry = 1
+    while (pos >= 0 && carry > 0) {
+        let v = bytes[pos] - 48 + 1
+        if (v >= 10) {
+            bytes[pos] = 48
+            pos = pos - 1
+        } else {
+            bytes[pos] = 48 + v
+            carry = 0
+        }
+    }
+    let s = ""
+    if (carry > 0) {
+        s = "1"
+        let j = 0
+        while (j < d) {
+            s = `${s}0`
+            j++
+        }
+        return mgNewCand(s, e + 1)
+    }
+    let j2 = 0
+    while (j2 < bytes.length) {
+        s = `${s}${String.fromCharCode(bytes[j2])}`
+        j2++
+    }
+    return mgNewCand(s, e)
+}
+
+// shortest-round-trip Debug representation of a non-negative, finite,
+// non-zero double a (digits = its exact decimal digit string)
+function mgShortest(a: Float64, digits: MgdDigits): string {
+    let full = digits.digits
+    let e = digits.e
+    let found = false
+    let result = ""
+    let d = 1
+    while (d <= 17 && d <= full.length && !found) {
+        // candidate rounding UP (only when the next digit is >= 5)
+        if (d < full.length) {
+            if (full.charAt(d) >= 53) {
+                let up = mgRoundUp(full, d, e)
+                let txt = mgDebugText(up.s, up.e)
+                if (malex.parseFloatHand(txt) == a) {
+                    result = txt
+                    found = true
+                }
+            }
+        }
+        if (!found) {
+            let down = full.substring(0, d)
+            let txt2 = mgDebugText(down, e)
+            if (malex.parseFloatHand(txt2) == a) {
+                result = txt2
+                found = true
+            }
+        }
+        d = d + 1
+    }
+    if (!found) {
+        // last resort: keep 17 digits
+        let n = full.length
+        if (n > 17) {
+            n = 17
+        }
+        result = mgDebugText(full.substring(0, n), e)
+    }
+    return result
+}
+
+// Rust `{:?}` for f64
+function mgFmtFloat(f: Float64): string {
+    if (f != f) {
+        return "NaN"
+    }
+    if (f == 1.0 / 0.0) {
+        return "inf"
+    }
+    if (f == -1.0 / 0.0) {
+        return "-inf"
+    }
+    if (f == 0.0) {
+        let inv = 1.0 / f
+        if (inv < 0.0) {
+            return "-0.0"
+        }
+        return "0.0"
+    }
+    let neg = false
+    let a = f
+    if (f < 0.0) {
+        neg = true
+        a = -f
+    }
+    let txt = mgShortest(a, mgDigitsOf(a))
+    if (neg) {
+        return `-${txt}`
+    }
+    return txt
+}
+
+// ---------------------------------------------------------------------------
+// escape_ir_string (byte-oriented; marina strings are byte-indexed)
+// ---------------------------------------------------------------------------
+
+function mgHex2(b: Int32): string {
+    const hex = "0123456789ABCDEF"
+    let hi = b / 16
+    let lo = b % 16
+    return `\\${hex.substring(hi, hi + 1)}${hex.substring(lo, lo + 1)}`
+}
+
+function mgEscapeIrString(s: string): string {
+    let out = ""
+    let i = 0
+    while (i < s.length) {
+        let b = s.charAt(i)
+        if (b >= 32 && b <= 126 && b != 34 && b != 92) {
+            out = `${out}${s.substring(i, i + 1)}`
+        } else {
+            out = `${out}${mgHex2(b)}`
+        }
+        i = i + 1
+    }
+    return out
+}
+
+// escape a byte array (class metadata: name + NUL + field names + NUL)
+function mgEscapeBytes(arr: Array<Int32>): string {
+    let out = ""
+    let i = 0
+    while (i < arr.length) {
+        let b = arr[i]
+        if (b >= 32 && b <= 126 && b != 34 && b != 92) {
+            out = `${out}${String.fromCharCode(b)}`
+        } else {
+            out = `${out}${mgHex2(b)}`
+        }
+        i = i + 1
+    }
+    return out
+}
+
+// ---------------------------------------------------------------------------
+// Codegen types
+// ---------------------------------------------------------------------------
+
+class CgVal {
+    ty: Int32
+    ir: string
+    owned: bool
+}
+
+function mgNewVal(ty: Int32, ir: string, owned: bool): CgVal {
+    let v = new CgVal()
+    v.ty = ty
+    v.ir = ir
+    v.owned = owned
+    return v
+}
+
+// access kinds
+function accAlloca(): Int32 { return 0 }
+function accFrame(): Int32 { return 1 }
+function accEnv(): Int32 { return 2 }
+function accGlobal(): Int32 { return 3 }
+
+class Access {
+    kind: Int32
+    p: string     // alloca/global name
+    idx: Int32    // frame/env slot
+    ty: Int32
+}
+
+function mgNewAccess(kind: Int32, p: string, idx: Int32, ty: Int32): Access {
+    let a = new Access()
+    a.kind = kind
+    a.p = p
+    a.idx = idx
+    a.ty = ty
+    return a
+}
+
+class LamSlot {
+    id: Int32
+    ty: Ty
+}
+
+// insertion-ordered id -> Access map (release order must be deterministic)
+class ScopeMap {
+    ids: Array<Int32>
+    accs: Array<Access>
+}
+
+function mgNewScopeMap(): ScopeMap {
+    let s = new ScopeMap()
+    s.ids = mast.emptyInts()
+    s.accs = []
+    return s
+}
+
+function mgScopeInsert(sc: ScopeMap, id: Int32, a: Access): void {
+    let i = 0
+    while (i < sc.ids.length) {
+        if (sc.ids[i] == id) {
+            let accs = sc.accs
+            accs[i] = a
+            return
+        }
+        i = i + 1
+    }
+    sc.ids.push(id)
+    sc.accs.push(a)
+}
+
+function mgScopeGet(sc: ScopeMap, id: Int32): Access {
+    let i = 0
+    while (i < sc.ids.length) {
+        if (sc.ids[i] == id) {
+            return sc.accs[i]
+        }
+        i = i + 1
+    }
+    return null
+}
+
+class IrBlock {
+    label: string
+    lines: Array<string>
+    term: string
+    hasTerm: bool
+}
+
+function mgNewIrBlock(label: string): IrBlock {
+    let b = new IrBlock()
+    b.label = label
+    b.lines = []
+    b.term = ""
+    b.hasTerm = false
+    return b
+}
+
+class IrFn {
+    name: string
+    ret: string
+    params: Array<string>
+    allocas: Array<string>
+    blocks: Array<IrBlock>
+    hasFrame: bool
+    frameTy: string
+}
+
+function mgNewIrFn(name: string, ret: string, params: Array<string>): IrFn {
+    let f = new IrFn()
+    f.name = name
+    f.ret = ret
+    f.params = params
+    f.allocas = []
+    f.blocks = [mgNewIrBlock("entry")]
+    f.hasFrame = false
+    f.frameTy = ""
+    return f
+}
+
+// FrameInfo: slot 0 is the promise; gep field index == slot index
+class FrameInfo {
+    ty: string
+    slots: Array<Int32>
+    ids: Array<Int32>
+    idxs: Array<Int32>
+}
+
+function mgNewFrameInfo(ty: string): FrameInfo {
+    let f = new FrameInfo()
+    f.ty = ty
+    f.slots = []
+    f.ids = mast.emptyInts()
+    f.idxs = mast.emptyInts()
+    return f
+}
+
+class EnvInfo {
+    ty: string
+    slotTys: Array<Int32>
+    ids: Array<Int32>
+    idxs: Array<Int32>
+}
+
+function mgNewEnvInfo(ty: string): EnvInfo {
+    let e = new EnvInfo()
+    e.ty = ty
+    e.slotTys = []
+    e.ids = mast.emptyInts()
+    e.idxs = mast.emptyInts()
+    return e
+}
+
+// SegEnd kinds
+function seAwait(): Int32 { return 1 }
+function seRetExpr(): Int32 { return 2 }
+function seRetVoid(): Int32 { return 3 }
+function seResolve(): Int32 { return 4 }
+
+class Segment {
+    stmts: Array<CSt>
+    endKind: Int32
+    endExpr: CEx
+    hasTarget: bool
+    targetId: Int32
+    targetTy: Ty
+    next: Int32
+}
+
+class Sig2 {
+    ret: Int32
+    ptys: Array<Int32>
+    isAsync: bool
+}
+
+class Gen {
+    c: ChkResult
+    typeDefs: Array<string>
+    envTypesDone: Array<bool>
+    globals: Array<string>
+    litKeys: Array<string>
+    litNames: Array<string>
+    sigNames: Array<string>
+    sigs: Array<Sig2>
+    fns: Array<IrFn>
+    cur: Int32
+    block: Int32
+    scopes: Array<ScopeMap>
+    pending: Array<string>
+    hasFrame: bool
+    frame: FrameInfo
+    hasEnv: bool
+    env: EnvInfo
+    curRet: Int32
+    tmp: Int32
+    lbl: Int32
+    lit: Int32
+    varTmp: Int32
+    hasLambdaOut: bool
+    lambdaOut: string
+    hasLambdaExit: bool
+    lambdaExit: Int32
+    hasLambdaRet: bool
+    lambdaRet: Int32
+    toplevelGen: bool
+    topGIds: Array<Int32>
+    topGAccs: Array<Access>
+}
+
+function mgNewGen(c: ChkResult): Gen {
+    let g = new Gen()
+    g.c = c
+    g.typeDefs = []
+    g.envTypesDone = []
+    g.globals = []
+    g.litKeys = mast.emptyStrs()
+    g.litNames = mast.emptyStrs()
+    g.sigNames = mast.emptyStrs()
+    g.sigs = []
+    g.fns = []
+    g.cur = 0
+    g.block = 0
+    let sc0: Array<ScopeMap> = []
+    sc0.push(mgNewScopeMap())
+    g.scopes = sc0
+    g.pending = []
+    g.hasFrame = false
+    g.frame = mgNewFrameInfo("")
+    g.hasEnv = false
+    g.env = mgNewEnvInfo("")
+    g.curRet = cgVoid()
+    g.tmp = 0
+    g.lbl = 0
+    g.lit = 0
+    g.varTmp = 1000000
+    g.hasLambdaOut = false
+    g.lambdaOut = ""
+    g.hasLambdaExit = false
+    g.lambdaExit = 0
+    g.hasLambdaRet = false
+    g.lambdaRet = cgVoid()
+    g.toplevelGen = false
+    g.topGIds = mast.emptyInts()
+    g.topGAccs = []
+    return g
+}
+
+function mgInsertSig(g: Gen, name: string, s: Sig2): void {
+    let i = 0
+    while (i < g.sigNames.length) {
+        if (g.sigNames[i] == name) {
+            let sigs = g.sigs
+            sigs[i] = s
+            return
+        }
+        i = i + 1
+    }
+    g.sigNames.push(name)
+    g.sigs.push(s)
+}
+
+function mgSigOf(g: Gen, name: string): Sig2 {
+    let i = 0
+    while (i < g.sigNames.length) {
+        if (g.sigNames[i] == name) {
+            return g.sigs[i]
+        }
+        i = i + 1
+    }
+    let none = new Sig2()
+    none.ret = cgVoid()
+    none.ptys = []
+    none.isAsync = false
+    return none
+}
+
+// ---------------------------------------------------------------------------
+// IR building primitives
+// ---------------------------------------------------------------------------
+
+function mgFresh(g: Gen, hint: string): string {
+    g.tmp = g.tmp + 1
+    return `%${hint}.${g.tmp}`
+}
+
+function mgFreshVarId(g: Gen): Int32 {
+    g.varTmp = g.varTmp + 1
+    return g.varTmp
+}
+
+function mgPushFn(g: Gen, f: IrFn): void {
+    g.fns.push(f)
+    g.cur = g.fns.length - 1
+    g.block = 0
+    let sc0: Array<ScopeMap> = []
+    sc0.push(mgNewScopeMap())
+    g.scopes = sc0
+    let pend: Array<string> = []
+    g.pending = pend
+}
+
+function mgEmit(g: Gen, line: string): void {
+    let fns = g.fns
+    let fn = fns[g.cur]
+    let blocks = fn.blocks
+    let b = blocks[g.block]
+    let lines = b.lines
+    lines.push(line)
+}
+
+function mgTerm(g: Gen, line: string): void {
+    let fns = g.fns
+    let fn = fns[g.cur]
+    let blocks = fn.blocks
+    let b = blocks[g.block]
+    if (!b.hasTerm) {
+        b.term = line
+        b.hasTerm = true
+    }
+}
+
+function mgTerminated(g: Gen): bool {
+    let fns = g.fns
+    let fn = fns[g.cur]
+    let blocks = fn.blocks
+    let b = blocks[g.block]
+    return b.hasTerm
+}
+
+function mgAlloca(g: Gen, ty: string): string {
+    let name = mgFresh(g, "v")
+    let fns = g.fns
+    let fn = fns[g.cur]
+    fn.allocas.push(`${name} = alloca ${ty}`)
+    return name
+}
+
+function mgNewBlock(g: Gen, hint: string): Int32 {
+    g.lbl = g.lbl + 1
+    let fns = g.fns
+    let fn = fns[g.cur]
+    fn.blocks.push(mgNewIrBlock(`${hint}.${g.lbl}`))
+    return fn.blocks.length - 1
+}
+
+function mgNewBlockFixed(g: Gen, label: string): Int32 {
+    let fns = g.fns
+    let fn = fns[g.cur]
+    fn.blocks.push(mgNewIrBlock(label))
+    return fn.blocks.length - 1
+}
+
+function mgSwitchBlock(g: Gen, idx: Int32): void {
+    g.block = idx
+}
+
+function mgLabelOf(g: Gen, idx: Int32): string {
+    let fns = g.fns
+    let fn = fns[g.cur]
+    let blocks = fn.blocks
+    return blocks[idx].label
+}
+
+function mgBranchTo(g: Gen, idx: Int32): void {
+    if (!mgTerminated(g)) {
+        let label = mgLabelOf(g, idx)
+        mgTerm(g, `br label %${label}`)
+    }
+}
+
+function mgFlushPending(g: Gen): void {
+    let names = g.pending
+    let pend: Array<string> = []
+    g.pending = pend
+    let i = 0
+    while (i < names.length) {
+        mgEmit(g, `call void @marina_release(ptr ${names[i]})`)
+        i = i + 1
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Memory access
+// ---------------------------------------------------------------------------
+
+function mgSlotFor(g: Gen, id: Int32, ty: Int32): Int32 {
+    let fr = g.frame
+    let i = 0
+    while (i < fr.ids.length) {
+        if (fr.ids[i] == id) {
+            return fr.idxs[i]
+        }
+        i = i + 1
+    }
+    let idx = fr.slots.length
+    fr.slots.push(ty)
+    fr.ids.push(id)
+    fr.idxs.push(idx)
+    return idx
+}
+
+function mgTopGInsert(g: Gen, id: Int32, a: Access): void {
+    let i = 0
+    while (i < g.topGIds.length) {
+        if (g.topGIds[i] == id) {
+            let accs = g.topGAccs
+            accs[i] = a
+            return
+        }
+        i = i + 1
+    }
+    g.topGIds.push(id)
+    g.topGAccs.push(a)
+}
+
+function mgTopGGet(g: Gen, id: Int32): Access {
+    let i = 0
+    while (i < g.topGIds.length) {
+        if (g.topGIds[i] == id) {
+            return g.topGAccs[i]
+        }
+        i = i + 1
+    }
+    return null
+}
+
+function mgDeclareAccess(g: Gen, id: Int32, ty: Int32): Access {
+    if (g.toplevelGen) {
+        // top-level variables become module globals so any function
+        // (and any lambda capturing them) can read them
+        let name = `@.g.${g.lit}`
+        g.lit = g.lit + 1
+        g.globals.push(`${name} = global ${cgMemOf(ty)} zeroinitializer`)
+        let a = mgNewAccess(accGlobal(), name, 0, ty)
+        mgTopGInsert(g, id, a)
+        return a
+    }
+    if (g.hasFrame) {
+        let idx = mgSlotFor(g, id, ty)
+        return mgNewAccess(accFrame(), "", idx, ty)
+    }
+    let p = mgAlloca(g, cgMemOf(ty))
+    return mgNewAccess(accAlloca(), p, 0, ty)
+}
+
+function mgAccessFor(g: Gen, id: Int32): Access {
+    // top-level variables live in globals: lambdas reading or assigning
+    // them share program state instead of a by-value capture
+    let tg = mgTopGGet(g, id)
+    if (tg != null) {
+        return tg
+    }
+    let i = g.scopes.length - 1
+    while (i >= 0) {
+        let sc = g.scopes[i]
+        let a = mgScopeGet(sc, id)
+        if (a != null) {
+            return a
+        }
+        i = i - 1
+    }
+    if (g.hasFrame) {
+        let fr = g.frame
+        let j = 0
+        while (j < fr.ids.length) {
+            if (fr.ids[j] == id) {
+                let idx = fr.idxs[j]
+                return mgNewAccess(accFrame(), "", idx, fr.slots[idx])
+            }
+            j = j + 1
+        }
+    }
+    if (g.hasEnv) {
+        let en = g.env
+        let j = 0
+        while (j < en.ids.length) {
+            if (en.ids[j] == id) {
+                let idx = en.idxs[j]
+                return mgNewAccess(accEnv(), "", idx, en.slotTys[idx])
+            }
+            j = j + 1
+        }
+    }
+    let tg2 = mgTopGGet(g, id)
+    if (tg2 != null) {
+        return tg2
+    }
+    return null
+}
+
+// Emit a GEP instruction for an access and return its SSA name.
+function mgGepSsa(g: Gen, a: Access): string {
+    if (a.kind == accAlloca()) {
+        return a.p
+    }
+    if (a.kind == accGlobal()) {
+        return a.p
+    }
+    if (a.kind == accFrame()) {
+        let fty = g.frame.ty
+        let name = mgFresh(g, "gp")
+        mgEmit(g, `${name} = getelementptr inbounds ${fty}, ptr %fr, i64 0, i32 ${a.idx}`)
+        return name
+    }
+    let ety = g.env.ty
+    let name = mgFresh(g, "gp")
+    mgEmit(g, `${name} = getelementptr inbounds ${ety}, ptr %env, i64 0, i32 ${a.idx}`)
+    return name
+}
+
+// Emit a GEP instruction addressing field `field` of an %mv value.
+function mgMvField(g: Gen, a: string, field: Int32): string {
+    let name = mgFresh(g, "mv")
+    mgEmit(g, `${name} = getelementptr inbounds %mv, ptr ${a}, i64 0, i32 ${field}`)
+    return name
+}
+
+// load an access; result in the returned CgVal (owned field unused)
+function mgLoadAccess(g: Gen, a: Access): CgVal {
+    let ty = a.ty
+    let gep = mgGepSsa(g, a)
+    let v = mgFresh(g, "ld")
+    if (ty == cgBool()) {
+        mgEmit(g, `${v} = load i8, ptr ${gep}`)
+        let b = mgFresh(g, "bb")
+        mgEmit(g, `${b} = trunc i8 ${v} to i1`)
+        return mgNewVal(ty, b, false)
+    }
+    mgEmit(g, `${v} = load ${cgIrOf(ty)}, ptr ${gep}`)
+    return mgNewVal(ty, v, false)
+}
+
+function mgStoreAccess(g: Gen, a: Access, val: string, ty: Int32): void {
+    let gep = mgGepSsa(g, a)
+    if (ty == cgBool()) {
+        let z = mgFresh(g, "zz")
+        mgEmit(g, `${z} = zext i1 ${val} to i8`)
+        mgEmit(g, `store i8 ${z}, ptr ${gep}`)
+        return
+    }
+    mgEmit(g, `store ${cgIrOf(ty)} ${val}, ptr ${gep}`)
+}
+
+// ---------------------------------------------------------------------------
+// ARC helpers
+// ---------------------------------------------------------------------------
+
+function mgToOwned(g: Gen, v: CgVal): CgVal {
+    if (v.owned || !cgIsPtr(v.ty)) {
+        return v
+    }
+    let r = mgFresh(g, "rn")
+    mgEmit(g, `${r} = call ptr @marina_retain(ptr ${v.ir})`)
+    return mgNewVal(v.ty, r, true)
+}
+
+// Borrow for a runtime call that only reads the value. Consumes an owned
+// value exactly once (the queued release) and marks it unowned, so a
+// later `discard` of the same value cannot double-release it.
+function mgBorrow(g: Gen, v: CgVal): string {
+    if (v.owned && cgIsPtr(v.ty)) {
+        g.pending.push(v.ir)
+        v.owned = false
+    }
+    return v.ir
+}
+
+// Consume an expression whose value is discarded: release if owned.
+function mgDiscard(g: Gen, v: CgVal): void {
+    if (v.owned && cgIsPtr(v.ty)) {
+        g.pending.push(v.ir)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Conversions / helpers
+// ---------------------------------------------------------------------------
+
+function mgCoerceVal(g: Gen, v: CgVal, to: Int32): CgVal {
+    if (v.ty == cgInt() && to == cgFloat()) {
+        let r = mgFresh(g, "cf")
+        mgEmit(g, `${r} = sitofp i32 ${v.ir} to double`)
+        return mgNewVal(cgFloat(), r, v.owned)
+    }
+    return v
+}
+
+function mgSextI64(g: Gen, v: CgVal): string {
+    let r = mgFresh(g, "w")
+    mgEmit(g, `${r} = sext i32 ${v.ir} to i64`)
+    return r
+}
+
+function mgStringLit(g: Gen, s: string): CgVal {
+    let name = ""
+    let i = 0
+    while (i < g.litKeys.length) {
+        if (g.litKeys[i] == s) {
+            name = g.litNames[i]
+            i = g.litKeys.length
+        } else {
+            i = i + 1
+        }
+    }
+    if (name == "") {
+        name = `@.bytes.${g.lit}`
+        g.lit = g.lit + 1
+        let bytes = mgEscapeIrString(s)
+        g.globals.push(`${name} = private constant [${s.length} x i8] c"${bytes}"`)
+        g.litKeys.push(s)
+        g.litNames.push(name)
+    }
+    let v = mgFresh(g, "st")
+    mgEmit(g, `${v} = call ptr @marina_string_literal(ptr ${name}, i64 ${s.length})`)
+    return mgNewVal(cgStr(), v, true)
+}
+
+// Build an %mv value on the stack from a typed value (borrows it).
+function mgBuildMv(g: Gen, v: CgVal): string {
+    let a = mgAlloca(g, "%mv")
+    let tag = 0
+    if (v.ty == cgVoid()) { tag = 0 }
+    else if (v.ty == cgInt()) { tag = 1 }
+    else if (v.ty == cgFloat()) { tag = 2 }
+    else if (v.ty == cgStr()) { tag = 3 }
+    else if (v.ty == cgBool()) { tag = 4 }
+    else if (v.ty == cgArray()) { tag = 5 }
+    else if (v.ty == cgObject()) { tag = 6 }
+    else if (v.ty == cgStream()) { tag = 7 }
+    mgEmit(g, `store i32 ${tag}, ptr ${a}`)
+    let g1 = mgMvField(g, a, 1)
+    mgEmit(g, `store i32 0, ptr ${g1}`)
+    if (v.ty == cgInt()) {
+        let x = mgSextI64(g, v)
+        let g2 = mgMvField(g, a, 2)
+        mgEmit(g, `store i64 ${x}, ptr ${g2}`)
+    } else if (v.ty == cgStream()) {
+        let g2 = mgMvField(g, a, 2)
+        mgEmit(g, `store i64 ${v.ir}, ptr ${g2}`)
+    } else if (v.ty == cgFloat()) {
+        let g3 = mgMvField(g, a, 3)
+        mgEmit(g, `store double ${v.ir}, ptr ${g3}`)
+    } else if (v.ty == cgBool()) {
+        let x = mgFresh(g, "bw")
+        mgEmit(g, `${x} = zext i1 ${v.ir} to i64`)
+        let g2 = mgMvField(g, a, 2)
+        mgEmit(g, `store i64 ${x}, ptr ${g2}`)
+    } else if (v.ty == cgStr()) {
+        let g4 = mgMvField(g, a, 4)
+        mgEmit(g, `store ptr ${v.ir}, ptr ${g4}`)
+    } else if (v.ty == cgArray() || v.ty == cgObject()) {
+        let g4 = mgMvField(g, a, 4)
+        mgEmit(g, `store ptr ${v.ir}, ptr ${g4}`)
+    }
+    return a
+}
+
+// Load a typed value out of an MValue struct (alloca'd).
+function mgMvLoad(g: Gen, a: string, ct: Int32): CgVal {
+    if (ct == cgInt()) {
+        let g2 = mgMvField(g, a, 2)
+        let l = mgFresh(g, "ml")
+        mgEmit(g, `${l} = load i64, ptr ${g2}`)
+        let t = mgFresh(g, "mt")
+        mgEmit(g, `${t} = trunc i64 ${l} to i32`)
+        return mgNewVal(cgInt(), t, false)
+    }
+    if (ct == cgFloat()) {
+        let g3 = mgMvField(g, a, 3)
+        let l = mgFresh(g, "ml")
+        mgEmit(g, `${l} = load double, ptr ${g3}`)
+        return mgNewVal(cgFloat(), l, false)
+    }
+    if (ct == cgBool()) {
+        let g2 = mgMvField(g, a, 2)
+        let l = mgFresh(g, "ml")
+        mgEmit(g, `${l} = load i64, ptr ${g2}`)
+        let t = mgFresh(g, "mt")
+        mgEmit(g, `${t} = trunc i64 ${l} to i1`)
+        return mgNewVal(cgBool(), t, false)
+    }
+    if (ct == cgStream()) {
+        let g2 = mgMvField(g, a, 2)
+        let l = mgFresh(g, "ml")
+        mgEmit(g, `${l} = load i64, ptr ${g2}`)
+        return mgNewVal(cgStream(), l, false)
+    }
+    if (ct == cgStr() || ct == cgArray() || ct == cgObject()) {
+        let g4 = mgMvField(g, a, 4)
+        let l = mgFresh(g, "ml")
+        mgEmit(g, `${l} = load ptr, ptr ${g4}`)
+        return mgNewVal(ct, l, true)
+    }
+    return mgNewVal(cgVoid(), "", false)
+}
+
+// Store a typed value into an MValue struct pointed to by `dst`.
+function mgWriteMvFields(g: Gen, dst: string, v: CgVal): void {
+    let tag = 0
+    if (v.ty == cgVoid()) { tag = 0 }
+    else if (v.ty == cgInt()) { tag = 1 }
+    else if (v.ty == cgFloat()) { tag = 2 }
+    else if (v.ty == cgStr()) { tag = 3 }
+    else if (v.ty == cgBool()) { tag = 4 }
+    else if (v.ty == cgArray()) { tag = 5 }
+    else if (v.ty == cgObject()) { tag = 6 }
+    else if (v.ty == cgStream()) { tag = 7 }
+    mgEmit(g, `store i32 ${tag}, ptr ${dst}`)
+    let g1 = mgMvField(g, dst, 1)
+    mgEmit(g, `store i32 0, ptr ${g1}`)
+    if (v.ty == cgInt()) {
+        let x = mgSextI64(g, v)
+        let g2 = mgMvField(g, dst, 2)
+        mgEmit(g, `store i64 ${x}, ptr ${g2}`)
+    } else if (v.ty == cgStream()) {
+        let g2 = mgMvField(g, dst, 2)
+        mgEmit(g, `store i64 ${v.ir}, ptr ${g2}`)
+    } else if (v.ty == cgFloat()) {
+        let g3 = mgMvField(g, dst, 3)
+        mgEmit(g, `store double ${v.ir}, ptr ${g3}`)
+    } else if (v.ty == cgBool()) {
+        let x = mgFresh(g, "bw")
+        mgEmit(g, `${x} = zext i1 ${v.ir} to i64`)
+        let g2 = mgMvField(g, dst, 2)
+        mgEmit(g, `store i64 ${x}, ptr ${g2}`)
+    } else if (v.ty == cgStr()) {
+        let g4 = mgMvField(g, dst, 4)
+        mgEmit(g, `store ptr ${v.ir}, ptr ${g4}`)
+    } else if (v.ty == cgArray() || v.ty == cgObject()) {
+        let g4 = mgMvField(g, dst, 4)
+        mgEmit(g, `store ptr ${v.ir}, ptr ${g4}`)
+    }
+}
+
+// Unpack an MValue argument (from the runtime) into a typed alloca.
+function mgStoreFromMv(g: Gen, src: string, ct: Int32, dst: string): void {
+    let v = ""
+    if (ct == cgInt() || ct == cgBool() || ct == cgStream()) {
+        let g2 = mgMvField(g, src, 2)
+        let l = mgFresh(g, "pm")
+        mgEmit(g, `${l} = load i64, ptr ${g2}`)
+        v = l
+    } else if (ct == cgFloat()) {
+        let g3 = mgMvField(g, src, 3)
+        let l = mgFresh(g, "pm")
+        mgEmit(g, `${l} = load double, ptr ${g3}`)
+        v = l
+    } else if (ct == cgStr() || ct == cgArray() || ct == cgObject()) {
+        let g4 = mgMvField(g, src, 4)
+        let l = mgFresh(g, "pm")
+        mgEmit(g, `${l} = load ptr, ptr ${g4}`)
+        v = l
+    }
+    if (ct == cgInt()) {
+        let t = mgFresh(g, "pt")
+        mgEmit(g, `${t} = trunc i64 ${v} to i32`)
+        mgEmit(g, `store i32 ${t}, ptr ${dst}`)
+    } else if (ct == cgBool()) {
+        let t = mgFresh(g, "pt")
+        mgEmit(g, `${t} = trunc i64 ${v} to i1`)
+        let z = mgFresh(g, "pz")
+        mgEmit(g, `${z} = zext i1 ${t} to i8`)
+        mgEmit(g, `store i8 ${z}, ptr ${dst}`)
+    } else {
+        mgEmit(g, `store ${cgIrOf(ct)} ${v}, ptr ${dst}`)
+    }
+}
