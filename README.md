@@ -2,9 +2,9 @@
   <img src="assets/logo.svg" alt="Marina" width="640">
 </p>
 
-# marina
+# Marina
 
-**marina** is a strictly-typed, ahead-of-time compiled subset of TypeScript that emits **LLVM IR** and links against a custom **Rust runtime**. The language has single-threaded semantics like JavaScript, but the runtime itself is a **multithreaded event loop** — async code is lowered to promise state machines that are resumed on a worker pool.
+**Marina** is a strictly-typed, ahead-of-time compiled subset of TypeScript that emits **LLVM IR** and links against a custom **Rust runtime**. The language has single-threaded semantics like JavaScript, but the runtime itself is a **multithreaded event loop** — async code is lowered to promise state machines that are resumed on a worker pool.
 
 Memory management is **Automatic Reference Counting (ARC)**, in the style of Swift: every heap object (strings, promises) carries a reference count, and the compiler inserts retain/release calls. Interned string literals are immortal (`rc < 0`).
 
@@ -42,11 +42,11 @@ cargo build
 
 ## Running programs
 
-marina programs use the **`.tsm`** extension (ts marina), and file names must be **kebab-case** (`hello-world.tsm`).
+Marina programs use the **`.tsm`** extension (ts marina), and file names must be **kebab-case** (`hello-world.tsm`).
 
 ### The package manager: `wave`
 
-**wave** is the cargo of marina. Install it (installs `wave`, plus `marina` and `marina-lsp` from the compiler crate):
+**wave** is the cargo of Marina. Install it (installs `wave`, plus `marina` and `marina-lsp` from the compiler crate):
 
 ```sh
 cargo install --path crates/wave
@@ -104,7 +104,7 @@ marina build examples/hello-world.tsm
 
 ## The language
 
-marina is a **subset** of TypeScript: no interfaces, no generics (yet). What it does have:
+Marina is a **subset** of TypeScript: no interfaces, no generics (yet). What it does have:
 
 ### Types & inference
 
@@ -425,11 +425,11 @@ The runtime exports a stable C ABI (`marina_retain`, `marina_release`, `marina_p
 
 ## Editor support
 
-marina ships its own language server (`marina-lsp`, in `crates/marina/src/bin/marina-lsp.rs`) — a dependency-free JSON-RPC implementation over stdio that reuses the compiler's lexer/parser/checker.
+Marina ships its own language server (`marina-lsp`, in `crates/marina/src/bin/marina-lsp.rs`) — a dependency-free JSON-RPC implementation over stdio that reuses the compiler's lexer/parser/checker.
 
 **Features**
 
-- **Syntax highlighting** — TextMate grammar for marina (keywords, types, strings/template literals, declarations)
+- **Syntax highlighting** — TextMate grammar for Marina (keywords, types, strings/template literals, declarations)
 - **🌊 Wave file icons** — `.tsm` files get a wave icon (pick the *Marina Wave* file icon theme once)
 - Live diagnostics on open/keystroke/save: the full strict type checker plus file-naming rules (`.tsm`, kebab-case stems)
 - Hover on a **declared class** name → field shape (`x: Int32`, `y: Int32`, …)
