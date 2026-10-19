@@ -1,0 +1,34 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="640" height="150" viewBox="0 0 640 150" role="img" aria-label="Marina">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#0B1220"/>
+      <stop offset="1" stop-color="#12233B"/>
+    </linearGradient>
+    <linearGradient id="wave1" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#38BDF8"/>
+      <stop offset="1" stop-color="#0EA5E9"/>
+    </linearGradient>
+    <linearGradient id="wave2" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#0EA5E9"/>
+      <stop offset="1" stop-color="#0284C7"/>
+    </linearGradient>
+  </defs>
+
+  <rect x="1.5" y="1.5" width="637" height="147" rx="18" fill="url(#bg)" stroke="#1E3A5F" stroke-width="3"/>
+
+  <!-- wave mark -->
+  <g transform="translate(60 44) scale(4)">
+    <path fill="none" stroke="url(#wave1)" stroke-width="1.7" stroke-linecap="round"
+          d="M1 6c1.8-2.6 3.7-2.6 5.5 0s3.7 2.6 5.5 0c.7-1 1.6-1.4 3-1"/>
+    <path fill="none" stroke="url(#wave2)" stroke-width="1.7" stroke-linecap="round"
+          d="M1 10.5c1.8-2.6 3.7-2.6 5.5 0s3.7 2.6 5.5 0c.7-1 1.6-1.4 3-1"/>
+  </g>
+
+  <!-- wordmark: Marina (capital M) -->
+  <text x="130" y="78" font-family="system-ui, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif"
+        font-size="56" font-weight="700" fill="#F1F5F9" letter-spacing="1">Marina</text>
+
+  <!-- subtitle -->
+  <text x="132" y="112" font-family="system-ui, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif"
+        font-size="19" font-weight="400" fill="#7DD3FC">a strictly-typed, AOT-compiled TypeScript subset</text>
+</svg>

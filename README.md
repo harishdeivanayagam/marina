@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="assets/logo.svg" alt="Marina" width="640">
+</p>
+
 # marina
 
 **marina** is a strictly-typed, ahead-of-time compiled subset of TypeScript that emits **LLVM IR** and links against a custom **Rust runtime**. The language has single-threaded semantics like JavaScript, but the runtime itself is a **multithreaded event loop** — async code is lowered to promise state machines that are resumed on a worker pool.
