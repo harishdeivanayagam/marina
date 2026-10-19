@@ -470,7 +470,6 @@ Marina ships its own language server (`marina-lsp`, in `crates/marina/src/bin/ma
 - Packages expose functions and classes only: no top-level statements, no `main`, and no package-on-package dependencies (std modules `net`/`http` are allowed)
 - http: `http://` URLs only (no TLS/https), sequential request handling on the server (one connection at a time), no request headers, no streaming responses; one HTTP server per program; the express-style API supports `get`/`post` routes only
 - Schema validation (`JsonValidator.validate`) aborts the program with a runtime panic on an invalid body (no per-request error responses yet)
-- On this Mac, port 5000 is taken by AirPlay — use another port (e.g. 8080) for `server.listen`
 - net reads time out after 30 seconds
 - Classes are data-only: no methods, constructors, inheritance, or access modifiers (`public` is accepted and ignored)
 - No `break`/`continue` inside loops
