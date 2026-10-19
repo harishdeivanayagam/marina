@@ -349,20 +349,28 @@ fn locate_runtime() -> Option<PathBuf> {
     if let Ok(td) = std::env::var("CARGO_TARGET_DIR") {
         candidates.push(PathBuf::from(td).join(profile).join("libmarina_runtime.a"));
     }
-    candidates.push(
-        workspace_root()
-            .join("target")
-            .join(profile)
-            .join("libmarina_runtime.a"),
-    );
+    // check both profiles: an installed (release) binary may share a target
+    // dir with a debug `cargo build`, and vice versa
+    for p in [profile, "debug", "release"] {
+        candidates.push(
+            workspace_root()
+                .join("target")
+                .join(p)
+                .join("libmarina_runtime.a"),
+        );
+    }
     candidates.into_iter().find(|p| p.is_file())
 }
 
 fn build_runtime() {
     let root = workspace_root();
     eprintln!("building marina runtime...");
-    let st = Command::new("cargo")
-        .args(["build", "-p", "marina-runtime"])
+    let mut cmd = Command::new("cargo");
+    cmd.args(["build", "-p", "marina-runtime"]);
+    if !cfg!(debug_assertions) {
+        cmd.arg("--release"); // match the profile locate_runtime() looks for
+    }
+    let st = cmd
         .current_dir(&root)
         .env_remove("CARGO_TARGET_DIR") // build into <workspace>/target
         .status();
