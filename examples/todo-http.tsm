@@ -1,0 +1,29 @@
+use http
+
+let todos = ["Buy groceries", "Buy a new phone", "Buy a new car"]
+
+let todoSchemaValidator = new http.JsonValidator({
+    text: http.JsonValidator.string().required().min(4).max(20)
+})
+
+async function main() {
+    let server = new http.Server()
+
+
+    let todosRouter = server.router({ path: "/todos" })
+
+
+    todosRouter.get("/", (req: http.Request, res: http.Response)=>{
+        return res.json(todos)
+    })
+
+    todosRouter.post("/", (req: http.Request, res: http.Response)=>{
+        let todo = todoSchemaValidator.validate(req.body)
+        todos.push(todo.text)
+        return res.json(todos)
+    })
+
+    await server.listen("0.0.0.0", 5000)
+
+    console.log("Server is running on port localhost:5000")
+}

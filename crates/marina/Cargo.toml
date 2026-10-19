@@ -1,0 +1,13 @@
+[package]
+name = "marina"
+version = "0.2.0"
+edition = "2021"
+default-run = "marina"
+
+[[bin]]
+name = "marina"
+path = "src/main.rs"
+
+[[bin]]
+name = "marina-lsp"
+path = "src/bin/marina-lsp.rs"

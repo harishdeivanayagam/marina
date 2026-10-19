@@ -1,0 +1,43 @@
+// Ghost class: the shape of this JSON-style object literal is inferred at
+// compile time and becomes an anonymous class `Class_person_0001`
+let person = {
+    name: "Harish",
+    age: 25,
+    active: true
+}
+
+// declared class (PascalCase), fields with annotations
+class Point {
+    x: Float64
+    y: Float64
+    label: string
+}
+
+let origin = new Point()
+origin.x = 0.0
+origin.y = 0.0
+origin.label = "origin"
+
+let p = new Point()
+p.x = 3.5
+p.y = 1.5
+p.label = "p1"
+
+// field reads, member compound assignment
+p.x += 0.5
+console.log(p.x)          // 4
+console.log(p.label)      // p1
+console.log(person.age)   // 25
+
+// objects in arrays
+let points = [p, origin]
+console.log(points[1].label) // origin
+
+// printing an object shows the class name and its fields
+console.log(person)
+console.log(origin)
+
+// update via member assignment; field values keep ARC (strings here)
+person.name = "Marina"
+console.log(person.name)
+console.log(person)

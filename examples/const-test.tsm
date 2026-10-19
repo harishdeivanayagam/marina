@@ -1,0 +1,20 @@
+// let = mutable variable, const = immutable variable (binding)
+let y = 1
+y = 2
+y++
+y += 2
+console.log(y) // 5
+
+const TEST_VALUE = 10
+console.log(TEST_VALUE) // 10
+
+// const freezes the binding, not the array contents (like TypeScript)
+const NUMBERS = [1, 2]
+NUMBERS.push(3)
+NUMBERS[0] = 5
+console.log(NUMBERS.join(",")) // 5,2,3
+
+// for-init can be const; updating it is an error
+for (let i = 0; i < 3; i++) {
+    console.log(i)
+}

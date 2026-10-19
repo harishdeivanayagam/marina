@@ -1,0 +1,13 @@
+async function sum(arr: Array<Int32>) {
+    return arr.reduce((acc, x) => {
+        return acc + x
+    }, 0)
+}
+
+async function main() {
+    let a = [10, 20, 30]
+    let r = await sum(a)
+    console.log(r)
+}
+
+main()

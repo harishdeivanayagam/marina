@@ -1,0 +1,36 @@
+let list = [1, 2, 3, 4, 5] // Array<Int32>
+
+list.push(6)
+list.pop()
+list.shift()
+list.unshift(0)
+list.splice(2, 1)
+list.slice(0, 2)
+list.concat([6, 7, 8])
+list.join(", ")
+list.reverse()
+list.sort()
+
+list.forEach((item) => {
+    console.log(item)
+})
+
+console.log(list)
+
+list = list.map((item) => {
+    return item * 2
+})
+
+console.log(list)
+
+list = list.filter((item) => {
+    return item > 3
+})
+
+console.log(list)
+
+list.reduce((acc, item) => {
+    return acc + item
+}, 0)
+
+console.log(list)

@@ -1,0 +1,51 @@
+// strings + join + index set/get
+let words: Array<string> = []
+words.push("hello")
+words.push("world")
+words[1] = "marina"
+console.log(words[0])
+console.log(words.join("-"))
+
+// floats
+let fs = [1.5, 2.5]
+fs.push(3.5)
+let doubled = fs.map((f) => {
+    return f * 2
+})
+console.log(doubled.join(" "))
+
+// nested arrays
+let nested = [[1, 2], [3, 4]]
+console.log(nested[1][0])
+console.log(nested.length)
+
+// sorting + reversing numbers
+let s = [5, 1, 3]
+s.sort()
+console.log(s.join(","))
+s.reverse()
+console.log(s.join(","))
+
+// filter with strings + reduce to Int (count)
+let names = ["al", "bo", "cy"]
+let short = names.filter((n) => {
+    return n.length <= 2
+})
+console.log(short.join(","))
+let count = names.reduce((acc, n) => {
+    return acc + 1
+}, 0)
+console.log(count)
+
+// arrays in async functions
+async function sum(arr: Array<Int32>) {
+    return arr.reduce((acc, x) => {
+        return acc + x
+    }, 0)
+}
+
+async function main() {
+    let a = [10, 20, 30]
+    let r = await sum(a)
+    console.log(r)
+}

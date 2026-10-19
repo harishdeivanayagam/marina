@@ -1,0 +1,7 @@
+let a = 10 // Automatically inferred as Int32 
+let b = 20.5 // Automatically inferred as Float64
+
+let result = a + b // Automatically inferred as Float64, a is casted to Float64
+
+console.log(`The result of ${a} + ${b} is ${result}`)
+

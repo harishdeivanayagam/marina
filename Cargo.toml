@@ -1,0 +1,10 @@
+[workspace]
+resolver = "2"
+members = ["crates/marina", "crates/marina-runtime", "crates/wave"]
+
+[profile.dev]
+opt-level = 1
+
+[profile.release]
+opt-level = 3
+lto = true

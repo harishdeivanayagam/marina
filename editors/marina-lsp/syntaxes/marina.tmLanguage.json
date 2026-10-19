@@ -1,0 +1,174 @@
+{
+  "name": "marina",
+  "scopeName": "source.marina",
+  "comment": "marina — a strictly-typed, AOT-compiled TypeScript subset (.tsm)",
+  "fileTypes": ["tsm"],
+  "patterns": [
+    { "include": "#comments" },
+    { "include": "#strings" },
+    { "include": "#numbers" },
+    { "include": "#keywords" },
+    { "include": "#types" },
+    { "include": "#declarations" },
+    { "include": "#calls" },
+    { "include": "#builtin-identifiers" },
+    { "include": "#operators" }
+  ],
+  "repository": {
+    "comments": {
+      "patterns": [
+        {
+          "name": "comment.line.double-slash.marina",
+          "match": "//.*$"
+        },
+        {
+          "name": "comment.block.marina",
+          "begin": "/\\*",
+          "end": "\\*/"
+        }
+      ]
+    },
+    "strings": {
+      "patterns": [
+        {
+          "name": "string.template.marina",
+          "begin": "`",
+          "end": "`",
+          "patterns": [
+            {
+              "name": "meta.template.expression.marina",
+              "begin": "\\$\\{",
+              "end": "\\}",
+              "patterns": [
+                { "include": "source.marina" }
+              ]
+            },
+            { "include": "#escape-chars" }
+          ]
+        },
+        {
+          "name": "string.quoted.double.marina",
+          "begin": "\"",
+          "end": "\"",
+          "patterns": [{ "include": "#escape-chars" }]
+        }
+      ]
+    },
+    "escape-chars": {
+      "name": "constant.character.escape.marina",
+      "match": "\\\\(u\\{[0-9A-Fa-f]+\\}|u[0-9A-Fa-f]{4}|x[0-9A-Fa-f]{2}|.)"
+    },
+    "numbers": {
+      "patterns": [
+        {
+          "name": "constant.numeric.float.marina",
+          "match": "\\b[0-9]+\\.[0-9]+\\b"
+        },
+        {
+          "name": "constant.numeric.integer.marina",
+          "match": "\\b[0-9]+\\b"
+        }
+      ]
+    },
+    "keywords": {
+      "patterns": [
+        {
+          "name": "keyword.control.flow.await.marina",
+          "match": "\\bawait\\b"
+        },
+        {
+          "name": "keyword.control.conditional.marina",
+          "match": "\\b(if|else)\\b"
+        },
+        {
+          "name": "keyword.control.loop.marina",
+          "match": "\\b(for|while)\\b"
+        },
+        {
+          "name": "keyword.control.return.marina",
+          "match": "\\breturn\\b"
+        },
+        {
+          "name": "keyword.declaration.marina",
+          "match": "\\b(let|const|function|async|class|new|public)\\b"
+        },
+        {
+          "name": "constant.language.boolean.marina",
+          "match": "\\b(true|false|null|undefined)\\b"
+        }
+      ]
+    },
+    "types": {
+      "name": "support.type.marina",
+      "match": "\\b(Int32|Float64|Bool|String|Void|Promise|Array|Resolver)\\b"
+    },
+    "declarations": {
+      "patterns": [
+        {
+          "comment": "class Name {",
+          "name": "entity.name.class.marina",
+          "match": "\\b(class)\\s+([A-Za-z_][A-Za-z0-9_]*)\\b",
+          "captures": {
+            "1": { "name": "keyword.declaration.marina" },
+            "2": { "name": "entity.name.class.marina" }
+          }
+        },
+        {
+          "comment": "function name(",
+          "name": "entity.name.function.marina",
+          "match": "\\b(function)\\s+([A-Za-z_][A-Za-z0-9_]*)\\b",
+          "captures": {
+            "1": { "name": "keyword.declaration.marina" },
+            "2": { "name": "entity.name.function.marina" }
+          }
+        },
+        {
+          "comment": "let/const variable",
+          "match": "\\b(let|const)\\s+([A-Za-z_][A-Za-z0-9_]*)\\b",
+          "captures": {
+            "1": { "name": "keyword.declaration.marina" },
+            "2": { "name": "variable.other.readwrite.marina" }
+          }
+        },
+        {
+          "comment": "field type annotation: `name: Type`",
+          "match": "\\b([A-Za-z_][A-Za-z0-9_]*)\\s*:\\s*(?=[A-Za-z_<])",
+          "captures": {
+            "1": { "name": "variable.other.property.marina" }
+          }
+        }
+      ]
+    },
+    "calls": {
+      "comment": "identifier followed by ( — a function call",
+      "match": "\\b([A-Za-z_][A-Za-z0-9_]*)\\s*(?=\\()",
+      "captures": {
+        "1": { "name": "entity.name.function.marina" }
+      }
+    },
+    "builtin-identifiers": {
+      "patterns": [
+        {
+          "name": "support.function.builtin.marina",
+          "match": "\\b(console|setTimeout|Promise)\\b"
+        },
+        {
+          "name": "variable.language.self.marina",
+          "match": "\\b(main)\\b"
+        }
+      ]
+    },
+    "operators": {
+      "patterns": [
+        {
+          "name": "keyword.operator.marina",
+          "match": "=>|===|!==|==|!=|<=|>=|&&|\\|\\||\\+=|-=|\\+\\+|--|[-+*/%<>=!&|]"
+        },
+        {
+          "name": "punctuation.separator.marina",
+          "match": "[;:.,(){}\\[\\]]"
+        }
+      ]
+    }
+  }
+}

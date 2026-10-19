@@ -1,0 +1,10 @@
+{
+  "iconDefinitions": {
+    "_wave": {
+      "iconPath": "./icons/wave.svg"
+    }
+  },
+  "fileExtensions": {
+    "tsm": "_wave"
+  }
+}

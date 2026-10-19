@@ -1,0 +1,17 @@
+async function fetchData() {
+    return new Promise((resolve) => {
+        setTimeout(() => {
+            resolve("Data fetched")
+        }, 1000)
+    })
+}
+
+
+// Entry point of the program but main is not strict
+async function main() {
+    let data = await fetchData() // waits for the promise to resolve
+
+    fetchData() // Initiates the promise but does not wait for it to resolve
+
+    console.log(data)
+}
