@@ -14,13 +14,13 @@ use mchek
 use mgen
 use fs
 
-async function run(args: Array<string>): void {
-    if (args.length < 1) {
+async function main() {
+    let a = fs.args()
+    if (a.length < 2) {
         console.log(`usage: comp <file.tsm>`)
         return
     }
-    let path = args[0]
-    let src = await fs.readFile(path)
+    let src = await fs.readFile(a[1])
     let lr = malex.lex(src)
     if (!lr.ok) {
         console.log(`LEXERR ${lr.msg} @${lr.line}:${lr.col}`)
@@ -33,18 +33,13 @@ async function run(args: Array<string>): void {
     }
     let r = mchek.ckCheck(pr.prog)
     if (!r.ok) {
-        let di = 0
-        while (di < r.msgs.length) {
-            let d = r.msgs[di]
-            console.log(`DIAG ${d.msg} @${d.line}:${d.col}`)
-            di = di + 1
+        let i = 0
+        while (i < r.msgs.length) {
+            console.log(`DIAG ${r.msgs[i]} @${r.dlines[i]}:${r.dcols[i]}`)
+            i = i + 1
         }
         return
     }
     let ll = mgen.generate(r)
     await fs.writeFile("./out.ll", ll)
-}
-
-function main(args: Array<string>): void {
-    run(args)
 }

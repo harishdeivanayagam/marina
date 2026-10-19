@@ -207,10 +207,10 @@ function mgDigitsOf(a: Float64): MgdDigits {
         k = k - 1
     }
     // M = m * 2^52 (exact double), so a = M * 2^(k-52)
-    let M = m * 4503599627370496.0
+    let bigM = m * 4503599627370496.0
     // decompose M into Int32 chunks of 21 bits: M = hi*2^42 + mid*2^21 + lo
-    let hi = mgFloorRange(M / 4398046511104.0, 1024, 2047)
-    let rem1 = M - hi * 4398046511104.0
+    let hi = mgFloorRange(bigM / 4398046511104.0, 1024, 2047)
+    let rem1 = bigM - hi * 4398046511104.0
     let mid = mgFloorRange(rem1 / 2097152.0, 0, 2097151)
     let lo = mgFloorRange(rem1 - mid * 2097152.0, 0, 2097151)
     let bn = mgBnNew()
@@ -314,7 +314,7 @@ function mgRoundUp(full: string, d: Int32, e: Int32): MgdCand {
     }
     let j2 = 0
     while (j2 < bytes.length) {
-        s = `${s}${String.fromCharCode(bytes[j2])}`
+        s = `${s}${mgDigit(bytes[j2])}`
         j2++
     }
     return mgNewCand(s, e)
@@ -396,11 +396,33 @@ function mgFmtFloat(f: Float64): string {
 // escape_ir_string (byte-oriented; marina strings are byte-indexed)
 // ---------------------------------------------------------------------------
 
+function mgHexTable(): string {
+    return "0123456789ABCDEF"
+}
+
+function mgAsciiTable(): string {
+    return " !\"#$%&'()*+,-./0123456789:;<=>?@ABCDEFGHIJKLMNOPQRSTUVWXYZ[\\]^_`abcdefghijklmnopqrstuvwxyz{|}~"
+}
+
+function mgDigitsTable(): string {
+    return "0123456789"
+}
+
 function mgHex2(b: Int32): string {
-    const hex = "0123456789ABCDEF"
     let hi = b / 16
     let lo = b % 16
+        let hex = mgHexTable()
     return `\\${hex.substring(hi, hi + 1)}${hex.substring(lo, lo + 1)}`
+}
+
+function mgChr(b: Int32): string {
+    let ascii = mgAsciiTable()
+    return ascii.substring(b - 32, b - 31)
+}
+
+function mgDigit(b: Int32): string {
+    let digits = mgDigitsTable()
+    return digits.substring(b - 48, b - 47)
 }
 
 function mgEscapeIrString(s: string): string {
@@ -425,7 +447,7 @@ function mgEscapeBytes(arr: Array<Int32>): string {
     while (i < arr.length) {
         let b = arr[i]
         if (b >= 32 && b <= 126 && b != 34 && b != 92) {
-            out = `${out}${String.fromCharCode(b)}`
+            out = `${out}${mgChr(b)}`
         } else {
             out = `${out}${mgHex2(b)}`
         }
@@ -488,7 +510,8 @@ class ScopeMap {
 function mgNewScopeMap(): ScopeMap {
     let s = new ScopeMap()
     s.ids = mast.emptyInts()
-    s.accs = []
+    let accs0: Array<Access> = []
+    s.accs = accs0
     return s
 }
 
@@ -506,15 +529,27 @@ function mgScopeInsert(sc: ScopeMap, id: Int32, a: Access): void {
     sc.accs.push(a)
 }
 
-function mgScopeGet(sc: ScopeMap, id: Int32): Access {
+class AccRes {
+    has: bool
+    a: Access
+}
+
+function mgNewAccRes(): AccRes {
+    let r = new AccRes()
+    r.has = false
+    return r
+}
+
+function mgScopeGet(sc: ScopeMap, id: Int32, res: AccRes): void {
     let i = 0
     while (i < sc.ids.length) {
         if (sc.ids[i] == id) {
-            return sc.accs[i]
+            res.has = true
+            res.a = sc.accs[i]
+            return
         }
         i = i + 1
     }
-    return null
 }
 
 class IrBlock {
@@ -527,7 +562,8 @@ class IrBlock {
 function mgNewIrBlock(label: string): IrBlock {
     let b = new IrBlock()
     b.label = label
-    b.lines = []
+    let lines0: Array<string> = []
+    b.lines = lines0
     b.term = ""
     b.hasTerm = false
     return b
@@ -548,7 +584,8 @@ function mgNewIrFn(name: string, ret: string, params: Array<string>): IrFn {
     f.name = name
     f.ret = ret
     f.params = params
-    f.allocas = []
+    let allocas0: Array<string> = []
+    f.allocas = allocas0
     f.blocks = [mgNewIrBlock("entry")]
     f.hasFrame = false
     f.frameTy = ""
@@ -566,7 +603,8 @@ class FrameInfo {
 function mgNewFrameInfo(ty: string): FrameInfo {
     let f = new FrameInfo()
     f.ty = ty
-    f.slots = []
+    let slots0: Array<Int32> = []
+    f.slots = slots0
     f.ids = mast.emptyInts()
     f.idxs = mast.emptyInts()
     return f
@@ -582,7 +620,8 @@ class EnvInfo {
 function mgNewEnvInfo(ty: string): EnvInfo {
     let e = new EnvInfo()
     e.ty = ty
-    e.slotTys = []
+    let slotTys0: Array<Int32> = []
+    e.slotTys = slotTys0
     e.ids = mast.emptyInts()
     e.idxs = mast.emptyInts()
     return e
@@ -647,20 +686,26 @@ class Gen {
 function mgNewGen(c: ChkResult): Gen {
     let g = new Gen()
     g.c = c
-    g.typeDefs = []
-    g.envTypesDone = []
-    g.globals = []
+    let typeDefs0: Array<string> = []
+    g.typeDefs = typeDefs0
+    let envTypes0: Array<bool> = []
+    g.envTypesDone = envTypes0
+    let globals0: Array<string> = []
+    g.globals = globals0
     g.litKeys = mast.emptyStrs()
     g.litNames = mast.emptyStrs()
     g.sigNames = mast.emptyStrs()
-    g.sigs = []
-    g.fns = []
+    let sigs0: Array<Sig2> = []
+    g.sigs = sigs0
+    let fns0: Array<IrFn> = []
+    g.fns = fns0
     g.cur = 0
     g.block = 0
     let sc0: Array<ScopeMap> = []
     sc0.push(mgNewScopeMap())
     g.scopes = sc0
-    g.pending = []
+    let pending0: Array<string> = []
+    g.pending = pending0
     g.hasFrame = false
     g.frame = mgNewFrameInfo("")
     g.hasEnv = false
@@ -678,7 +723,8 @@ function mgNewGen(c: ChkResult): Gen {
     g.lambdaRet = cgVoid()
     g.toplevelGen = false
     g.topGIds = mast.emptyInts()
-    g.topGAccs = []
+    let topGAccs0: Array<Access> = []
+    g.topGAccs = topGAccs0
     return g
 }
 
@@ -706,7 +752,8 @@ function mgSigOf(g: Gen, name: string): Sig2 {
     }
     let none = new Sig2()
     none.ret = cgVoid()
-    none.ptys = []
+    let nonePtys0: Array<Int32> = []
+    none.ptys = nonePtys0
     none.isAsync = false
     return none
 }
@@ -850,15 +897,16 @@ function mgTopGInsert(g: Gen, id: Int32, a: Access): void {
     g.topGAccs.push(a)
 }
 
-function mgTopGGet(g: Gen, id: Int32): Access {
+function mgTopGGet(g: Gen, id: Int32, res: AccRes): void {
     let i = 0
     while (i < g.topGIds.length) {
         if (g.topGIds[i] == id) {
-            return g.topGAccs[i]
+            res.has = true
+            res.a = g.topGAccs[i]
+            return
         }
         i = i + 1
     }
-    return null
 }
 
 function mgDeclareAccess(g: Gen, id: Int32, ty: Int32): Access {
@@ -880,19 +928,20 @@ function mgDeclareAccess(g: Gen, id: Int32, ty: Int32): Access {
     return mgNewAccess(accAlloca(), p, 0, ty)
 }
 
-function mgAccessFor(g: Gen, id: Int32): Access {
+function mgAccessFor(g: Gen, id: Int32, res: AccRes): void {
+    res.has = false
     // top-level variables live in globals: lambdas reading or assigning
     // them share program state instead of a by-value capture
-    let tg = mgTopGGet(g, id)
-    if (tg != null) {
-        return tg
+    mgTopGGet(g, id, res)
+    if (res.has) {
+        return
     }
     let i = g.scopes.length - 1
     while (i >= 0) {
         let sc = g.scopes[i]
-        let a = mgScopeGet(sc, id)
-        if (a != null) {
-            return a
+        mgScopeGet(sc, id, res)
+        if (res.has) {
+            return
         }
         i = i - 1
     }
@@ -902,7 +951,9 @@ function mgAccessFor(g: Gen, id: Int32): Access {
         while (j < fr.ids.length) {
             if (fr.ids[j] == id) {
                 let idx = fr.idxs[j]
-                return mgNewAccess(accFrame(), "", idx, fr.slots[idx])
+                res.has = true
+                res.a = mgNewAccess(accFrame(), "", idx, fr.slots[idx])
+                return
             }
             j = j + 1
         }
@@ -913,16 +964,14 @@ function mgAccessFor(g: Gen, id: Int32): Access {
         while (j < en.ids.length) {
             if (en.ids[j] == id) {
                 let idx = en.idxs[j]
-                return mgNewAccess(accEnv(), "", idx, en.slotTys[idx])
+                res.has = true
+                res.a = mgNewAccess(accEnv(), "", idx, en.slotTys[idx])
+                return
             }
             j = j + 1
         }
     }
-    let tg2 = mgTopGGet(g, id)
-    if (tg2 != null) {
-        return tg2
-    }
-    return null
+    mgTopGGet(g, id, res)
 }
 
 // Emit a GEP instruction for an access and return its SSA name.
@@ -1258,6 +1307,14 @@ function mgPopScope(g: Gen): void {
 }
 
 // Releases every live variable of the current (sync) function, then ret.
+function mgDummyEx(): CEx {
+    return mchek.newCEx(mchek.ceInt())
+}
+
+function mgVoidVal(): CgVal {
+    return mgNewVal(cgVoid(), "", false)
+}
+
 function mgSyncEpilogue(g: Gen, hasVal: bool, val: CgVal): void {
     mgReleaseScopeVars(g)
     mgFlushPending(g)
@@ -1350,7 +1407,9 @@ function mgCgStmt(g: Gen, s: CSt): void {
         let last = g.scopes[g.scopes.length - 1]
         mgScopeInsert(last, s.id, a)
     } else if (s.k == mchek.csAssign()) {
-        let a = mgAccessFor(g, s.id)
+        let ar = mgNewAccRes()
+        mgAccessFor(g, s.id, ar)
+        let a = ar.a
         let ty = a.ty
         let v = mgCgExpr(g, s.e1)
         v = mgCoerceVal(g, v, ty)
@@ -1361,7 +1420,9 @@ function mgCgStmt(g: Gen, s: CSt): void {
         }
         mgStoreAccess(g, a, v.ir, ty)
     } else if (s.k == mchek.csIndexSet()) {
-        let a = mgAccessFor(g, s.id)
+        let ar = mgNewAccRes()
+        mgAccessFor(g, s.id, ar)
+        let a = ar.a
         let arr = mgLoadAccess(g, a)
         let iv = mgCgExpr(g, s.e1)
         let i = mgSextI64(g, iv)
@@ -1372,7 +1433,9 @@ function mgCgStmt(g: Gen, s: CSt): void {
         mgEmit(g, `call void @marina_array_set(ptr ${arr.ir}, i64 ${i}, ptr ${mv})`)
         mgDiscard(g, vv)
     } else if (s.k == mchek.csFieldSet()) {
-        let a = mgAccessFor(g, s.id)
+        let ar = mgNewAccRes()
+        mgAccessFor(g, s.id, ar)
+        let a = ar.a
         let obj = mgLoadAccess(g, a)
         let vv = mgCgExpr(g, s.e1)
         vv = mgCoerceVal(g, vv, cgTyOfTy(s.ty))
@@ -1382,7 +1445,9 @@ function mgCgStmt(g: Gen, s: CSt): void {
         mgDiscard(g, vv)
     } else if (s.k == mchek.csIfaceSet()) {
         // interface-typed values resolve fields by name at runtime
-        let a = mgAccessFor(g, s.id)
+        let ar = mgNewAccRes()
+        mgAccessFor(g, s.id, ar)
+        let a = ar.a
         let obj = mgLoadAccess(g, a)
         let vv = mgCgExpr(g, s.e1)
         vv = mgCoerceVal(g, vv, cgTyOfTy(s.ty))
@@ -1507,9 +1572,9 @@ function mgCgStmt(g: Gen, s: CSt): void {
             }
         } else {
             if (isAsync) {
-                mgFinishAsync(g, false, null)
+                mgFinishAsync(g, false, mgVoidVal())
             } else {
-                mgSyncEpilogue(g, false, null)
+                mgSyncEpilogue(g, false, mgVoidVal())
             }
         }
     } else if (s.k == mchek.csExpr()) {
@@ -1588,7 +1653,9 @@ function mgCgExpr(g: Gen, e: CEx): CgVal {
         return mgStringLit(g, e.sval)
     }
     if (k == mchek.ceIdent()) {
-        let a = mgAccessFor(g, e.id)
+        let ar = mgNewAccRes()
+        mgAccessFor(g, e.id, ar)
+        let a = ar.a
         let v = mgLoadAccess(g, a)
         return mgNewVal(cgTyOfTy(e.ty), v.ir, false)
     }
@@ -1639,7 +1706,9 @@ function mgCgExpr(g: Gen, e: CEx): CgVal {
         return mgCgCallFn(g, e)
     }
     if (k == mchek.ceCallResolver()) {
-        let a = mgAccessFor(g, e.id)
+        let ar = mgNewAccRes()
+        mgAccessFor(g, e.id, ar)
+        let a = ar.a
         let p = mgLoadAccess(g, a)
         let v = mgCgExpr(g, e.kids[0])
         v = mgCoerceVal(g, v, cgTyOfTy(e.ty))
@@ -2149,7 +2218,8 @@ function mgEnvTypeDef(g: Gen, li: Int32): string {
         while (g.envTypesDone.length <= li) {
             g.envTypesDone.push(false)
         }
-        g.envTypesDone[li] = true
+        let etd = g.envTypesDone
+        etd[li] = true
         let slots = mgLambdaSlots(g, li)
         let tys: Array<string> = []
         let i = 0
@@ -2205,22 +2275,29 @@ function mgBuildEnv(g: Gen, li: Int32, hasPreset: bool, preset: string): string 
         // function, so we can't use gep_ssa here)
         let gep = mgFresh(g, "eg")
         mgEmit(g, `${gep} = getelementptr inbounds ${ty}, ptr ${envp}, i64 0, i32 ${i}`)
-        if (i == 0 && hasPreset) {
+        let isPreset = false
+        if (i == 0) {
+            if (hasPreset) {
+                isPreset = true
+            }
+        }
+        if (isPreset) {
             // env slots own their refs: retain the preset promise
             let r = mgFresh(g, "ep")
             mgEmit(g, `${r} = call ptr @marina_retain(ptr ${preset})`)
             mgEmit(g, `store ptr ${r}, ptr ${gep}`)
-            i = i + 1
-            continue
-        }
-        let a = mgAccessFor(g, id)
-        let v = mgLoadAccess(g, a)
-        if (cgIsPtr(ct)) {
-            let r = mgFresh(g, "cp")
-            mgEmit(g, `${r} = call ptr @marina_retain(ptr ${v.ir})`)
-            mgEmit(g, `store ptr ${r}, ptr ${gep}`)
         } else {
-            mgEmit(g, `store ${cgIrOf(ct)} ${v.ir}, ptr ${gep}`)
+            let ar = mgNewAccRes()
+            mgAccessFor(g, id, ar)
+            let a = ar.a
+            let v = mgLoadAccess(g, a)
+            if (cgIsPtr(ct)) {
+                let r = mgFresh(g, "cp")
+                mgEmit(g, `${r} = call ptr @marina_retain(ptr ${v.ir})`)
+                mgEmit(g, `store ptr ${r}, ptr ${gep}`)
+            } else {
+                mgEmit(g, `store ${cgIrOf(ct)} ${v.ir}, ptr ${gep}`)
+            }
         }
         i = i + 1
     }
@@ -2330,7 +2407,7 @@ function mgGenLambda(g: Gen, li: Int32): void {
             let el = mgLabelOf(g, exitB)
             mgTerm(g, `br label %${el}`)
         } else {
-            mgSyncEpilogue(g, false, null)
+            mgSyncEpilogue(g, false, mgVoidVal())
         }
     }
     mgSwitchBlock(g, exitB)
@@ -2391,7 +2468,7 @@ function mgGenSyncFnInto(g: Gen, name: string, pids: Array<Int32>, ptys: Array<T
     }
     mgCgBody(g, body)
     if (!mgTerminated(g)) {
-        mgSyncEpilogue(g, false, null)
+        mgSyncEpilogue(g, false, mgVoidVal())
     }
 }
 
@@ -2448,7 +2525,7 @@ function mgTransform(g: Gen, stmts: Array<CSt>, segs: Array<Segment>): void {
                 let seg2 = new Segment()
                 seg2.stmts = mchek.emptyCSts()
                 seg2.endKind = seResolve()
-                seg2.endExpr = null
+                seg2.endExpr = mgDummyEx()
                 seg2.hasTarget = false
                 seg2.targetId = tmp
                 seg2.targetTy = s.e1.ty
@@ -2483,7 +2560,7 @@ function mgTransform(g: Gen, stmts: Array<CSt>, segs: Array<Segment>): void {
             let seg2 = new Segment()
             seg2.stmts = mchek.emptyCSts()
             seg2.endKind = seResolve()
-            seg2.endExpr = null
+            seg2.endExpr = mgDummyEx()
             seg2.hasTarget = false
             seg2.targetId = tmp
             seg2.targetTy = inner
@@ -2494,7 +2571,7 @@ function mgTransform(g: Gen, stmts: Array<CSt>, segs: Array<Segment>): void {
             let seg = new Segment()
             seg.stmts = cur
             seg.endKind = seRetVoid()
-            seg.endExpr = null
+            seg.endExpr = mgDummyEx()
             seg.hasTarget = false
             seg.targetId = 0
             seg.targetTy = mchek.mkTy(mchek.tvVoid())
@@ -2510,7 +2587,7 @@ function mgTransform(g: Gen, stmts: Array<CSt>, segs: Array<Segment>): void {
         let seg = new Segment()
         seg.stmts = cur
         seg.endKind = seRetVoid()
-        seg.endExpr = null
+        seg.endExpr = mgDummyEx()
         seg.hasTarget = false
         seg.targetId = 0
         seg.targetTy = mchek.mkTy(mchek.tvVoid())
@@ -2523,6 +2600,12 @@ function mgTransform(g: Gen, stmts: Array<CSt>, segs: Array<Segment>): void {
 // async-listen lambda. entryName = name of the entry fn (resume target).
 function mgGenResumeInto(g: Gen, entryName: string, resumeName: string, segs: Array<Segment>, lret: Ty, innerTy: Ty): void {
     mgPushFn(g, mgNewIrFn(resumeName, "void", ["ptr %fr", "i32 %st", "ptr %val"]))
+    // the resume prologue block is named "pro" (not "entry")
+    let fns0 = g.fns
+    let fn0 = fns0[g.cur]
+    let blocks0 = fn0.blocks
+    let b0 = blocks0[0]
+    b0.label = "pro"
     g.curRet = cgVoid()
 
     // pre-create segment blocks with stable labels
@@ -2585,7 +2668,7 @@ function mgGenResumeInto(g: Gen, entryName: string, resumeName: string, segs: Ar
                 v = mgCoerceVal(g, v, cgTyOfTy(lret))
                 mgFinishAsync(g, true, v)
             } else if (seg.endKind == seRetVoid()) {
-                mgFinishAsync(g, false, null)
+                mgFinishAsync(g, false, mgVoidVal())
             } else {
                 // ResolveReturn
                 let ct = cgTyOfTy(seg.targetTy)
@@ -2877,7 +2960,8 @@ function mgGenAsyncListenLambda(g: Gen, li: Int32): void {
 // ---------------------------------------------------------------------------
 
 function mgGenMain(g: Gen): void {
-    mgPushFn(g, mgNewIrFn("main", "i32", []))
+    let mainParams: Array<string> = []
+    mgPushFn(g, mgNewIrFn("main", "i32", mainParams))
     mgEmit(g, "call void @marina_event_loop_start()")
     // register class metadata (name + field names) so the runtime can
     // print objects and keep classes self-describing
@@ -2943,94 +3027,9 @@ function mgGenMain(g: Gen): void {
 // Module rendering
 // ---------------------------------------------------------------------------
 
-const MG_DECLARES = `declare ptr @marina_frame_alloc(i64)
-declare void @marina_frame_free(ptr)
-declare ptr @marina_promise_create()
-declare void @marina_promise_resolve(ptr, ptr)
-declare void @marina_await(ptr, ptr, ptr, i32)
-declare ptr @marina_promise_run_executor(ptr, ptr, ptr, ptr)
-declare void @marina_set_timeout(ptr, ptr, ptr, i64)
-declare ptr @marina_closure_alloc(i64)
-declare void @marina_closure_free(ptr)
-declare ptr @marina_retain(ptr)
-declare void @marina_release(ptr)
-declare ptr @marina_string_literal(ptr, i64)
-declare ptr @marina_string_concat(ptr, ptr)
-declare i64 @marina_string_len(ptr)
-declare i64 @marina_string_charcode_at(ptr, i64)
-declare ptr @marina_string_substring(ptr, i64, i64)
-declare ptr @marina_args()
-declare ptr @marina_to_string(ptr)
-declare void @marina_print(ptr)
-declare ptr @marina_array_new(i32)
-declare i64 @marina_array_len(ptr)
-declare i64 @marina_array_push(ptr, ptr)
-declare void @marina_array_pop(ptr, ptr)
-declare void @marina_array_shift(ptr, ptr)
-declare i64 @marina_array_unshift(ptr, ptr)
-declare void @marina_array_get(ptr, i64, ptr)
-declare void @marina_array_set(ptr, i64, ptr)
-declare ptr @marina_array_splice(ptr, i64, i64)
-declare ptr @marina_array_slice(ptr, i64, i64)
-declare ptr @marina_array_concat(ptr, ptr)
-declare ptr @marina_array_join(ptr, ptr)
-declare ptr @marina_array_reverse(ptr)
-declare ptr @marina_array_sort(ptr)
-declare void @marina_array_foreach(ptr, ptr, ptr, ptr)
-declare ptr @marina_array_map(ptr, ptr, ptr, ptr, i32)
-declare ptr @marina_array_filter(ptr, ptr, ptr, ptr)
-declare void @marina_array_reduce(ptr, ptr, ptr, ptr, ptr, ptr)
-declare void @marina_class_register(i32, ptr, i64)
-declare ptr @marina_object_new(i32, i64)
-declare void @marina_object_get(ptr, i64, ptr)
-declare void @marina_object_set(ptr, i64, ptr)
-declare void @marina_object_get_field(ptr, ptr, ptr)
-declare void @marina_object_set_field(ptr, ptr, ptr)
-declare void @marina_fs_read_file(ptr, ptr)
-declare void @marina_fs_write_file(ptr, ptr)
-declare void @marina_fs_exists(ptr, ptr)
-declare void @marina_fs_read_dir(ptr, ptr)
-declare void @marina_fs_mkdir(ptr, ptr)
-declare void @marina_fs_remove(ptr, ptr)
-declare void @marina_crypto_sha256(ptr, ptr)
-declare void @marina_crypto_base64(i1, ptr, ptr)
-declare void @marina_crypto_random_hex(i64, ptr)
-declare void @marina_crypto_uuid(ptr)
-declare void @marina_net_connect(ptr, ptr, ptr)
-declare void @marina_net_write(ptr, ptr)
-declare void @marina_net_read_all(ptr, ptr)
-declare void @marina_net_close(ptr)
-declare i1 @marina_str_eq(ptr, ptr)
-declare void @marina_http_request(ptr, ptr, ptr, ptr, i32)
-declare void @marina_http_listen(ptr, ptr, ptr, ptr, i32, i32)
-declare void @marina_http_res_send(ptr, ptr)
-declare void @marina_http_res_json(ptr, ptr)
-declare void @marina_http_router_bind(ptr, ptr)
-declare void @marina_http_route_add(ptr, ptr, ptr, ptr, ptr, ptr)
-declare void @marina_http_server_listen(ptr, ptr, ptr, i32, i32)
-declare void @marina_http_validator_init(ptr, ptr)
-declare void @marina_http_field_init(ptr, i32)
-declare void @marina_http_field_op(ptr, i32, ptr)
-declare void @marina_http_validate(ptr, ptr, i32, ptr)
-declare void @marina_sql_open(ptr, ptr, i32, ptr)
-declare void @marina_sql_execute(ptr, ptr, i64, ptr, i32, ptr)
-declare void @marina_sql_query(ptr, ptr, i64, ptr, ptr)
-declare void @marina_sql_close(ptr)
-declare ptr @marina_sql_execute_async(ptr, ptr, i64, ptr, i32)
-declare ptr @marina_sql_query_async(ptr, ptr, i64, ptr)
-declare ptr @marina_fs_read_file_async(ptr)
-declare ptr @marina_fs_write_file_async(ptr, ptr)
-declare ptr @marina_fs_exists_async(ptr)
-declare ptr @marina_fs_read_dir_async(ptr)
-declare ptr @marina_fs_mkdir_async(ptr)
-declare ptr @marina_fs_remove_async(ptr)
-declare ptr @marina_net_connect_async(ptr, ptr)
-declare ptr @marina_net_write_async(ptr, ptr)
-declare ptr @marina_net_read_all_async(ptr)
-declare ptr @marina_net_close_async(ptr)
-declare ptr @marina_http_request_async(ptr, ptr, ptr, i32)
-declare void @marina_event_loop_start()
-declare i32 @marina_event_loop_run()`
+function mgDeclares(): string {
+    return "declare ptr @marina_frame_alloc(i64)\ndeclare void @marina_frame_free(ptr)\ndeclare ptr @marina_promise_create()\ndeclare void @marina_promise_resolve(ptr, ptr)\ndeclare void @marina_await(ptr, ptr, ptr, i32)\ndeclare ptr @marina_promise_run_executor(ptr, ptr, ptr, ptr)\ndeclare void @marina_set_timeout(ptr, ptr, ptr, i64)\ndeclare ptr @marina_closure_alloc(i64)\ndeclare void @marina_closure_free(ptr)\ndeclare ptr @marina_retain(ptr)\ndeclare void @marina_release(ptr)\ndeclare ptr @marina_string_literal(ptr, i64)\ndeclare ptr @marina_string_concat(ptr, ptr)\ndeclare i64 @marina_string_len(ptr)\ndeclare i64 @marina_string_charcode_at(ptr, i64)\ndeclare ptr @marina_string_substring(ptr, i64, i64)\ndeclare ptr @marina_args()\ndeclare ptr @marina_to_string(ptr)\ndeclare void @marina_print(ptr)\ndeclare ptr @marina_array_new(i32)\ndeclare i64 @marina_array_len(ptr)\ndeclare i64 @marina_array_push(ptr, ptr)\ndeclare void @marina_array_pop(ptr, ptr)\ndeclare void @marina_array_shift(ptr, ptr)\ndeclare i64 @marina_array_unshift(ptr, ptr)\ndeclare void @marina_array_get(ptr, i64, ptr)\ndeclare void @marina_array_set(ptr, i64, ptr)\ndeclare ptr @marina_array_splice(ptr, i64, i64)\ndeclare ptr @marina_array_slice(ptr, i64, i64)\ndeclare ptr @marina_array_concat(ptr, ptr)\ndeclare ptr @marina_array_join(ptr, ptr)\ndeclare ptr @marina_array_reverse(ptr)\ndeclare ptr @marina_array_sort(ptr)\ndeclare void @marina_array_foreach(ptr, ptr, ptr, ptr)\ndeclare ptr @marina_array_map(ptr, ptr, ptr, ptr, i32)\ndeclare ptr @marina_array_filter(ptr, ptr, ptr, ptr)\ndeclare void @marina_array_reduce(ptr, ptr, ptr, ptr, ptr, ptr)\ndeclare void @marina_class_register(i32, ptr, i64)\ndeclare ptr @marina_object_new(i32, i64)\ndeclare void @marina_object_get(ptr, i64, ptr)\ndeclare void @marina_object_set(ptr, i64, ptr)\ndeclare void @marina_object_get_field(ptr, ptr, ptr)\ndeclare void @marina_object_set_field(ptr, ptr, ptr)\ndeclare void @marina_fs_read_file(ptr, ptr)\ndeclare void @marina_fs_write_file(ptr, ptr)\ndeclare void @marina_fs_exists(ptr, ptr)\ndeclare void @marina_fs_read_dir(ptr, ptr)\ndeclare void @marina_fs_mkdir(ptr, ptr)\ndeclare void @marina_fs_remove(ptr, ptr)\ndeclare void @marina_crypto_sha256(ptr, ptr)\ndeclare void @marina_crypto_base64(i1, ptr, ptr)\ndeclare void @marina_crypto_random_hex(i64, ptr)\ndeclare void @marina_crypto_uuid(ptr)\ndeclare void @marina_net_connect(ptr, ptr, ptr)\ndeclare void @marina_net_write(ptr, ptr)\ndeclare void @marina_net_read_all(ptr, ptr)\ndeclare void @marina_net_close(ptr)\ndeclare i1 @marina_str_eq(ptr, ptr)\ndeclare void @marina_http_request(ptr, ptr, ptr, ptr, i32)\ndeclare void @marina_http_listen(ptr, ptr, ptr, ptr, i32, i32)\ndeclare void @marina_http_res_send(ptr, ptr)\ndeclare void @marina_http_res_json(ptr, ptr)\ndeclare void @marina_http_router_bind(ptr, ptr)\ndeclare void @marina_http_route_add(ptr, ptr, ptr, ptr, ptr, ptr)\ndeclare void @marina_http_server_listen(ptr, ptr, ptr, i32, i32)\ndeclare void @marina_http_validator_init(ptr, ptr)\ndeclare void @marina_http_field_init(ptr, i32)\ndeclare void @marina_http_field_op(ptr, i32, ptr)\ndeclare void @marina_http_validate(ptr, ptr, i32, ptr)\ndeclare void @marina_sql_open(ptr, ptr, i32, ptr)\ndeclare void @marina_sql_execute(ptr, ptr, i64, ptr, i32, ptr)\ndeclare void @marina_sql_query(ptr, ptr, i64, ptr, ptr)\ndeclare void @marina_sql_close(ptr)\ndeclare ptr @marina_sql_execute_async(ptr, ptr, i64, ptr, i32)\ndeclare ptr @marina_sql_query_async(ptr, ptr, i64, ptr)\ndeclare ptr @marina_fs_read_file_async(ptr)\ndeclare ptr @marina_fs_write_file_async(ptr, ptr)\ndeclare ptr @marina_fs_exists_async(ptr)\ndeclare ptr @marina_fs_read_dir_async(ptr)\ndeclare ptr @marina_fs_mkdir_async(ptr)\ndeclare ptr @marina_fs_remove_async(ptr)\ndeclare ptr @marina_net_connect_async(ptr, ptr)\ndeclare ptr @marina_net_write_async(ptr, ptr)\ndeclare ptr @marina_net_read_all_async(ptr)\ndeclare ptr @marina_net_close_async(ptr)\ndeclare ptr @marina_http_request_async(ptr, ptr, ptr, i32)\ndeclare void @marina_event_loop_start()\ndeclare i32 @marina_event_loop_run()"
+}
 
 // render one IR function into the output lines
 function mgRenderFn(f: IrFn, out: Array<string>): void {
@@ -3101,7 +3100,7 @@ function mgRender(g: Gen): string {
         out.push("")
     }
     // DECLARES is emitted as one blob with a trailing blank line
-    out.push(MG_DECLARES)
+    out.push(mgDeclares())
     out.push("")
     i = 0
     while (i < g.fns.length) {
@@ -3123,7 +3122,8 @@ function generate(c: ChkResult): string {
         let f = c.fns[i]
         let s = new Sig2()
         s.ret = cgTyOfTy(f.ret)
-        s.ptys = []
+        let sptys: Array<Int32> = []
+        s.ptys = sptys
         let j = 0
         while (j < f.ptys.length) {
             s.ptys.push(cgTyOfTy(f.ptys[j]))
