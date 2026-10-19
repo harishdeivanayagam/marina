@@ -197,16 +197,33 @@ fn stmt_span(s: &Stmt) -> lexer::Span {
 /// Any other module is a registry package: its source is read from
 /// `<registry>/<pkg>/<latest>/main.tsm`, its functions are renamed
 /// `<pkg>__<name>` and appended to the main program, so `pkg.fn(...)` calls
-/// type-check as plain function calls (see `checker`).
+/// type-check as plain function calls (see `checker`). Packages may depend
+/// on other packages: their `use`s are resolved recursively (a `merged`
+/// set guards against cycles and duplicate merges), which is what lets the
+/// self-hosted compiler live in multiple packages.
 pub fn resolve_uses(program: &mut crate::ast::Program) -> Result<(), Vec<SrcDiag>> {
     let mut diags: Vec<SrcDiag> = Vec::new();
     let mut kept: Vec<(String, lexer::Span)> = Vec::new();
     let mut extra_fns = Vec::new();
     let mut extra_classes = Vec::new();
+    let mut merged: std::collections::HashSet<String> = std::collections::HashSet::new();
 
-    for (name, span) in program.uses.drain(..) {
+    // worklist seeded with the program's own uses (registry order)
+    let mut queue: Vec<(String, lexer::Span)> = program.uses.drain(..).collect();
+    let mut qi = 0;
+    while qi < queue.len() {
+        let (name, span) = queue[qi].clone();
+        qi += 1;
         if matches!(name.as_str(), "net" | "http" | "fs" | "crypto" | "sql") {
-            kept.push((name, span));
+            if !kept.iter().any(|(n, _)| *n == name) {
+                kept.push((name, span));
+            }
+            continue;
+        }
+        if merged.contains(&name) {
+            if !kept.iter().any(|(n, _)| *n == name) {
+                kept.push((name, span));
+            }
             continue;
         }
         match load_registry_package(&name) {
@@ -246,18 +263,15 @@ pub fn resolve_uses(program: &mut crate::ast::Program) -> Result<(), Vec<SrcDiag
                         f.span,
                     ));
                 }
+                // mark merged before walking dependencies (cycle guard)
+                merged.insert(name.clone());
+                // rewrite unqualified intra-package calls to their mangled
+                // names (package functions are renamed on merge)
+                qualify_pkg_calls(&mut pkg, &name);
+                // dependencies first, so a package's deps are always fully
+                // merged by the time the checker resolves calls against it
                 for (u, s) in pkg.uses.drain(..) {
-                    if matches!(u.as_str(), "net" | "http" | "fs" | "crypto" | "sql") {
-                        // make the std module visible to the merged functions
-                        if !kept.iter().any(|(n, _)| *n == u) {
-                            kept.push((u, s));
-                        }
-                    } else {
-                        diags.push(SrcDiag::from(
-                            "packages cannot depend on other packages yet (v0.2: std modules net/http/fs/crypto only)",
-                            s,
-                        ));
-                    }
+                    queue.push((u, s));
                 }
                 for mut f in pkg.fns.drain(..) {
                     f.name = format!("{}__{}", name, f.name);
@@ -277,6 +291,144 @@ pub fn resolve_uses(program: &mut crate::ast::Program) -> Result<(), Vec<SrcDiag
         Ok(())
     } else {
         Err(diags)
+    }
+}
+
+/// Rewrite unqualified intra-package calls in a package's functions: an
+/// identifier call target that names one of the package's own functions
+/// becomes `<pkg>__<name>` (package functions are renamed on merge, and the
+/// checker only resolves qualified `pkg.fn(...)` calls across modules).
+fn qualify_pkg_calls(pkg: &mut crate::ast::Program, pkg_name: &str) {
+    let local: std::collections::HashSet<String> =
+        pkg.fns.iter().map(|f| f.name.clone()).collect();
+    for f in &mut pkg.fns {
+        for s in &mut f.body {
+            qual_stmt(s, &local, pkg_name);
+        }
+    }
+}
+
+fn qual_stmt(s: &mut crate::ast::Stmt, local: &std::collections::HashSet<String>, pkg: &str) {
+    match s {
+        crate::ast::Stmt::Let { init, .. } => qual_expr(init, local, pkg),
+        crate::ast::Stmt::Assign { value, .. } => qual_expr(value, local, pkg),
+        crate::ast::Stmt::MemberAssign { value, .. } => qual_expr(value, local, pkg),
+        crate::ast::Stmt::IndexAssign { index, value, .. } => {
+            qual_expr(index, local, pkg);
+            qual_expr(value, local, pkg);
+        }
+        crate::ast::Stmt::Return { value, .. } => {
+            if let Some(v) = value {
+                qual_expr(v, local, pkg);
+            }
+        }
+        crate::ast::Stmt::If { cond, then_body, else_body, .. } => {
+            qual_expr(cond, local, pkg);
+            for t in then_body {
+                qual_stmt(t, local, pkg);
+            }
+            if let Some(els) = else_body {
+                for t in els {
+                    qual_stmt(t, local, pkg);
+                }
+            }
+        }
+        crate::ast::Stmt::While { cond, body, .. } => {
+            qual_expr(cond, local, pkg);
+            for t in body {
+                qual_stmt(t, local, pkg);
+            }
+        }
+        crate::ast::Stmt::For { init, cond, update, body, .. } => {
+            if let Some(i) = init {
+                qual_stmt(i, local, pkg);
+            }
+            if let Some(c) = cond {
+                qual_expr(c, local, pkg);
+            }
+            if let Some(u) = update {
+                qual_stmt(u, local, pkg);
+            }
+            for t in body {
+                qual_stmt(t, local, pkg);
+            }
+        }
+        crate::ast::Stmt::Expr(e) => qual_expr(e, local, pkg),
+    }
+}
+
+fn qual_expr(
+    e: &mut crate::ast::Expr,
+    local: &std::collections::HashSet<String>,
+    pkg: &str,
+) {
+    use crate::ast::Expr;
+    match e {
+        Expr::Int(..) | Expr::Float(..) | Expr::Bool(..) | Expr::Str(..) | Expr::Ident(..) => {}
+        Expr::Template(parts, _) | Expr::Tagged(_, parts, _) => {
+            for p in parts {
+                if let crate::ast::TPart::Expr(inner) = p {
+                    qual_expr(inner, local, pkg);
+                }
+            }
+        }
+        Expr::Unary(_, inner, _) => qual_expr(inner, local, pkg),
+        Expr::Binary(_, l, r, _) => {
+            qual_expr(l, local, pkg);
+            qual_expr(r, local, pkg);
+        }
+        Expr::Call(callee, args, _) => {
+            qual_callee(callee, local, pkg);
+            for a in args {
+                qual_expr(a, local, pkg);
+            }
+        }
+        Expr::CallGen(callee, _, args, _) => {
+            qual_callee(callee, local, pkg);
+            for a in args {
+                qual_expr(a, local, pkg);
+            }
+        }
+        Expr::Member(inner, _, _) => qual_expr(inner, local, pkg),
+        Expr::Index(o, i, _) => {
+            qual_expr(o, local, pkg);
+            qual_expr(i, local, pkg);
+        }
+        Expr::ArrayLit(elems, _) => {
+            for x in elems {
+                qual_expr(x, local, pkg);
+            }
+        }
+        Expr::ObjectLit(fields, _) => {
+            for (_, v) in fields {
+                qual_expr(v, local, pkg);
+            }
+        }
+        Expr::NewCtor { args, .. } => {
+            for a in args {
+                qual_expr(a, local, pkg);
+            }
+        }
+        Expr::Await(inner, _) | Expr::NewPromise(inner, _) => qual_expr(inner, local, pkg),
+        Expr::NewClass { .. } => {}
+        Expr::Lambda(l, _) => {
+            for s in &mut l.body {
+                qual_stmt(s, local, pkg);
+            }
+        }
+    }
+}
+
+fn qual_callee(
+    callee: &mut Box<crate::ast::Expr>,
+    local: &std::collections::HashSet<String>,
+    pkg: &str,
+) {
+    qual_expr(callee, local, pkg);
+    if let crate::ast::Expr::Ident(name, _) = &mut **callee {
+        if local.contains(name) {
+            *name = format!("{}__{}", pkg, name);
+        }
     }
 }
 

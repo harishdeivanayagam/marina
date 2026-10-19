@@ -774,6 +774,32 @@ pub extern "C" fn marina_string_len(s: *const c_void) -> i64 {
     unsafe { str_data(s as *mut u8).len() as i64 }
 }
 
+/// Byte (code unit) at byte index i, 0 when out of bounds (borrowed).
+/// Used by the self-hosted compiler's lexer for character classification.
+#[no_mangle]
+pub extern "C" fn marina_string_charcode_at(s: *const c_void, i: i64) -> i64 {
+    unsafe {
+        let d = str_data(s as *mut u8);
+        if i < 0 || i as usize >= d.len() {
+            return 0;
+        }
+        d[i as usize] as i64
+    }
+}
+
+/// Substring over byte indices [start, end), clamped to the string; an end
+/// below start yields an empty string. Returns a new owned string.
+#[no_mangle]
+pub extern "C" fn marina_string_substring(s: *const c_void, start: i64, end: i64) -> *mut c_void {
+    unsafe {
+        let d = str_data(s as *mut u8);
+        let len = d.len() as i64;
+        let a = start.clamp(0, len);
+        let b = end.clamp(0, len).max(a);
+        alloc_string(&d[a as usize..b as usize], 1) as *mut c_void
+    }
+}
+
 fn value_to_string(v: &MValue) -> String {
     match v.tag {
         TAG_STRING => unsafe { String::from_utf8_lossy(str_data(v.p as *mut u8)).into_owned() },
@@ -935,6 +961,24 @@ pub extern "C" fn marina_array_new(tag: i32) -> *mut c_void {
 #[no_mangle]
 pub extern "C" fn marina_array_len(a: *mut c_void) -> i64 {
     unsafe { as_array(a).data.len() as i64 }
+}
+
+/// Process arguments (`argv[0..]`) as an owned `Array<string>` — the
+/// `fs.args()` primitive used by the self-hosted compiler to take input
+/// and output paths.
+#[no_mangle]
+pub extern "C" fn marina_args() -> *mut c_void {
+    let arr = marina_array_new(TAG_ARRAY) as *mut ArrayObj;
+    unsafe {
+        for a in std::env::args() {
+            let sp = alloc_string(a.as_bytes(), 1) as *mut c_void;
+            let mut mv = MValue::default();
+            mv.tag = TAG_STRING;
+            mv.p = sp;
+            (*arr).data.push(mv);
+        }
+    }
+    arr as *mut c_void
 }
 
 #[no_mangle]

@@ -1,0 +1,79 @@
+// Probe: can Marina express the fat-struct AST design needed for self-hosting?
+// Mutual class references, class-typed fields, Array<Class>, many fields.
+
+class Expr {
+    kind: Int32          // variant tag
+    ival: Int32
+    fval: Float64
+    bval: bool
+    sval: string
+    op: Int32
+    children: Array<Expr>
+    parts: Array<TPart>
+    names: Array<string>
+    spanLine: Int32
+    spanCol: Int32
+}
+
+class TPart {
+    isExpr: bool
+    text: string
+    expr: Expr
+}
+
+class Stmt {
+    kind: Int32
+    value: Expr          // class-typed field referencing another class
+    body: Array<Stmt>    // recursive through arrays
+    name: string
+    spanLine: Int32
+    spanCol: Int32
+}
+
+const K_INT = 1
+const K_BIN = 2
+
+function mkInt(v: Int32, line: Int32, col: Int32): Expr {
+    let e = new Expr()
+    e.kind = K_INT
+    e.ival = v
+    e.spanLine = line
+    e.spanCol = col
+    return e
+}
+
+function mkBin(op: Int32, l: Expr, r: Expr, line: Int32, col: Int32): Expr {
+    let e = new Expr()
+    e.kind = K_BIN
+    e.op = op
+    e.children = [l, r]
+    e.sval = ""
+    e.spanLine = line
+    e.spanCol = col
+    return e
+}
+
+function dumpExpr(e: Expr): string {
+    if (e.kind == K_INT) {
+        return `Int(${e.ival})`
+    }
+    if (e.kind == K_BIN) {
+        return `Bin(${dumpExpr(e.children[0])}, ${dumpExpr(e.children[1])})`
+    }
+    return "?"
+}
+
+function main() {
+    let one = mkInt(1, 1, 1)
+    let two = mkInt(2, 1, 5)
+    let sum = mkBin(3, one, two, 1, 3)
+    console.log(dumpExpr(sum))          // Bin(Int(1), Int(2))
+
+    // float formatting through templates (needed for IR emission)
+    let f = 1.5
+    console.log(`f=${f} neg=${0.25}`)
+
+    // string pieces via concat for now (charAt/substring are primitives to add)
+    let src = "let x = 10"
+    console.log(`len=${src.length}`)
+}

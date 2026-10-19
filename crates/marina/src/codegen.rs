@@ -212,6 +212,9 @@ declare void @marina_release(ptr)
 declare ptr @marina_string_literal(ptr, i64)
 declare ptr @marina_string_concat(ptr, ptr)
 declare i64 @marina_string_len(ptr)
+declare i64 @marina_string_charcode_at(ptr, i64)
+declare ptr @marina_string_substring(ptr, i64, i64)
+declare ptr @marina_args()
 declare ptr @marina_to_string(ptr)
 declare void @marina_print(ptr)
 declare ptr @marina_array_new(i32)
@@ -614,10 +617,13 @@ impl<'a> Gen<'a> {
         CgVal { ty: v.ty, ir: r, owned: true }
     }
 
-    /// Borrow for a runtime call that only reads the value.
-    fn borrow(&mut self, v: &CgVal) -> String {
+    /// Borrow for a runtime call that only reads the value. Consumes an owned
+    /// value exactly once (the queued release) and marks it unowned, so a
+    /// later `discard` of the same value cannot double-release it.
+    fn borrow(&mut self, v: &mut CgVal) -> String {
         if v.owned && v.ty.is_ptr() {
             self.pending.push(v.ir.clone());
+            v.owned = false;
         }
         v.ir.clone()
     }
@@ -1144,7 +1150,8 @@ fn pop_scope(&mut self) {
     fn finish_async(&mut self, v: Option<CgVal>) {
         let mv = match v {
             Some(val) => {
-                let borrowed = self.borrow(&val);
+                let mut val = val;
+                let borrowed = self.borrow(&mut val);
                 let a = self.alloca("%mv");
                 self.copy_mv(&borrowed, val.ty, &a);
                 a
@@ -1241,7 +1248,7 @@ fn pop_scope(&mut self) {
             CExpr::Template(parts) => {
                 let mut acc = self.string_lit("");
                 for p in parts {
-                    let s = match p {
+                    let mut s = match p {
                         TPartC::Str(x) => self.string_lit(x),
                         TPartC::Expr(inner) => {
                             let v = self.cg_expr(inner);
@@ -1254,8 +1261,8 @@ fn pop_scope(&mut self) {
                             CgVal { ty: CgTy::Str, ir: sv, owned: true }
                         }
                     };
-                    let a = self.borrow(&acc);
-                    let b = self.borrow(&s);
+                    let a = self.borrow(&mut acc);
+                    let b = self.borrow(&mut s);
                     let t = self.fresh("cc");
                     self.emit(format!(
                         "{} = call ptr @marina_string_concat(ptr {}, ptr {})",
@@ -1323,7 +1330,17 @@ fn pop_scope(&mut self) {
                         return CgVal { ty: CgTy::Bool, ir: out, owned: false };
                     }
                     BinOpC::Lt | BinOpC::Gt | BinOpC::Le | BinOpC::Ge | BinOpC::Eq | BinOpC::Neq => {
-                        let cmp_ty = if lv.ty == CgTy::Float || rv.ty == CgTy::Float {
+                        // operands must share a numeric type: widen Int to
+                        // Float when either side is Float (the comparison's
+                        // own CgTy is Bool, so `res` cannot drive this)
+                        let cmp_cg = if lv.ty == CgTy::Float || rv.ty == CgTy::Float {
+                            CgTy::Float
+                        } else {
+                            CgTy::Int
+                        };
+                        let lv = self.coerce_val(lv, cmp_cg);
+                        let rv = self.coerce_val(rv, cmp_cg);
+                        let cmp_ty = if cmp_cg == CgTy::Float {
                             "double"
                         } else {
                             "i32"
@@ -1344,9 +1361,10 @@ fn pop_scope(&mut self) {
                             _ => unreachable!(),
                         };
                         let out = self.fresh("bc");
+                        let mnemonic = if cmp_ty == "double" { "fcmp" } else { "icmp" };
                         self.emit(format!(
-                            "{} = icmp {} {} {}, {}",
-                            out, pred, cmp_ty, lv.ir, rv.ir
+                            "{} = {} {} {} {}, {}",
+                            out, mnemonic, pred, cmp_ty, lv.ir, rv.ir
                         ));
                         return CgVal { ty: CgTy::Bool, ir: out, owned: false };
                     }
@@ -1612,8 +1630,8 @@ fn pop_scope(&mut self) {
                 CgVal { ty: CgTy::Object, ir: obj, owned: true }
             }
             CExpr::HttpFieldOp { v, op, arg } => {
-                let vv = self.cg_expr(v);
-                let p = self.borrow(&vv);
+                let mut vv = self.cg_expr(v);
+                let p = self.borrow(&mut vv);
                 let amv = match arg {
                     Some(a) => {
                         let av = self.cg_expr(a);
@@ -1632,8 +1650,8 @@ fn pop_scope(&mut self) {
                 CgVal { ty: vv.ty.clone(), ir: vv.ir.clone(), owned: false }
             }
             CExpr::HttpValidate { v, body, out_class } => {
-                let vv = self.cg_expr(v);
-                let p = self.borrow(&vv);
+                let mut vv = self.cg_expr(v);
+                let p = self.borrow(&mut vv);
                 let bv = self.cg_expr(body);
                 let bmv = self.build_mv(&bv);
                 let out = self.alloca("%mv");
@@ -1667,8 +1685,8 @@ fn pop_scope(&mut self) {
                 CgVal { ty: CgTy::Array, ir: arr, owned: true }
             }
             CExpr::Index { obj, idx, ty } => {
-                let o = self.cg_expr(obj);
-                let p = self.borrow(&o);
+                let mut o = self.cg_expr(obj);
+                let p = self.borrow(&mut o);
                 let iv = self.cg_expr(idx);
                 let i = self.sext_i64(&iv);
                 let out = self.alloca("%mv");
@@ -1678,8 +1696,8 @@ fn pop_scope(&mut self) {
                 v
             }
             CExpr::ArrayOp { op, arr, args, ret } => {
-                let a = self.cg_expr(arr);
-                let p = self.borrow(&a);
+                let mut a = self.cg_expr(arr);
+                let p = self.borrow(&mut a);
                 let v = match op {
                     ArrayOpKind::Len => {
                         let n = self.fresh("an");
@@ -1771,8 +1789,8 @@ fn pop_scope(&mut self) {
                 v
             }
             CExpr::ArrayHof { op, arr, cb, extra, ret } => {
-                let a = self.cg_expr(arr);
-                let p = self.borrow(&a);
+                let mut a = self.cg_expr(arr);
+                let p = self.borrow(&mut a);
                 let li = match &**cb {
                     CExpr::LambdaVal { li, .. } => *li,
                     _ => unreachable!("array callback must be a lambda"),
@@ -1826,14 +1844,53 @@ fn pop_scope(&mut self) {
                 v
             }
             CExpr::StrLen(inner) => {
-                let s = self.cg_expr(inner);
-                let p = self.borrow(&s);
+                let mut s = self.cg_expr(inner);
+                let p = self.borrow(&mut s);
                 let n = self.fresh("sl");
                 self.emit(format!("{} = call i64 @marina_string_len(ptr {})", n, p));
                 let t = self.fresh("slt");
                 self.emit(format!("{} = trunc i64 {} to i32", t, n));
                 self.discard(&s);
                 CgVal { ty: CgTy::Int, ir: t, owned: false }
+            }
+            CExpr::StrMethod { op, obj, args, ret } => {
+                let mut s = self.cg_expr(obj);
+                let p = self.borrow(&mut s);
+                let v = match op {
+                    StrOpKind::CharAt => {
+                        let iv = self.cg_expr(&args[0]);
+                        let i = self.sext_i64(&iv);
+                        let n = self.fresh("sc");
+                        self.emit(format!(
+                            "{} = call i64 @marina_string_charcode_at(ptr {}, i64 {})",
+                            n, p, i
+                        ));
+                        let t = self.fresh("sct");
+                        self.emit(format!("{} = trunc i64 {} to i32", t, n));
+                        CgVal { ty: CgTy::Int, ir: t, owned: false }
+                    }
+                    StrOpKind::Substring => {
+                        let av = self.cg_expr(&args[0]);
+                        let a = self.sext_i64(&av);
+                        let bv = self.cg_expr(&args[1]);
+                        let b = self.sext_i64(&bv);
+                        let r = self.fresh("ss");
+                        self.emit(format!(
+                            "{} = call ptr @marina_string_substring(ptr {}, i64 {}, i64 {})",
+                            r, p, a, b
+                        ));
+                        let t = cg_ty(ret);
+                        debug_assert!(t == CgTy::Str);
+                        CgVal { ty: CgTy::Str, ir: r, owned: true }
+                    }
+                };
+                // borrow already queued the string's single release
+                v
+            }
+            CExpr::FsArgs => {
+                let r = self.fresh("arg");
+                self.emit(format!("{} = call ptr @marina_args()", r));
+                CgVal { ty: CgTy::Array, ir: r, owned: true }
             }
             CExpr::LambdaVal { .. } => unreachable!("lambda values are consumed by call sites"),
             CExpr::ObjectLit { class_id, inits } => {
@@ -1867,8 +1924,8 @@ fn pop_scope(&mut self) {
                 CgVal { ty: CgTy::Object, ir: obj, owned: true }
             }
             CExpr::FieldGet { obj, idx, ty } => {
-                let o = self.cg_expr(obj);
-                let p = self.borrow(&o);
+                let mut o = self.cg_expr(obj);
+                let p = self.borrow(&mut o);
                 let out = self.alloca("%mv");
                 self.emit(format!(
                     "call void @marina_object_get(ptr {}, i64 {}, ptr {})",
@@ -1880,8 +1937,8 @@ fn pop_scope(&mut self) {
             }
             CExpr::IfaceGet { obj, field, ty } => {
                 // interface-typed values resolve fields by name at runtime
-                let o = self.cg_expr(obj);
-                let p = self.borrow(&o);
+                let mut o = self.cg_expr(obj);
+                let p = self.borrow(&mut o);
                 let sv = self.string_lit(field.as_str());
                 let nmv = self.build_mv(&sv);
                 let out = self.alloca("%mv");
@@ -1992,19 +2049,19 @@ fn pop_scope(&mut self) {
                 self.mv_load(&out, CgTy::Object)
             }
             CExpr::SqlExec { conn, sql, binds, result_class } => {
-                let cv = self.cg_expr(conn);
+                let mut cv = self.cg_expr(conn);
                 // cg_sql_call borrows the connection (single queued release)
-                let pr = self.cg_sql_call_async(&cv, sql, binds, Some(*result_class));
+                let pr = self.cg_sql_call_async(&mut cv, sql, binds, Some(*result_class));
                 CgVal { ty: CgTy::Promise, ir: pr, owned: true }
             }
             CExpr::SqlQuery { conn, sql, binds } => {
-                let cv = self.cg_expr(conn);
-                let pr = self.cg_sql_call_async(&cv, sql, binds, None);
+                let mut cv = self.cg_expr(conn);
+                let pr = self.cg_sql_call_async(&mut cv, sql, binds, None);
                 CgVal { ty: CgTy::Promise, ir: pr, owned: true }
             }
             CExpr::SqlClose { conn } => {
-                let cv = self.cg_expr(conn);
-                let p = self.borrow(&cv);
+                let mut cv = self.cg_expr(conn);
+                let p = self.borrow(&mut cv);
                 self.emit(format!("call void @marina_sql_close(ptr {})", p));
                 CgVal { ty: CgTy::Void, ir: String::new(), owned: false }
             }
@@ -2015,7 +2072,7 @@ fn pop_scope(&mut self) {
     /// returns the promise pointer.
     fn cg_sql_call_async(
         &mut self,
-        conn: &CgVal,
+        conn: &mut CgVal,
         sql: &str,
         binds: &[CExpr],
         result_class: Option<usize>,

@@ -1,0 +1,30 @@
+class Node {
+    v: Int32
+    kids: Array<Node>
+}
+
+function main() {
+    let a = new Node()
+    a.v = 1
+    let b = new Node()
+    b.v = 2
+
+    // 1: array literal of objects
+    let lit = [a, b]
+    console.log(`lit0=${lit[0].v} lit1=${lit[1].v}`)
+
+    // 2: push then assign field
+    let root = new Node()
+    let kids: Array<Node> = []
+    kids.push(a)
+    kids.push(b)
+    root.kids = kids
+    let k0 = root.kids[0]
+    console.log(`k0=${k0.v} k1=${root.kids[1].v}`)
+
+    // 3: literal assigned directly into field
+    let root2 = new Node()
+    root2.kids = [a, b]
+    let r0 = root2.kids[0]
+    console.log(`r0=${r0.v}`)
+}

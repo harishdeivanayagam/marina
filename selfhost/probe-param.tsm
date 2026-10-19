@@ -1,0 +1,28 @@
+class Node {
+    v: Int32
+    kids: Array<Node>
+}
+
+function mk(l: Node, r: Node): Node {
+    let e = new Node()
+    e.kids = [l, r]
+    return e
+}
+
+function sum(x: Int32, y: Int32): Int32 {
+    return x + y
+}
+
+function main() {
+    let a = new Node()
+    a.v = 1
+    let b = new Node()
+    b.v = 2
+    let e = mk(a, b)
+    let k0 = e.kids[0]
+    console.log(`k0=${k0.v}`)
+    console.log(`sum=${sum(3, 4)}`)
+    let pair = [a, b]
+    let p0 = pair[0]
+    console.log(`p0=${p0.v}`)
+}

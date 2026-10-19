@@ -1,0 +1,24 @@
+// lex-diff driver: lexes a file with the self-hosted (malex) lexer and
+// prints tokens in the mast.dumpTok format (identical to Rust tokdump).
+use mast
+use malex
+use fs
+
+async function main() {
+    let a = fs.args()
+    if (a.length < 2) {
+        console.log("usage: lextest <file.tsm>")
+        return
+    }
+    let src = await fs.readFile(a[1])
+    let r = malex.lex(src)
+    if (!r.ok) {
+        console.log(`LEXERR ${r.msg} @${r.line}:${r.col}`)
+        return
+    }
+    let i = 0
+    while (i < r.toks.length) {
+        console.log(mast.dumpTok(r.toks[i]))
+        i++
+    }
+}

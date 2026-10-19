@@ -1,0 +1,30 @@
+class Expr {
+    kind: Int32
+    ival: Int32
+    op: Int32
+    kids: Array<Expr>
+    line: Int32
+    col: Int32
+}
+
+function mkInt(v: Int32): Expr {
+    let e = new Expr()
+    e.kind = 1
+    e.ival = v
+    return e
+}
+
+function mkBin(l: Expr, r: Expr): Expr {
+    let e = new Expr()
+    e.kind = 2
+    e.kids = [l, r]
+    return e
+}
+
+function main() {
+    let sum = mkBin(mkInt(1), mkInt(2))
+    let k0 = sum.kids[0]
+    console.log(`k0.kind=${k0.kind} k0.ival=${k0.ival}`)
+    let n = sum.kids.length
+    console.log(`len=${n}`)
+}

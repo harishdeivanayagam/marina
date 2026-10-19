@@ -1,0 +1,15 @@
+use fs
+
+// verify the bootstrap primitives: charAt, substring, fs.args
+function main() {
+    let src = "let x = 10"
+    console.log(`c0=${src.charAt(0)} c4=${src.charAt(4)} oob=${src.charAt(99)}`)
+    console.log(`sub=${src.substring(4, 5)} head=${src.substring(0, 3)} tail=${src.substring(8, 10)} oob=${src.substring(50, 99)}`)
+    let a = fs.args()
+    console.log(`argc=${a.length}`)
+    let i = 0
+    while (i < a.length) {
+        console.log(`arg[${i}]=${a[i]}`)
+        i++
+    }
+}

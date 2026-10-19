@@ -1,0 +1,19 @@
+class Box2 {
+    items: Array<Int32>
+}
+
+function mkBox(): Box2 {
+    let b = new Box2()
+    b.items = empty()
+    return b
+}
+
+function empty(): Array<Int32> {
+    let a: Array<Int32> = []
+    return a
+}
+
+function main() {
+    let b = mkBox()
+    console.log(`n=${b.items.length}`)
+}

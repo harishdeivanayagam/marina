@@ -231,6 +231,16 @@ pub enum CExpr {
     },
     /// `str.length`
     StrLen(Box<CExpr>),
+    /// `str.charAt(i)` / `str.substring(a, b)` — bootstrap primitives for
+    /// the self-hosted compiler (byte-index based, matching the runtime).
+    StrMethod {
+        op: StrOpKind,
+        obj: Box<CExpr>,
+        args: Vec<CExpr>,
+        ret: CTy,
+    },
+    /// `fs.args()` — process arguments as `Array<string>`.
+    FsArgs,
     /// `{ field: expr, ... }` — `class_id` indexes `Checked::classes`;
     /// `inits` are (field index, checked value) pairs in class-field order.
     ObjectLit {
@@ -422,6 +432,12 @@ pub enum HofKind {
     Map,
     Filter,
     Reduce,
+}
+
+#[derive(Clone, Copy, PartialEq)]
+pub enum StrOpKind {
+    CharAt,
+    Substring,
 }
 
 /// How the generated lambda is called by the runtime.
@@ -828,7 +844,13 @@ impl Checker {
     /// pass 0: hoist all declared classes into the class table so types can
     /// reference classes defined anywhere in the file. Generic classes
     /// (`class Box<T>`) are stashed for monomorphization instead.
+    /// Two passes: first register every non-generic class name (with an
+    /// empty field list), then resolve fields — this makes recursive and
+    /// mutually-referential class types work (`class Expr { kids:
+    /// Array<Expr> }`, `class A { b: B }` where B is declared later).
     fn register_classes(&mut self, program: &Program) {
+        // pass A: names only (enables forward/recursive references)
+        let mut pending: Vec<(usize, ClassDecl)> = Vec::new(); // (id, decl)
         for cl in &program.classes {
             if !is_pascal_case(&cl.name) {
                 self.diag(format!("class '{}' must be PascalCase", cl.name), cl.span);
@@ -841,6 +863,14 @@ impl Checker {
                 self.generic_classes.insert(cl.name.clone(), cl.clone());
                 continue;
             }
+            let id = self.classes.len();
+            self.classes
+                .push(ClassDef { name: cl.name.clone(), fields: Vec::new(), is_ghost: false });
+            self.class_by_name.insert(cl.name.clone(), id);
+            pending.push((id, cl.clone()));
+        }
+        // pass B: field types (now every declared class name is known)
+        for (id, cl) in &pending {
             let mut fields: Vec<(String, CTy)> = Vec::new();
             let mut seen_fields = std::collections::HashSet::new();
             for (fname, ann) in &cl.fields {
@@ -854,10 +884,7 @@ impl Checker {
                 let t = self.ty_of(ann);
                 fields.push((fname.clone(), t));
             }
-            let id = self.classes.len();
-            self.classes
-                .push(ClassDef { name: cl.name.clone(), fields, is_ghost: false });
-            self.class_by_name.insert(cl.name.clone(), id);
+            self.classes[*id].fields = fields;
         }
     }
 
@@ -1769,6 +1796,8 @@ impl Checker {
             CExpr::ArrayHof { ret, .. } => ret.clone(),
             CExpr::LambdaVal { ret, .. } => ret.clone(),
             CExpr::StrLen(_) => CTy::Int,
+            CExpr::StrMethod { ret, .. } => ret.clone(),
+            CExpr::FsArgs => CTy::Array(Box::new(CTy::Str)),
             CExpr::ObjectLit { class_id, .. } => {
                 let name = self.classes[*class_id].name.clone();
                 CTy::Object(ObjectTy { id: *class_id, name })
@@ -3178,6 +3207,12 @@ fn unify_ann(
 }
 
 fn check_fs_module(&mut self, name: &str, args: &[Expr], span: Span) -> CExpr {
+        if name == "args" {
+            if !args.is_empty() {
+                self.diag("fs.args takes no arguments", span);
+            }
+            return CExpr::FsArgs;
+        }
         if !args.is_empty() {
             let path = self.check_expr(&args[0], false);
             self.coerce(&self.expr_ty(&path), &CTy::Str, args[0].span());
@@ -3232,7 +3267,7 @@ fn check_fs_module(&mut self, name: &str, args: &[Expr], span: Span) -> CExpr {
         }
         self.diag(
             format!(
-                "fs.{} is not supported (fs has readFile, writeFile, exists, readDir, mkdir, remove)",
+                "fs.{} is not supported (fs has args, readFile, writeFile, exists, readDir, mkdir, remove)",
                 name
             ),
             span,
@@ -3377,6 +3412,9 @@ fn check_fs_module(&mut self, name: &str, args: &[Expr], span: Span) -> CExpr {
                 if let CTy::Array(elem) = ot {
                     return self.check_array_method(oc, *elem, name, args, span);
                 }
+                if let CTy::Str = ot {
+                    return self.check_str_method(oc, name, args, span);
+                }
                 if let CTy::Stream = ot {
                     return self.check_stream_method(oc, name, args, span);
                 }
@@ -3402,6 +3440,9 @@ fn check_fs_module(&mut self, name: &str, args: &[Expr], span: Span) -> CExpr {
             let ot = self.expr_ty(&oc);
             if let CTy::Array(elem) = ot {
                 return self.check_array_method(oc, *elem, name, args, span);
+            }
+            if let CTy::Str = ot {
+                return self.check_str_method(oc, name, args, span);
             }
             if let CTy::Stream = ot {
                 return self.check_stream_method(oc, name, args, span);
@@ -3888,6 +3929,59 @@ fn check_array_lit(&mut self, elems: &[Expr], span: Span, expected: Option<CTy>)
             },
         };
         CExpr::ArrayLit { elems: cs, elem_ty }
+    }
+
+    /// `<string>.method(...)` — bootstrap primitives used by the
+    /// self-hosted compiler (byte-index based, like the runtime).
+    fn check_str_method(&mut self, s: CExpr, name: &str, args: &[Expr], span: Span) -> CExpr {
+        match name {
+            "charAt" => {
+                if args.len() != 1 {
+                    self.diag("string.charAt takes (index)", span);
+                    return CExpr::Bool(false);
+                }
+                let i = self.check_expr(&args[0], false);
+                if self.expr_ty(&i) != CTy::Int {
+                    self.diag("string.charAt index must be Int32", span);
+                }
+                CExpr::StrMethod {
+                    op: StrOpKind::CharAt,
+                    obj: Box::new(s),
+                    args: vec![i],
+                    ret: CTy::Int,
+                }
+            }
+            "substring" => {
+                if args.len() != 2 {
+                    self.diag("string.substring takes (start, end)", span);
+                    return CExpr::Bool(false);
+                }
+                let mut cargs = Vec::new();
+                for a in args {
+                    let c = self.check_expr(a, false);
+                    if self.expr_ty(&c) != CTy::Int {
+                        self.diag("string.substring indices must be Int32", span);
+                    }
+                    cargs.push(c);
+                }
+                CExpr::StrMethod {
+                    op: StrOpKind::Substring,
+                    obj: Box::new(s),
+                    args: cargs,
+                    ret: CTy::Str,
+                }
+            }
+            _ => {
+                self.diag(
+                    format!(
+                        "strings have no method '{}' (available: length, charAt, substring)",
+                        name
+                    ),
+                    span,
+                );
+                CExpr::Bool(false)
+            }
+        }
     }
 
     /// `<array>.method(...)` — the one supported family of method calls.

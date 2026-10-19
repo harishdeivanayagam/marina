@@ -1,0 +1,912 @@
+// mast — AST classes for the self-hosted marina compiler (port of ast.rs).
+//
+// Marina v0.2 classes are data-only, so the AST uses "fat struct" nodes:
+// every variant of the Rust enum maps to one class with a kind tag; unused
+// fields stay at their zero value. Kind constants are functions (packages
+// cannot declare top-level constants).
+
+// ---------------------------------------------------------------------------
+// Expression kinds (mirror Expr in ast.rs)
+// ---------------------------------------------------------------------------
+
+function ekInt(): Int32 { return 1 }
+function ekFloat(): Int32 { return 2 }
+function ekBool(): Int32 { return 3 }
+function ekStr(): Int32 { return 4 }
+function ekTemplate(): Int32 { return 5 }
+function ekTagged(): Int32 { return 6 }
+function ekIdent(): Int32 { return 7 }
+function ekUnary(): Int32 { return 8 }
+function ekBinary(): Int32 { return 9 }
+function ekCall(): Int32 { return 10 }
+function ekCallGen(): Int32 { return 11 }
+function ekMember(): Int32 { return 12 }
+function ekIndex(): Int32 { return 13 }
+function ekArrayLit(): Int32 { return 14 }
+function ekNewCtor(): Int32 { return 15 }
+function ekObjectLit(): Int32 { return 16 }
+function ekNewClass(): Int32 { return 17 }
+function ekAwait(): Int32 { return 18 }
+function ekNewPromise(): Int32 { return 19 }
+function ekLambda(): Int32 { return 20 }
+
+// ---------------------------------------------------------------------------
+// Statement kinds (mirror Stmt in ast.rs)
+// ---------------------------------------------------------------------------
+
+function skLet(): Int32 { return 1 }
+function skAssign(): Int32 { return 2 }
+function skMemberAssign(): Int32 { return 3 }
+function skIndexAssign(): Int32 { return 4 }
+function skReturn(): Int32 { return 5 }
+function skIf(): Int32 { return 6 }
+function skWhile(): Int32 { return 7 }
+function skFor(): Int32 { return 8 }
+function skExpr(): Int32 { return 9 }
+
+// ---------------------------------------------------------------------------
+// Operators (mirror BinOp / UnOp)
+// ---------------------------------------------------------------------------
+
+function boAdd(): Int32 { return 1 }
+function boSub(): Int32 { return 2 }
+function boMul(): Int32 { return 3 }
+function boDiv(): Int32 { return 4 }
+function boMod(): Int32 { return 5 }
+function boLt(): Int32 { return 6 }
+function boGt(): Int32 { return 7 }
+function boLe(): Int32 { return 8 }
+function boGe(): Int32 { return 9 }
+function boEq(): Int32 { return 10 }
+function boNeq(): Int32 { return 11 }
+function boAnd(): Int32 { return 12 }
+function boOr(): Int32 { return 13 }
+
+function uoNeg(): Int32 { return 1 }
+function uoNot(): Int32 { return 2 }
+
+// ---------------------------------------------------------------------------
+// Token kinds / keyword ids / punctuation ids (mirror lexer.rs enums)
+// ---------------------------------------------------------------------------
+
+function tkIdent(): Int32 { return 1 }
+function tkInt(): Int32 { return 2 }
+function tkFloat(): Int32 { return 3 }
+function tkStr(): Int32 { return 4 }
+function tkTemplate(): Int32 { return 5 }
+function tkKw(): Int32 { return 6 }
+function tkP(): Int32 { return 7 }
+function tkEof(): Int32 { return 8 }
+
+function kwLet(): Int32 { return 1 }
+function kwConst(): Int32 { return 2 }
+function kwFunction(): Int32 { return 3 }
+function kwAsync(): Int32 { return 4 }
+function kwAwait(): Int32 { return 5 }
+function kwReturn(): Int32 { return 6 }
+function kwIf(): Int32 { return 7 }
+function kwElse(): Int32 { return 8 }
+function kwWhile(): Int32 { return 9 }
+function kwFor(): Int32 { return 10 }
+function kwTrue(): Int32 { return 11 }
+function kwFalse(): Int32 { return 12 }
+function kwNew(): Int32 { return 13 }
+function kwClass(): Int32 { return 14 }
+function kwUse(): Int32 { return 15 }
+function kwImport(): Int32 { return 16 }
+function kwInterface(): Int32 { return 17 }
+
+function pPlus(): Int32 { return 1 }
+function pMinus(): Int32 { return 2 }
+function pStar(): Int32 { return 3 }
+function pSlash(): Int32 { return 4 }
+function pPercent(): Int32 { return 5 }
+function pPlusPlus(): Int32 { return 6 }
+function pMinusMinus(): Int32 { return 7 }
+function pPlusAssign(): Int32 { return 8 }
+function pMinusAssign(): Int32 { return 9 }
+function pAssign(): Int32 { return 10 }
+function pEq(): Int32 { return 11 }
+function pNeq(): Int32 { return 12 }
+function pLt(): Int32 { return 13 }
+function pGt(): Int32 { return 14 }
+function pLe(): Int32 { return 15 }
+function pGe(): Int32 { return 16 }
+function pAndAnd(): Int32 { return 17 }
+function pOrOr(): Int32 { return 18 }
+function pBang(): Int32 { return 19 }
+function pLParen(): Int32 { return 20 }
+function pRParen(): Int32 { return 21 }
+function pLBrace(): Int32 { return 22 }
+function pRBrace(): Int32 { return 23 }
+function pLBracket(): Int32 { return 24 }
+function pRBracket(): Int32 { return 25 }
+function pComma(): Int32 { return 26 }
+function pColon(): Int32 { return 27 }
+function pSemi(): Int32 { return 28 }
+function pDot(): Int32 { return 29 }
+function pArrow(): Int32 { return 30 }
+
+// ---------------------------------------------------------------------------
+// AST node classes
+// ---------------------------------------------------------------------------
+
+class Tok {
+    kind: Int32          // tkIdent / tkInt / tkFloat / tkStr / tkTemplate / tkKw / tkP / tkEof
+    s: string            // Ident name, Str value
+    i: Int32             // Int value, Kw id, P id
+    f: Float64           // Float value
+    parts: Array<TPart>  // Template parts
+    line: Int32
+    col: Int32
+}
+
+// Template part: literal text chunk or raw `${...}` expression source.
+// The parser stores both the raw text (for error messages) and the parsed
+// sub-expression (mirrors ast.rs TPart::Expr(Box<Expr>) plus its span).
+class TPart {
+    isExpr: bool         // false: text chunk (t), true: raw expression source (t) + parsed expr (e)
+    t: string
+    e: Expr
+    line: Int32          // span of the `${` (for expr parts)
+    col: Int32
+}
+
+class TyAnn {
+    name: string
+    args: Array<TyAnn>
+    line: Int32
+    col: Int32
+}
+
+class Param {
+    name: string
+    ann: TyAnn
+    hasAnn: bool
+    line: Int32
+    col: Int32
+}
+
+class Lambda {
+    params: Array<Param>
+    body: Array<Stmt>
+    isAsync: bool
+    line: Int32
+    col: Int32
+}
+
+class Expr {
+    kind: Int32
+    opv: Int32           // BinOp/UnOp id for Unary/Binary
+    ival: Int32
+    fval: Float64
+    bval: bool
+    sval: string         // Str value, Ident name, Member field
+    kids: Array<Expr>    // positional sub-expressions (see parser port)
+    args: Array<Expr>    // call / callgen / newctor arguments
+    names: Array<string> // ident name, member field, objectlit fields, newctor path, newclass name
+    parts: Array<TPart>  // template / tagged parts
+    targs: Array<TyAnn>  // callgen / newclass explicit type arguments
+    lam: Lambda          // lambda payload
+    line: Int32
+    col: Int32
+}
+
+class Stmt {
+    kind: Int32
+    name: string         // let/assign/member-assign/index-assign target name
+    field: string        // member-assign field name
+    isConst: bool        // let declarations
+    e1: Expr             // init / value / cond / return value / expr / index expr (for ISET: the index)
+    e2: Expr             // index-assign value (e1 carries the index)
+    hasE1: bool
+    hasE2: bool
+    s1: Stmt             // for-init
+    s2: Stmt             // for-update
+    hasS1: bool
+    hasS2: bool
+    body: Array<Stmt>    // if-then / while / for body
+    els: Array<Stmt>     // if-else body (empty = absent)
+    ann: TyAnn           // let annotation
+    hasAnn: bool
+    line: Int32
+    col: Int32
+}
+
+class FieldDecl {
+    name: string
+    ann: TyAnn
+    line: Int32
+    col: Int32
+}
+
+class FnDecl {
+    name: string
+    typeParams: Array<string>
+    params: Array<Param>
+    retAnn: TyAnn
+    hasRet: bool
+    body: Array<Stmt>
+    isAsync: bool
+    line: Int32
+    col: Int32
+}
+
+class ClassDecl {
+    name: string
+    typeParams: Array<string>
+    fields: Array<FieldDecl>
+    line: Int32
+    col: Int32
+}
+
+class IfaceDecl {
+    name: string
+    fields: Array<FieldDecl>
+    line: Int32
+    col: Int32
+}
+
+class Program {
+    stmts: Array<Stmt>
+    fns: Array<FnDecl>
+    classes: Array<ClassDecl>
+    ifaces: Array<IfaceDecl>
+    useNames: Array<string>
+    useLines: Array<Int32>
+    useCols: Array<Int32>
+}
+
+// ---------------------------------------------------------------------------
+// Constructors (zero-value fields default; set the ones that matter)
+// ---------------------------------------------------------------------------
+
+
+// fresh empty arrays (empty literals cannot infer element types)
+function emptyStmts(): Array<Stmt> {
+    let a: Array<Stmt> = []
+    return a
+}
+function emptyExprs(): Array<Expr> {
+    let a: Array<Expr> = []
+    return a
+}
+function emptyStrs(): Array<string> {
+    let a: Array<string> = []
+    return a
+}
+function emptyInts(): Array<Int32> {
+    let a: Array<Int32> = []
+    return a
+}
+function emptyTParts(): Array<TPart> {
+    let a: Array<TPart> = []
+    return a
+}
+function emptyTyAnns(): Array<TyAnn> {
+    let a: Array<TyAnn> = []
+    return a
+}
+function emptyParams(): Array<Param> {
+    let a: Array<Param> = []
+    return a
+}
+function emptyFields(): Array<FieldDecl> {
+    let a: Array<FieldDecl> = []
+    return a
+}
+function emptyIfaces(): Array<IfaceDecl> {
+    let a: Array<IfaceDecl> = []
+    return a
+}
+function emptyFns(): Array<FnDecl> {
+    let a: Array<FnDecl> = []
+    return a
+}
+function emptyClasses(): Array<ClassDecl> {
+    let a: Array<ClassDecl> = []
+    return a
+}
+
+function newProgram(): Program {
+    let p = new Program()
+    let es: Array<Stmt> = []
+    let ef: Array<FnDecl> = []
+    let ec: Array<ClassDecl> = []
+    let ei: Array<IfaceDecl> = []
+    let en: Array<string> = []
+    let el: Array<Int32> = []
+    let ecl: Array<Int32> = []
+    p.stmts = es
+    p.fns = ef
+    p.classes = ec
+    p.ifaces = ei
+    p.useNames = en
+    p.useLines = el
+    p.useCols = ecl
+    return p
+}
+
+function newTok(kind: Int32, line: Int32, col: Int32): Tok {
+    let t = new Tok()
+    t.kind = kind
+    t.s = ""
+    t.parts = emptyTParts()
+    t.line = line
+    t.col = col
+    return t
+}
+
+function newLambda(line: Int32, col: Int32): Lambda {
+    let l = new Lambda()
+    l.params = emptyParams()
+    l.body = emptyStmts()
+    l.line = line
+    l.col = col
+    return l
+}
+
+function newExpr(kind: Int32, line: Int32, col: Int32): Expr {
+    let e = new Expr()
+    e.kind = kind
+    e.sval = ""
+    e.kids = emptyExprs()
+    e.args = emptyExprs()
+    e.names = emptyStrs()
+    e.parts = emptyTParts()
+    e.targs = emptyTyAnns()
+    e.lam = newLambda(line, col)
+    e.line = line
+    e.col = col
+    return e
+}
+
+function newTPartStr(t: string): TPart {
+    let p = new TPart()
+    p.isExpr = false
+    p.t = t
+    p.e = newExpr(ekBool(), 0, 0)
+    return p
+}
+
+function newTPartExpr(t: string, e: Expr, line: Int32, col: Int32): TPart {
+    let p = new TPart()
+    p.isExpr = true
+    p.t = t
+    p.e = e
+    p.line = line
+    p.col = col
+    return p
+}
+
+function newTyAnn(name: string, line: Int32, col: Int32): TyAnn {
+    let a = new TyAnn()
+    a.name = name
+    a.args = emptyTyAnns()
+    a.line = line
+    a.col = col
+    return a
+}
+
+function newParam(name: string, line: Int32, col: Int32): Param {
+    let p = new Param()
+    p.name = name
+    p.hasAnn = false
+    p.line = line
+    p.col = col
+    return p
+}
+
+function newStmt(kind: Int32, line: Int32, col: Int32): Stmt {
+    let s = new Stmt()
+    s.kind = kind
+    s.name = ""
+    s.field = ""
+    s.e1 = newExpr(ekBool(), line, col)
+    s.e2 = newExpr(ekBool(), line, col)
+    s.hasE1 = false
+    s.hasE2 = false
+    // s1/s2 are only read when hasS1/hasS2 is true; leaving them unset avoids
+    // infinite constructor recursion (classes are data-only, no statics)
+    s.hasS1 = false
+    s.hasS2 = false
+    s.body = emptyStmts()
+    s.els = emptyStmts()
+    s.ann = newTyAnn("", line, col)
+    s.hasAnn = false
+    s.line = line
+    s.col = col
+    return s
+}
+
+function newFieldDecl(name: string, ann: TyAnn, line: Int32, col: Int32): FieldDecl {
+    let f = new FieldDecl()
+    f.name = name
+    f.ann = ann
+    f.line = line
+    f.col = col
+    return f
+}
+
+function newFnDecl(name: string, line: Int32, col: Int32): FnDecl {
+    let f = new FnDecl()
+    f.name = name
+    f.typeParams = emptyStrs()
+    f.params = emptyParams()
+    f.hasRet = false
+    f.body = emptyStmts()
+    f.retAnn = newTyAnn("", line, col)
+    f.line = line
+    f.col = col
+    return f
+}
+
+function newClassDecl(name: string, line: Int32, col: Int32): ClassDecl {
+    let c = new ClassDecl()
+    c.name = name
+    c.typeParams = emptyStrs()
+    c.fields = emptyFields()
+    c.line = line
+    c.col = col
+    return c
+}
+
+function newIfaceDecl(name: string, line: Int32, col: Int32): IfaceDecl {
+    let c = new IfaceDecl()
+    c.name = name
+    c.fields = emptyFields()
+    c.line = line
+    c.col = col
+    return c
+}
+
+// ---------------------------------------------------------------------------
+// Escaping for dumps (must match the Rust tokdump/astdump bins exactly)
+// ---------------------------------------------------------------------------
+
+function escStr(s: string): string {
+    let out = ""
+    let i = 0
+    while (i < s.length) {
+        let c = s.charAt(i)
+        if (c == 92) {
+            out = `${out}\\\\`
+        } else if (c == 10) {
+            out = `${out}\\n`
+        } else if (c == 13) {
+            out = `${out}\\r`
+        } else if (c == 9) {
+            out = `${out}\\t`
+        } else if (c == 96) {
+            out = `${out}\\\``
+        } else if (c == 36) {
+            out = `${out}\\$`
+        } else {
+            out = `${out}${s.substring(i, i + 1)}`
+        }
+        i++
+    }
+    return out
+}
+
+// ---------------------------------------------------------------------------
+// Dumpers — one node per line, indented by depth; the Rust astdump/tokdump
+// bins print the identical format so the two front-ends can be diffed.
+// ---------------------------------------------------------------------------
+
+function dumpKw(k: Int32): string {
+    if (k == kwLet()) { return "let" }
+    if (k == kwConst()) { return "const" }
+    if (k == kwFunction()) { return "function" }
+    if (k == kwAsync()) { return "async" }
+    if (k == kwAwait()) { return "await" }
+    if (k == kwReturn()) { return "return" }
+    if (k == kwIf()) { return "if" }
+    if (k == kwElse()) { return "else" }
+    if (k == kwWhile()) { return "while" }
+    if (k == kwFor()) { return "for" }
+    if (k == kwTrue()) { return "true" }
+    if (k == kwFalse()) { return "false" }
+    if (k == kwNew()) { return "new" }
+    if (k == kwClass()) { return "class" }
+    if (k == kwUse()) { return "use" }
+    if (k == kwImport()) { return "import" }
+    return "interface"
+}
+
+function dumpP(p: Int32): string {
+    if (p == pPlus()) { return "+" }
+    if (p == pMinus()) { return "-" }
+    if (p == pStar()) { return "*" }
+    if (p == pSlash()) { return "/" }
+    if (p == pPercent()) { return "%" }
+    if (p == pPlusPlus()) { return "++" }
+    if (p == pMinusMinus()) { return "--" }
+    if (p == pPlusAssign()) { return "+=" }
+    if (p == pMinusAssign()) { return "-=" }
+    if (p == pAssign()) { return "=" }
+    if (p == pEq()) { return "==" }
+    if (p == pNeq()) { return "!=" }
+    if (p == pLt()) { return "<" }
+    if (p == pGt()) { return ">" }
+    if (p == pLe()) { return "<=" }
+    if (p == pGe()) { return ">=" }
+    if (p == pAndAnd()) { return "&&" }
+    if (p == pOrOr()) { return "||" }
+    if (p == pBang()) { return "!" }
+    if (p == pLParen()) { return "(" }
+    if (p == pRParen()) { return ")" }
+    if (p == pLBrace()) { return "{" }
+    if (p == pRBrace()) { return "}" }
+    if (p == pLBracket()) { return "[" }
+    if (p == pRBracket()) { return "]" }
+    if (p == pComma()) { return "," }
+    if (p == pColon()) { return ":" }
+    if (p == pSemi()) { return ";" }
+    if (p == pDot()) { return "." }
+    return "=>"
+}
+
+function dumpBinOp(op: Int32): string {
+    if (op == boAdd()) { return "+" }
+    if (op == boSub()) { return "-" }
+    if (op == boMul()) { return "*" }
+    if (op == boDiv()) { return "/" }
+    if (op == boMod()) { return "%" }
+    if (op == boLt()) { return "<" }
+    if (op == boGt()) { return ">" }
+    if (op == boLe()) { return "<=" }
+    if (op == boGe()) { return ">=" }
+    if (op == boEq()) { return "==" }
+    if (op == boNeq()) { return "!=" }
+    if (op == boAnd()) { return "&&" }
+    return "||"
+}
+
+function dumpUnOp(op: Int32): string {
+    if (op == uoNeg()) { return "-" }
+    return "!"
+}
+
+function dumpTy(a: TyAnn): string {
+    if (a.args.length == 0) {
+        return a.name
+    }
+    let inner = dumpTy(a.args[0])
+    return `${a.name}<${inner}>`
+}
+
+function dumpTok(t: Tok): string {
+    let at = ` @${t.line}:${t.col}`
+    if (t.kind == tkIdent()) {
+        return `IDENT ${escStr(t.s)}${at}`
+    }
+    if (t.kind == tkInt()) {
+        return `INT ${t.i}${at}`
+    }
+    if (t.kind == tkFloat()) {
+        return `FLOAT ${fmtFloat(t.f)}${at}`
+    }
+    if (t.kind == tkStr()) {
+        return `STR ${escStr(t.s)}${at}`
+    }
+    if (t.kind == tkTemplate()) {
+        let out = `TPL${at}`
+        let i = 0
+        while (i < t.parts.length) {
+            let p = t.parts[i]
+            if (p.isExpr) {
+                out = `${out}\n  PEXPR ${escStr(p.t)} @${p.line}:${p.col}`
+            } else {
+                out = `${out}\n  PSTR ${escStr(p.t)}`
+            }
+            i++
+        }
+        return out
+    }
+    if (t.kind == tkKw()) {
+        return `KW ${dumpKw(t.i)}${at}`
+    }
+    if (t.kind == tkP()) {
+        return `P ${dumpP(t.i)}${at}`
+    }
+    return `EOF${at}`
+}
+
+function fmtFloat(f: Float64): string {
+    return `${f}`
+}
+
+function dumpExpr(e: Expr, d: Int32, out: Array<string>): void {
+    let pad = indent(d)
+    let at = ` @${e.line}:${e.col}`
+    if (e.kind == ekInt()) {
+        out.push(`${pad}INT ${e.ival}${at}`)
+    } else if (e.kind == ekFloat()) {
+        out.push(`${pad}FLOAT ${fmtFloat(e.fval)}${at}`)
+    } else if (e.kind == ekBool()) {
+        let b = "false"
+        if (e.bval) { b = "true" }
+        out.push(`${pad}BOOL ${b}${at}`)
+    } else if (e.kind == ekStr()) {
+        out.push(`${pad}STR ${escStr(e.sval)}${at}`)
+    } else if (e.kind == ekIdent()) {
+        out.push(`${pad}IDENT ${escStr(e.sval)}${at}`)
+    } else if (e.kind == ekUnary()) {
+        out.push(`${pad}UNARY ${dumpUnOp(e.opv)}${at}`)
+        dumpExpr(e.kids[0], d + 1, out)
+    } else if (e.kind == ekBinary()) {
+        out.push(`${pad}BINARY ${dumpBinOp(e.opv)}${at}`)
+        dumpExpr(e.kids[0], d + 1, out)
+        dumpExpr(e.kids[1], d + 1, out)
+    } else if (e.kind == ekTemplate()) {
+        out.push(`${pad}TEMPLATE${at}`)
+        dumpParts(e.parts, d + 1, out)
+    } else if (e.kind == ekTagged()) {
+        out.push(`${pad}TAGGED${at}`)
+        dumpExpr(e.kids[0], d + 1, out)
+        dumpParts(e.parts, d + 1, out)
+    } else if (e.kind == ekCall()) {
+        out.push(`${pad}CALL${at}`)
+        dumpExpr(e.kids[0], d + 1, out)
+        dumpExprs(e.args, d + 1, out)
+    } else if (e.kind == ekCallGen()) {
+        out.push(`${pad}CALLGEN${at}`)
+        dumpTargs(e.targs, d + 1, out)
+        dumpExpr(e.kids[0], d + 1, out)
+        dumpExprs(e.args, d + 1, out)
+    } else if (e.kind == ekMember()) {
+        out.push(`${pad}MEMBER ${escStr(e.sval)}${at}`)
+        dumpExpr(e.kids[0], d + 1, out)
+    } else if (e.kind == ekIndex()) {
+        out.push(`${pad}INDEX${at}`)
+        dumpExpr(e.kids[0], d + 1, out)
+        dumpExpr(e.kids[1], d + 1, out)
+    } else if (e.kind == ekArrayLit()) {
+        out.push(`${pad}ARRAYLIT${at}`)
+        dumpExprs(e.args, d + 1, out)
+    } else if (e.kind == ekNewCtor()) {
+        let path = e.names[0]
+        let i = 1
+        while (i < e.names.length) {
+            path = `${path}.${e.names[i]}`
+            i++
+        }
+        out.push(`${pad}NEWCTOR ${escStr(path)}${at}`)
+        dumpExprs(e.args, d + 1, out)
+    } else if (e.kind == ekObjectLit()) {
+        out.push(`${pad}OBJECTLIT${at}`)
+        let i = 0
+        while (i < e.names.length) {
+            out.push(`${indent(d + 1)}FIELD ${escStr(e.names[i])}`)
+            dumpExpr(e.args[i], d + 2, out)
+            i++
+        }
+    } else if (e.kind == ekNewClass()) {
+        out.push(`${pad}NEWCLASS ${escStr(e.sval)}${at}`)
+        dumpTargs(e.targs, d + 1, out)
+    } else if (e.kind == ekAwait()) {
+        out.push(`${pad}AWAIT${at}`)
+        dumpExpr(e.kids[0], d + 1, out)
+    } else if (e.kind == ekNewPromise()) {
+        out.push(`${pad}NEWPROMISE${at}`)
+        dumpExpr(e.kids[0], d + 1, out)
+    } else if (e.kind == ekLambda()) {
+        out.push(`${pad}LAMBDA${at}`)
+        dumpLambda(e.lam, d + 1, out)
+    }
+}
+
+function dumpParts(parts: Array<TPart>, d: Int32, out: Array<string>): void {
+    let i = 0
+    while (i < parts.length) {
+        let p = parts[i]
+        if (p.isExpr) {
+            out.push(`${indent(d)}PEXPR`)
+            dumpExpr(p.e, d + 1, out)
+        } else {
+            out.push(`${indent(d)}PSTR ${escStr(p.t)}`)
+        }
+        i++
+    }
+}
+
+function dumpTargs(targs: Array<TyAnn>, d: Int32, out: Array<string>): void {
+    let i = 0
+    while (i < targs.length) {
+        out.push(`${indent(d)}TARG ${dumpTy(targs[i])}`)
+        i++
+    }
+}
+
+function dumpExprs(es: Array<Expr>, d: Int32, out: Array<string>): void {
+    let i = 0
+    while (i < es.length) {
+        dumpExpr(es[i], d, out)
+        i++
+    }
+}
+
+function dumpLambda(l: Lambda, d: Int32, out: Array<string>): void {
+    let pre = "lambda"
+    if (l.isAsync) { pre = "alambda" }
+    let i = 0
+    while (i < l.params.length) {
+        let p = l.params[i]
+        if (p.hasAnn) {
+            out.push(`${indent(d)}${pre}PARAM ${escStr(p.name)} : ${dumpTy(p.ann)}`)
+        } else {
+            out.push(`${indent(d)}${pre}PARAM ${escStr(p.name)}`)
+        }
+        i++
+    }
+    dumpStmts(l.body, d, out)
+}
+
+function dumpStmt(s: Stmt, d: Int32, out: Array<string>): void {
+    let pad = indent(d)
+    let at = ` @${s.line}:${s.col}`
+    if (s.kind == skLet()) {
+        let k = "LET"
+        if (s.isConst) { k = "CONST" }
+        if (s.hasAnn) {
+            out.push(`${pad}${k} ${escStr(s.name)} : ${dumpTy(s.ann)}${at}`)
+        } else {
+            out.push(`${pad}${k} ${escStr(s.name)}${at}`)
+        }
+        dumpExpr(s.e1, d + 1, out)
+    } else if (s.kind == skAssign()) {
+        out.push(`${pad}ASSIGN ${escStr(s.name)}${at}`)
+        dumpExpr(s.e1, d + 1, out)
+    } else if (s.kind == skMemberAssign()) {
+        out.push(`${pad}MSET ${escStr(s.name)} ${escStr(s.field)}${at}`)
+        dumpExpr(s.e1, d + 1, out)
+    } else if (s.kind == skIndexAssign()) {
+        out.push(`${pad}ISET ${escStr(s.name)}${at}`)
+        dumpExpr(s.e1, d + 1, out)
+        dumpExpr(s.e2, d + 1, out)
+    } else if (s.kind == skReturn()) {
+        if (s.hasE1) {
+            out.push(`${pad}RETURN${at}`)
+            dumpExpr(s.e1, d + 1, out)
+        } else {
+            out.push(`${pad}RETURN${at}`)
+        }
+    } else if (s.kind == skIf()) {
+        out.push(`${pad}IF${at}`)
+        dumpExpr(s.e1, d + 1, out)
+        dumpStmts(s.body, d + 1, out)
+        if (s.els.length > 0) {
+            out.push(`${pad}ELSE`)
+            dumpStmts(s.els, d + 1, out)
+        }
+    } else if (s.kind == skWhile()) {
+        out.push(`${pad}WHILE${at}`)
+        dumpExpr(s.e1, d + 1, out)
+        dumpStmts(s.body, d + 1, out)
+    } else if (s.kind == skFor()) {
+        out.push(`${pad}FOR${at}`)
+        if (s.hasS1) {
+            out.push(`${pad} INIT`)
+            dumpStmt(s.s1, d + 2, out)
+        }
+        if (s.hasE1) {
+            out.push(`${pad} COND`)
+            dumpExpr(s.e1, d + 2, out)
+        }
+        if (s.hasS2) {
+            out.push(`${pad} UPD`)
+            dumpStmt(s.s2, d + 2, out)
+        }
+        out.push(`${pad} BODY`)
+        dumpStmts(s.body, d + 2, out)
+    } else {
+        out.push(`${pad}EXPRSTMT${at}`)
+        dumpExpr(s.e1, d + 1, out)
+    }
+}
+
+function dumpStmts(ss: Array<Stmt>, d: Int32, out: Array<string>): void {
+    let i = 0
+    while (i < ss.length) {
+        dumpStmt(ss[i], d, out)
+        i++
+    }
+}
+
+function indent(d: Int32): string {
+    let s = ""
+    let i = 0
+    while (i < d) {
+        s = `${s}  `
+        i++
+    }
+    return s
+}
+
+function dumpFn(f: FnDecl, d: Int32, out: Array<string>): void {
+    let pad = indent(d)
+    let pre = "FN"
+    if (f.isAsync) { pre = "AFN" }
+    let tp = ""
+    let i = 0
+    while (i < f.typeParams.length) {
+        if (i == 0) { tp = "<" } else { tp = `${tp}, ` }
+        tp = `${tp}${f.typeParams[i]}`
+        i++
+    }
+    if (f.typeParams.length > 0) { tp = `${tp}>` }
+    if (f.hasRet) {
+        out.push(`${pad}${pre} ${escStr(f.name)}${tp} : ${dumpTy(f.retAnn)} @${f.line}:${f.col}`)
+    } else {
+        out.push(`${pad}${pre} ${escStr(f.name)}${tp} @${f.line}:${f.col}`)
+    }
+    i = 0
+    while (i < f.params.length) {
+        let p = f.params[i]
+        if (p.hasAnn) {
+            out.push(`${indent(d + 1)}PARAM ${escStr(p.name)} : ${dumpTy(p.ann)}`)
+        } else {
+            out.push(`${indent(d + 1)}PARAM ${escStr(p.name)}`)
+        }
+        i++
+    }
+    dumpStmts(f.body, d + 1, out)
+}function dumpProgram(p: Program): string {
+    let out: Array<string> = []
+    let i = 0
+    while (i < p.useNames.length) {
+        out.push(`USE ${escStr(p.useNames[i])} @${p.useLines[i]}:${p.useCols[i]}`)
+        i++
+    }
+    i = 0
+    while (i < p.ifaces.length) {
+        let it = p.ifaces[i]
+        out.push(`IFACE ${escStr(it.name)} @${it.line}:${it.col}`)
+        let j = 0
+        while (j < it.fields.length) {
+            let f = it.fields[j]
+            out.push(`  IFIELDFLD ${escStr(f.name)} : ${dumpTy(f.ann)} @${f.line}:${f.col}`)
+            j++
+        }
+        i++
+    }
+    i = 0
+    while (i < p.classes.length) {
+        let c = p.classes[i]
+        out.push(`CLASS ${escStr(c.name)} @${c.line}:${c.col}`)
+        let j = 0
+        while (j < c.typeParams.length) {
+            out.push(`  TYPEPARAM ${escStr(c.typeParams[j])}`)
+            j++
+        }
+        j = 0
+        while (j < c.fields.length) {
+            let f = c.fields[j]
+            out.push(`  FIELDFLD ${escStr(f.name)} : ${dumpTy(f.ann)} @${f.line}:${f.col}`)
+            j++
+        }
+        i++
+    }
+    i = 0
+    while (i < p.fns.length) {
+        dumpFn(p.fns[i], 0, out)
+        i++
+    }
+    i = 0
+    while (i < p.stmts.length) {
+        dumpStmt(p.stmts[i], 0, out)
+        i++
+    }
+    let text = ""
+    i = 0
+    while (i < out.length) {
+        if (i > 0) {
+            text = `${text}
+`
+        }
+        text = `${text}${out[i]}`
+        i++
+    }
+    return text
+}
