@@ -13,9 +13,8 @@ marina/
 ├── examples/                  # example programs (see below)
 ├── crates/
 │   ├── wave/                  # the package manager & build tool (`wave run`, …)
-│   ├── marina/                # the compiler + CLI + LSP (Rust)
+│   ├── marina/                # the compiler library + LSP (Rust)
 │   │   └── src/
-│   │       ├── main.rs        # bare compiler CLI: `marina run|build <file>`
 │   │       ├── bin/marina-lsp.rs  # LSP server (see "Editor support" below)
 │   │       ├── pipeline.rs    # shared lex→parse→check→codegen→link pipeline
 │   │       ├── lexer.rs       # tokenizer
@@ -44,13 +43,13 @@ cargo build
 
 Marina programs use the **`.tsm`** extension (ts marina), and file names must be **kebab-case** (`hello-world.tsm`).
 
-### The package manager: `wave`
+### The CLI: `wave`
 
-**wave** is the cargo of Marina. Install it (installs `wave`, plus `marina` and `marina-lsp` from the compiler crate):
+**wave** is the cargo of Marina — the single CLI for the language. Install it (plus `marina-lsp` for editor support):
 
 ```sh
 cargo install --path crates/wave
-cargo install --path crates/marina
+cargo install --path crates/marina   # installs the `marina-lsp` server
 ```
 
 | Command | What it does |
@@ -87,20 +86,20 @@ Projects are described by a **`package.json`** in the project root:
 
 **The registry model** — like Rust's crates.io, not node_modules. Packages are installed *once* into a global registry (default `~/.wave/registry/<name>/<version>/main.tsm`, override with the `WAVE_REGISTRY` env var) and every project on the machine uses that copy. There is no per-project dependency folder to commit or vendor. A package is a directory (or git repo) with a `main.tsm` entry file and optional `package.json` metadata (`name`, `version`); `wave add` copies it into the registry and records the dependency. In code, `use my-pkg` merges the package's functions into your program behind a namespace: `my-pkg.fn(...)` calls the package's `fn`. Packages expose functions and classes only — no top-level statements, no `main`, and no dependencies on other packages yet (std modules `net`/`http`/`fs`/`crypto` are allowed).
 
-### The bare compiler
+### One-off files
 
-The `marina` command still works for one-off files (like `rustc` next to cargo):
+`wave run` / `wave build` work on any `.tsm` file, even outside a project:
 
 ```sh
 # compile + run in one step (binary and IR go to a temp dir)
-marina run examples/hello-world.tsm
+wave run examples/hello-world.tsm
 
 # compile to a native binary in ./.marina/
-marina build examples/hello-world.tsm
+wave build examples/hello-world.tsm
 ./.marina/hello-world
 ```
 
-`build` also writes the textual LLVM IR next to the binary (`./.marina/<name>.ll`) so you can inspect what your program compiles to. From this repo you can also use `cargo run -q -p marina -- run examples/hello-world.tsm`.
+`build` also writes the textual LLVM IR next to the binary (`./.marina/<name>.ll`) so you can inspect what your program compiles to. From this repo you can also use `cargo run -q -p wave -- run examples/hello-world.tsm`.
 
 ## The language
 
@@ -469,7 +468,7 @@ What this exercises:
 Try it:
 
 ```sh
-marina run examples/todo-http.tsm
+wave run examples/todo-http.tsm
 curl localhost:8080/todos                                   # GET  -> JSON array
 curl -X POST localhost:8080/todos -d '{"text":"write rust"}' # POST -> appended
 curl -X POST localhost:8080/todos -d '{"text":"hi"}'         # -> runtime panic (min 4 chars)
@@ -534,7 +533,7 @@ Marina ships its own language server (`marina-lsp`, in `crates/marina/src/bin/ma
    ```
    cargo install --path crates/marina
    ```
-   (installs both `marina` and `marina-lsp`)
+   (installs the `marina-lsp` server)
 2. Extensions panel → `…` → **Install from VSIX…** → `editors/marina-lsp/marina-lsp-0.2.2.vsix`
    (rebuild with `editors/marina-lsp/build-vsix.sh`)
 3. Open any `.tsm` file — highlighting applies immediately and diagnostics appear on open and every edit. If the binary

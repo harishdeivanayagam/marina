@@ -449,22 +449,28 @@ fn cmd_remove(rest: &[String]) -> i32 {
 }
 
 fn cmd_check(rest: &[String]) -> i32 {
-    // manifest first: `wave check` doubles as a dependency sanity check
-    let m = match Manifest::load() {
-        Ok(m) => m,
+    // with an explicit file, check works outside a project too; without one,
+    // `wave check` doubles as a dependency sanity check
+    let m: Option<Manifest> = match Manifest::load() {
+        Ok(m) => Some(m),
         Err(e) => {
-            eprintln!("error: {}", e);
-            return 1;
+            if rest.is_empty() {
+                eprintln!("error: {}", e);
+                return 1;
+            }
+            None
         }
     };
-    println!(
-        "package.json ok: {} v{} ({} dependencies)",
-        m.root["name"].as_str().unwrap_or("?"),
-        m.root["version"].as_str().unwrap_or("?"),
-        m.deps.len()
-    );
+    if let Some(m) = &m {
+        println!(
+            "package.json ok: {} v{} ({} dependencies)",
+            m.root["name"].as_str().unwrap_or("?"),
+            m.root["version"].as_str().unwrap_or("?"),
+            m.deps.len()
+        );
+    }
 
-    let entry = match entry_path(rest.first().map(|s| s.as_str()), Some(&m)) {
+    let entry = match entry_path(rest.first().map(|s| s.as_str()), m.as_ref()) {
         Ok(p) => p,
         Err(e) => {
             eprintln!("error: {}", e);
@@ -490,14 +496,18 @@ fn cmd_check(rest: &[String]) -> i32 {
 }
 
 fn cmd_build(rest: &[String]) -> i32 {
-    let m = match Manifest::load() {
-        Ok(m) => m,
+    // with an explicit file, build works outside a project too
+    let m: Option<Manifest> = match Manifest::load() {
+        Ok(m) => Some(m),
         Err(e) => {
-            eprintln!("error: {}", e);
-            return 1;
+            if rest.is_empty() {
+                eprintln!("error: {}", e);
+                return 1;
+            }
+            None
         }
     };
-    let entry = match entry_path(rest.first().map(|s| s.as_str()), Some(&m)) {
+    let entry = match entry_path(rest.first().map(|s| s.as_str()), m.as_ref()) {
         Ok(p) => p,
         Err(e) => {
             eprintln!("error: {}", e);
@@ -523,7 +533,7 @@ fn cmd_run(rest: &[String]) -> i32 {
     let m: Option<Manifest> = match Manifest::load() {
         Ok(m) => Some(m),
         Err(e) => {
-            // `wave run <file>` also works without a project (like `marina run`)
+            // `wave run <file>` also works without a project (compile + run one-off files)
             if rest.is_empty() {
                 eprintln!("error: {}", e);
                 return 1;
