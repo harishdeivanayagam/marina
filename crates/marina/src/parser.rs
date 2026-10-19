@@ -709,10 +709,45 @@ impl Parser {
                     self.expect_punct(P::RBracket, "]")?;
                     e = Expr::Index(Box::new(e), Box::new(idx), self.span());
                 }
+                Tok::Template(_) => {
+                    // tagged template: `sql.stmt\`...\``
+                    let (parts, _) = self.parse_template_token()?;
+                    e = Expr::Tagged(Box::new(e), parts, self.span());
+                }
                 _ => break,
             }
         }
         Ok(e)
+    }
+
+    /// Consume a peeked `Tok::Template(parts)` and convert its lexer parts
+    /// into AST template parts (re-lexing interpolated expressions).
+    fn parse_template_token(&mut self) -> Result<(Vec<TPart>, Span), ParseError> {
+        let span = self.span();
+        let Tok::Template(parts) = self.peek() else {
+            return Err(ParseError("expected a template literal".into(), span));
+        };
+        let parts = parts.clone();
+        self.bump();
+        let mut out = Vec::new();
+        for p in parts {
+            match p {
+                LTPart::Str(s) => out.push(TPart::Str(s)),
+                LTPart::Expr(raw, espan) => {
+                    let sub = lex_sub(&raw, espan).map_err(|e| ParseError(e.0, e.1))?;
+                    let mut sp = Parser { toks: sub, pos: 0 };
+                    let e = sp.expr()?;
+                    if *sp.peek() != Tok::Eof {
+                        return Err(ParseError(
+                            "unexpected tokens in template expression".into(),
+                            espan,
+                        ));
+                    }
+                    out.push(TPart::Expr(Box::new(e)));
+                }
+            }
+        }
+        Ok((out, span))
     }
 
     /// Is the '(' at self.pos the start of a lambda parameter list?

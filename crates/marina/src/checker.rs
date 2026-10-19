@@ -357,6 +357,31 @@ pub enum CExpr {
     CryptoBase64 { decode: bool, v: Box<CExpr> },
     CryptoRandomHex { bytes: Box<CExpr> },
     CryptoUuid,
+    // ---- sql std module ----
+    /// `new sql.Connection(driver, url)` — opens a database connection.
+    SqlOpen {
+        driver: Box<CExpr>,
+        url: Box<CExpr>,
+    },
+    /// `db.execute(sql.stmt\`...\`)` — run a statement, discard rows; returns
+    /// a `sql_Result` object (lastInsertId, rowsAffected).
+    SqlExec {
+        conn: Box<CExpr>,
+        sql: String,
+        binds: Vec<CExpr>,
+        result_class: usize,
+    },
+    /// `db.query(sql.stmt\`...\`)` — run a statement, collect rows as objects
+    /// whose fields are the column names (typed `Array<sql_Row>`).
+    SqlQuery {
+        conn: Box<CExpr>,
+        sql: String,
+        binds: Vec<CExpr>,
+    },
+    /// `db.close()`
+    SqlClose {
+        conn: Box<CExpr>,
+    },
 }
 
 /// What a JsonValidator field checks: string or number.
@@ -730,7 +755,33 @@ impl Checker {
     /// Built-in std classes, registered when the module is `use`d.
     /// These share the class table with user classes (ids from pass 0).
     fn register_builtin_modules(&mut self) {
-        if !self.uses.iter().any(|m| m == "http") {
+        let uses_http = self.uses.iter().any(|m| m == "http");
+        let uses_sql = self.uses.iter().any(|m| m == "sql");
+        if !uses_http && !uses_sql {
+            return;
+        }
+        if uses_sql {
+            let sql_builtins = [
+                ("sql_Connection", vec![]),
+                ("sql_Result", vec![("lastInsertId", CTy::Int), ("rowsAffected", CTy::Int)]),
+            ];
+            for (name, fields) in sql_builtins {
+                if self.class_by_name.contains_key(name) {
+                    continue;
+                }
+                let id = self.classes.len();
+                self.classes.push(ClassDef {
+                    name: name.to_string(),
+                    fields: fields.into_iter().map(|(n, t)| (n.to_string(), t)).collect(),
+                    is_ghost: false,
+                });
+                self.class_by_name.insert(name.to_string(), id);
+            }
+            // a fieldless interface: query rows are dynamically bound to the
+            // columns of the SELECT at runtime
+            self.interfaces.entry("sql_Row".to_string()).or_default();
+        }
+        if !uses_http {
             return;
         }
         let builtins = [
@@ -941,6 +992,13 @@ impl Checker {
         if from == to {
             return true;
         }
+        // a fieldless interface (e.g. sql_Row) accepts any shape: its
+        // fields are bound at runtime
+        if let CTy::Interface(iname) = from {
+            if self.interfaces.get(iname).map(|f| f.is_empty()).unwrap_or(false) {
+                return true;
+            }
+        }
         if matches!(from, CTy::Int) && matches!(to, CTy::Float) {
             return true;
         }
@@ -980,6 +1038,11 @@ impl Checker {
     fn coerce_quiet(&self, from: &CTy, to: &CTy) -> bool {
         if from == to {
             return true;
+        }
+        if let CTy::Interface(iname) = from {
+            if self.interfaces.get(iname).map(|f| f.is_empty()).unwrap_or(false) {
+                return true;
+            }
         }
         if matches!(from, CTy::Int) && matches!(to, CTy::Float) {
             return true;
@@ -1219,6 +1282,12 @@ impl Checker {
             Expr::ObjectLit(fs, _) => fs.iter().any(|(_, e)| self.expr_calls_unresolved(e)),
             Expr::NewCtor { args, .. } => args.iter().any(|a| self.expr_calls_unresolved(a)),
             Expr::Template(parts, _) => parts
+                .iter()
+                .any(|p| match p {
+                    TPart::Expr(e) => self.expr_calls_unresolved(e),
+                    TPart::Str(_) => false,
+                }),
+            Expr::Tagged(_, parts, _) => parts
                 .iter()
                 .any(|p| match p {
                     TPart::Expr(e) => self.expr_calls_unresolved(e),
@@ -1746,6 +1815,18 @@ impl Checker {
             CExpr::CryptoBase64 { .. } => CTy::Str,
             CExpr::CryptoRandomHex { .. } => CTy::Str,
             CExpr::CryptoUuid => CTy::Str,
+            CExpr::SqlOpen { .. } => {
+                let id = *self.class_by_name.get("sql_Connection").unwrap_or(&usize::MAX);
+                CTy::Object(ObjectTy { id, name: "sql_Connection".into() })
+            }
+            CExpr::SqlExec { .. } => {
+                let id = *self.class_by_name.get("sql_Result").unwrap_or(&usize::MAX);
+                CTy::Object(ObjectTy { id, name: "sql_Result".into() })
+            }
+            CExpr::SqlQuery { .. } => {
+                CTy::Array(Box::new(CTy::Interface("sql_Row".into())))
+            }
+            CExpr::SqlClose { .. } => CTy::Void,
         }
     }
 
@@ -1773,6 +1854,14 @@ impl Checker {
                     self.diag("empty template literal", *span);
                 }
                 CExpr::Template(out)
+            }
+            Expr::Tagged(_, _, span) => {
+                // sql.stmt templates are only consumed by db.execute/db.query
+                self.diag(
+                    "template tags must be passed directly to db.execute or db.query (e.g. db.query(sql.stmt`SELECT 1`))",
+                    *span,
+                );
+                CExpr::Bool(false)
             }
             Expr::Ident(name, span) => match self.lookup(name, *span) {
                 Some((id, ty, _)) => CExpr::Ident(id, ty),
@@ -1860,6 +1949,41 @@ impl Checker {
                 }
             }
             Expr::NewCtor { path, args, span } => {
+                if path.len() == 2 && path[0] == "sql" && path[1] == "Connection" {
+                    if args.len() != 2 {
+                        self.diag(
+                            "new sql.Connection takes (driver, url): e.g. new sql.Connection(\"sqlite\", \"/tmp/data.db\")",
+                            *span,
+                        );
+                        return CExpr::Bool(false);
+                    }
+                    let driver = self.check_expr(&args[0], false);
+                    self.coerce(&self.expr_ty(&driver), &CTy::Str, args[0].span());
+                    // catch an unknown driver early when it is a literal
+                    if let Expr::Str(d, _) = &args[0] {
+                        if !matches!(d.as_str(), "sqlite" | "mysql" | "pg" | "mariadb") {
+                            self.diag(
+                                format!(
+                                    "unknown sql driver '{}' (supported: sqlite, mysql, pg, mariadb)",
+                                    d
+                                ),
+                                args[0].span(),
+                            );
+                        }
+                        if d != "sqlite" {
+                            self.diag(
+                                format!(
+                                    "sql driver '{}' is not supported yet (only 'sqlite' is supported in v0.2)",
+                                    d
+                                ),
+                                args[0].span(),
+                            );
+                        }
+                    }
+                    let url = self.check_expr(&args[1], false);
+                    self.coerce(&self.expr_ty(&url), &CTy::Str, args[1].span());
+                    return CExpr::SqlOpen { driver: Box::new(driver), url: Box::new(url) };
+                }
                 if path.len() == 2 && path[0] == "http" && path[1] == "Server" {
                     if !args.is_empty() {
                         self.diag("new http.Server() takes no arguments", *span);
@@ -2293,6 +2417,92 @@ impl Checker {
         }
     }
 
+    /// Dispatch a member call on a `sql.Connection` object.
+    fn check_sql_conn_method(&mut self, conn: CExpr, name: &str, args: &[Expr], span: Span) -> CExpr {
+        match name {
+            "execute" | "query" => {
+                if args.len() != 1 {
+                    self.diag(
+                        format!("db.{} takes exactly one argument: a sql.stmt`...` template", name),
+                        span,
+                    );
+                    return CExpr::Bool(false);
+                }
+                let Some((sql, binds)) = self.sql_stmt_parts(&args[0], span) else {
+                    return CExpr::Bool(false);
+                };
+                if name == "execute" {
+                    let result_class = *self.class_by_name.get("sql_Result").unwrap_or(&usize::MAX);
+                    CExpr::SqlExec { conn: Box::new(conn), sql, binds, result_class }
+                } else {
+                    CExpr::SqlQuery { conn: Box::new(conn), sql, binds }
+                }
+            }
+            "close" => {
+                if !args.is_empty() {
+                    self.diag("db.close takes no arguments", span);
+                    return CExpr::Bool(false);
+                }
+                CExpr::SqlClose { conn: Box::new(conn) }
+            }
+            other => {
+                self.diag(
+                    format!("sql.Connection has no method '{}' (execute, query, close)", other),
+                    span,
+                );
+                CExpr::Bool(false)
+            }
+        }
+    }
+
+    /// Validate a `sql.stmt\`...\`` tagged template: returns the SQL text
+    /// with `?` placeholders plus the checked bind expressions.
+    fn sql_stmt_parts(&mut self, e: &Expr, span: Span) -> Option<(String, Vec<CExpr>)> {
+        let Expr::Tagged(tag, parts, tsp) = e else {
+            self.diag(
+                "expected a sql.stmt`...` template (e.g. db.execute(sql.stmt`SELECT 1`))",
+                span,
+            );
+            return None;
+        };
+        let ok_tag = matches!(tag.as_ref(), Expr::Member(inner, m, _)
+            if matches!(inner.as_ref(), Expr::Ident(n, _) if n == "sql") && m == "stmt");
+        if !ok_tag {
+            self.diag(
+                "only the sql.stmt template tag is supported (e.g. sql.stmt`SELECT ...`)",
+                *tsp,
+            );
+            return None;
+        }
+        let mut sql = String::new();
+        let mut binds = Vec::new();
+        for p in parts {
+            match p {
+                TPart::Str(s) => sql.push_str(s),
+                TPart::Expr(inner) => {
+                    let c = self.check_expr(inner, false);
+                    let t = self.expr_ty(&c);
+                    match t {
+                        CTy::Int | CTy::Float | CTy::Str | CTy::Bool => {}
+                        CTy::Void => {
+                            self.diag("cannot bind a void value in sql.stmt", inner.span())
+                        }
+                        _ => self.diag(
+                            format!(
+                                "cannot bind a {} value in sql.stmt (bind Int32, Float64, string or bool)",
+                                t.name()
+                            ),
+                            inner.span(),
+                        ),
+                    }
+                    sql.push('?');
+                    binds.push(c);
+                }
+            }
+        }
+        Some((sql, binds))
+    }
+
     /// Dispatch a member call on an http std-module object. Returns None when
 /// the receiver is not one of the builtin http objects.
 fn check_http_object_method(
@@ -2309,6 +2519,7 @@ fn check_http_object_method(
             "http_Router" => Some(self.check_router_method(oc, name, args, span)),
             "http_JsonValidator" => Some(self.check_validator_method(oc, name, args, span)),
             "http_FieldValidator" => Some(self.check_field_method(oc, name, args, span)),
+            "sql_Connection" => Some(self.check_sql_conn_method(oc, name, args, span)),
             _ => None,
         }
     }
@@ -2622,6 +2833,13 @@ fn subst_expr(&self, e: &mut Expr, bindings: &[(String, CTy)]) {
     match e {
         Expr::Int(..) | Expr::Float(..) | Expr::Bool(..) | Expr::Str(..) | Expr::Ident(..) => {}
         Expr::Template(parts, _) => {
+            for p in parts {
+                if let TPart::Expr(inner) = p {
+                    self.subst_expr(inner, bindings);
+                }
+            }
+        }
+        Expr::Tagged(_, parts, _) => {
             for p in parts {
                 if let TPart::Expr(inner) = p {
                     self.subst_expr(inner, bindings);

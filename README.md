@@ -23,7 +23,7 @@ marina/
 │   │       ├── checker.rs     # strict type checker, inference & naming rules
 │   │       └── codegen.rs     # LLVM IR (textual) generation
 │   └── marina-runtime/        # runtime staticlib linked into every binary
-│       └── src/lib.rs         # ARC, promises, event loop, objects, printing, net/http/fs/crypto std modules
+│       └── src/lib.rs         # ARC, promises, event loop, objects, printing, net/http/fs/crypto/sql std modules
 ├── editors/                   # "marina-lsp" VSIX extension for Cursor/VS Code
 └── Cargo.toml                 # cargo workspace
 ```
@@ -32,6 +32,7 @@ marina/
 
 - Rust (cargo) — builds both the compiler and the runtime
 - `clang` — compiles the generated `.ll` and links the runtime; the compiler searches `clang`, `clang-21`, `clang-20`, `clang-18`, `cc`
+- `libsqlite3` — linked into every binary for the `sql` std module (macOS ships it; on Linux install the `sqlite3`/`libsqlite3-dev` package)
 
 ## Building
 
@@ -84,7 +85,7 @@ Projects are described by a **`package.json`** in the project root:
 }
 ```
 
-**The registry model** — like Rust's crates.io, not node_modules. Packages are installed *once* into a global registry (default `~/.wave/registry/<name>/<version>/main.tsm`, override with the `WAVE_REGISTRY` env var) and every project on the machine uses that copy. There is no per-project dependency folder to commit or vendor. A package is a directory (or git repo) with a `main.tsm` entry file and optional `package.json` metadata (`name`, `version`); `wave add` copies it into the registry and records the dependency. In code, `use my-pkg` merges the package's functions into your program behind a namespace: `my-pkg.fn(...)` calls the package's `fn`. Packages expose functions and classes only — no top-level statements, no `main`, and no dependencies on other packages yet (std modules `net`/`http`/`fs`/`crypto` are allowed).
+**The registry model** — like Rust's crates.io, not node_modules. Packages are installed *once* into a global registry (default `~/.wave/registry/<name>/<version>/main.tsm`, override with the `WAVE_REGISTRY` env var) and every project on the machine uses that copy. There is no per-project dependency folder to commit or vendor. A package is a directory (or git repo) with a `main.tsm` entry file and optional `package.json` metadata (`name`, `version`); `wave add` copies it into the registry and records the dependency. In code, `use my-pkg` merges the package's functions into your program behind a namespace: `my-pkg.fn(...)` calls the package's `fn`. Packages expose functions and classes only — no top-level statements, no `main`, and no dependencies on other packages yet (std modules `net`/`http`/`fs`/`crypto`/`sql` are allowed).
 
 ### One-off files
 
@@ -372,7 +373,7 @@ Loop conditions must be `bool` (no truthiness), and the init variable of a `for`
 
 Define `main` (sync or `async`). If it is `async`, the runtime drives its promise to completion before exiting.
 
-## Standard libraries: `net`, `http`, `fs` and `crypto`
+## Standard libraries: `net`, `http`, `fs`, `crypto` and `sql`
 
 Four std modules ship with the compiler and runtime — bring them in with a top-level `use` statement (`use http`; the JS-style `import http from "http"` is **not** supported). **`http` is built on top of `net`**: its client literally composes `net.connect`/`write`/`read_all`/`close` in the runtime.
 
@@ -506,6 +507,33 @@ let id = crypto.uuid()                       // random v4 UUID (8-4-4-4-12)
 
 - `crypto.sha256(data) -> string`, `crypto.base64Encode(data) -> string`, `crypto.base64Decode(data) -> string`, `crypto.randomHex(numBytes) -> string`, `crypto.uuid() -> string`
 
+### `sql` — databases (SQLite)
+
+SQL with prepared statements via tagged templates. In v0.2 the only driver is **SQLite** (FFI against the system `libsqlite3` — macOS ships it; Linux needs the `sqlite3` package). `mysql`, `pg` and `mariadb` are accepted driver names but abort at compile time (or runtime panic) until implemented.
+
+```ts
+use sql
+
+// driver: "sqlite" | "mysql" | "pg" | "mariadb" (only sqlite works in v0.2)
+let db = new sql.Connection("sqlite", "/tmp/data.db")
+
+// sql.stmt`...` prepares the statement; ${x} interpolations become ? binds
+const R = db.execute(sql.stmt`CREATE TABLE IF NOT EXISTS todos (id INTEGER PRIMARY KEY, text TEXT)`)
+db.execute(sql.stmt`INSERT INTO todos (text) VALUES (${"Buy groceries"})`)
+
+// db.query collects rows as objects whose fields are the column names
+let rows: Array<Todo> = db.query(sql.stmt`SELECT id, text FROM todos WHERE id = ${R.lastInsertId}`)
+
+db.close()
+```
+
+- `new sql.Connection(driver, url)` — opens the database (SQLite: a file path; the file is created if missing)
+- `db.execute(sql.stmt\`...\`)` — runs a statement that returns no rows (CREATE/INSERT/UPDATE/DELETE) and returns a `sql_Result` object with `lastInsertId: Int32` and `rowsAffected: Int32`; executing a statement that returns rows is a runtime panic (use `query`)
+- `db.query(sql.stmt\`...\`)` — runs a statement and returns `Array<sql_Row>`; each row is an object whose fields are the SELECT's column names (integers → `Int32`, floats → `Float64`, text → `string`, NULL → void). Annotate the result with your own interface to get a typed result: `let rows: Array<Todo> = db.query(...)` — the checker accepts it because `sql_Row` is a fieldless interface that coerces to anything
+- `db.close()` — closes the connection; using it afterwards is a runtime panic
+- Binds accept `Int32`, `Float64`, `string`, `bool` and null; anything else is rejected by the checker
+- Values interpolated into `sql.stmt\`...\`` are always bound as parameters (prepared statements) — never string-concatenated, so no SQL injection
+
 ## How a program is compiled
 
 1. **Lex & parse** → AST
@@ -558,10 +586,12 @@ Marina ships its own language server (`marina-lsp`, in `crates/marina/src/bin/ma
 | `examples/generics.tsm` | generic functions with inferred and explicit type arguments, generic `class Box<T>` |
 | `examples/interfaces.tsm` | structural interfaces: object literals and declared classes conforming, `Array<Named>`, field access resolved by name at runtime |
 | `examples/fs-crypto.tsm` | `use fs` (write/read/exists/mkdir/readDir/remove) and `use crypto` (sha256, base64, randomHex, uuid) |
+| `examples/todos-http-sqlite.tsm` | `use sql`: `new sql.Connection`, `sql.stmt\`...\`` prepared statements, `db.execute`/`db.query`, typed rows via interfaces — a persistent todo REST API on SQLite (try `curl localhost:8080/todos`) |
 
 ## Current limitations (v0.2)
 
-- Packages expose functions and classes only: no top-level statements, no `main`, and no package-on-package dependencies (std modules `net`/`http`/`fs`/`crypto` are allowed)
+- Packages expose functions and classes only: no top-level statements, no `main`, and no package-on-package dependencies (std modules `net`/`http`/`fs`/`crypto`/`sql` are allowed)
+- sql: SQLite only (via the system `libsqlite3`); `mysql`/`pg`/`mariadb` drivers are planned but abort at compile time; rows of `db.query` are dynamically bound to the SELECT's columns (no nested transactions, no prepared-statement reuse across calls)
 - http: `http://` URLs only (no TLS/https), sequential request handling on the server (one connection at a time), no request headers, no streaming responses; one HTTP server per program; the express-style API supports `get`/`post` routes only
 - Schema validation (`JsonValidator.validate`) aborts the program with a runtime panic on an invalid body (no per-request error responses yet)
 - net reads time out after 30 seconds

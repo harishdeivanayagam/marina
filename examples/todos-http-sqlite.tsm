@@ -1,0 +1,49 @@
+use http
+use sql
+
+const DB_PATH = "/tmp/todos-http-sqlite.db"
+const PORT = 8080
+
+let db = new sql.Connection("sqlite", DB_PATH)
+db.execute(sql.stmt`CREATE TABLE IF NOT EXISTS todos (id INTEGER PRIMARY KEY AUTOINCREMENT, text TEXT NOT NULL, done INTEGER NOT NULL DEFAULT 0)`)
+
+let todoSchemaValidator = new http.JsonValidator({
+    text: http.JsonValidator.string().required().min(4).max(20)
+})
+
+interface Todo {
+    id: Int32,
+    text: string,
+    done: Int32,
+}
+
+async function main() {
+    let server = new http.Server()
+
+    let todosRouter = server.router({ path: "/todos" })
+
+    // list all todos
+    todosRouter.get("/", (req: http.Request, res: http.Response) => {
+        let rows: Array<Todo> = db.query(sql.stmt`SELECT id, text, done FROM todos ORDER BY id`)
+        return res.json(rows)
+    })
+
+    // create a todo
+    todosRouter.post("/", (req: http.Request, res: http.Response) => {
+        let todo = todoSchemaValidator.validate(req.body)
+        const RESULT = db.execute(sql.stmt`INSERT INTO todos (text, done) VALUES (${todo.text}, 0)`)
+        let created: Array<Todo> = db.query(sql.stmt`SELECT id, text, done FROM todos WHERE id = ${RESULT.lastInsertId}`)
+        return res.json(created)
+    })
+
+    // mark every todo as done (path params are not in v0.2 yet)
+    todosRouter.post("/done-all", (req: http.Request, res: http.Response) => {
+        db.execute(sql.stmt`UPDATE todos SET done = 1`)
+        let rows: Array<Todo> = db.query(sql.stmt`SELECT id, text, done FROM todos ORDER BY id`)
+        return res.json(rows)
+    })
+
+    await server.listen("0.0.0.0", PORT)
+
+    console.log(`Server is running on http://localhost:${PORT}/todos`)
+}

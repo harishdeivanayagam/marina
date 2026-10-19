@@ -45,6 +45,10 @@ pub enum Expr {
     Bool(bool, Span),
     Str(String, Span),
     Template(Vec<TPart>, Span),
+    /// `tag\`...\`` — tagged template (only `sql.stmt` is supported; the
+    /// checked expression may only appear as the sole argument of a
+    /// `db.execute` / `db.query` call).
+    Tagged(Box<Expr>, Vec<TPart>, Span),
     Ident(String, Span),
     Unary(UnOp, Box<Expr>, Span),
     Binary(BinOp, Box<Expr>, Box<Expr>, Span),
@@ -86,6 +90,7 @@ impl Expr {
             | Expr::Bool(_, s)
             | Expr::Str(_, s)
             | Expr::Template(_, s)
+            | Expr::Tagged(_, _, s)
             | Expr::Ident(_, s)
             | Expr::Unary(_, _, s)
             | Expr::Binary(_, _, _, s)

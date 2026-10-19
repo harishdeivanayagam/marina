@@ -2280,3 +2280,346 @@ pub extern "C" fn marina_crypto_uuid(out: *mut MValue) {
     );
     out_mv(out, mv_str_owned(uuid));
 }
+
+// ---------------------------------------------------------------------------
+// std module: sql (SQLite via the system libsqlite3)
+// ---------------------------------------------------------------------------
+
+/// Connections live in a runtime table (not ARC-managed): a
+/// `sql.Connection` object stores an id; `db.close()` removes it.
+/// MySQL/Postgres/MariaDB drivers are not available yet.
+type SqlConns = (HashMap<i64, usize>, i64);
+
+fn sql_conns() -> &'static Mutex<SqlConns> {
+    static T: OnceLock<Mutex<SqlConns>> = OnceLock::new();
+    T.get_or_init(|| Mutex::new((HashMap::new(), 1)))
+}
+
+/// Row classes: one virtual class per distinct column set, created on the
+/// first `db.query(...)` result. Ids start at 1_000_000 so they never clash
+/// with compiler-assigned class ids.
+type SqlRowClasses = (HashMap<String, i32>, i32);
+
+fn sql_row_classes() -> &'static Mutex<SqlRowClasses> {
+    static T: OnceLock<Mutex<SqlRowClasses>> = OnceLock::new();
+    T.get_or_init(|| Mutex::new((HashMap::new(), 1_000_000)))
+}
+
+mod sqlite_ffi {
+    use std::os::raw::{c_char, c_int, c_void};
+
+    pub const SQLITE_OK: c_int = 0;
+    pub const SQLITE_ROW: c_int = 100;
+    pub const SQLITE_DONE: c_int = 101;
+    pub const OPEN_READWRITE: c_int = 0x2;
+    pub const OPEN_CREATE: c_int = 0x4;
+    pub const INTEGER: c_int = 1;
+    pub const FLOAT: c_int = 2;
+    pub const TEXT: c_int = 3;
+    pub const BLOB: c_int = 4;
+    /// SQLITE_TRANSIENT: sqlite copies the bound string.
+    pub unsafe fn transient() -> *mut c_void {
+        -1isize as *mut c_void
+    }
+
+    extern "C" {
+        pub fn sqlite3_open_v2(
+            filename: *const c_char,
+            db: *mut *mut c_void,
+            flags: c_int,
+            vfs: *const c_char,
+        ) -> c_int;
+        pub fn sqlite3_close_v2(db: *mut c_void) -> c_int;
+        pub fn sqlite3_prepare_v2(
+            db: *mut c_void,
+            sql: *const c_char,
+            n: c_int,
+            stmt: *mut *mut c_void,
+            tail: *const *const c_char,
+        ) -> c_int;
+        pub fn sqlite3_step(stmt: *mut c_void) -> c_int;
+        pub fn sqlite3_finalize(stmt: *mut c_void) -> c_int;
+        pub fn sqlite3_bind_int64(stmt: *mut c_void, i: c_int, v: i64) -> c_int;
+        pub fn sqlite3_bind_double(stmt: *mut c_void, i: c_int, v: f64) -> c_int;
+        pub fn sqlite3_bind_text(
+            stmt: *mut c_void,
+            i: c_int,
+            v: *const c_char,
+            n: c_int,
+            d: *mut c_void,
+        ) -> c_int;
+        pub fn sqlite3_bind_null(stmt: *mut c_void, i: c_int) -> c_int;
+        pub fn sqlite3_column_count(stmt: *mut c_void) -> c_int;
+        pub fn sqlite3_column_name(stmt: *mut c_void, i: c_int) -> *const c_char;
+        pub fn sqlite3_column_type(stmt: *mut c_void, i: c_int) -> c_int;
+        pub fn sqlite3_column_int64(stmt: *mut c_void, i: c_int) -> i64;
+        pub fn sqlite3_column_double(stmt: *mut c_void, i: c_int) -> f64;
+        pub fn sqlite3_column_text(stmt: *mut c_void, i: c_int) -> *const u8;
+        pub fn sqlite3_column_bytes(stmt: *mut c_void, i: c_int) -> c_int;
+        pub fn sqlite3_last_insert_rowid(db: *mut c_void) -> i64;
+        pub fn sqlite3_changes(db: *mut c_void) -> c_int;
+        pub fn sqlite3_errmsg(db: *mut c_void) -> *const c_char;
+    }
+}
+
+use sqlite_ffi as sq;
+
+fn cstr(p: *const std::os::raw::c_char) -> String {
+    unsafe { std::ffi::CStr::from_ptr(p).to_string_lossy().into_owned() }
+}
+
+unsafe fn sqlite_errmsg(db: *mut c_void) -> String {
+    cstr(sq::sqlite3_errmsg(db))
+}
+
+/// Open a database and remember the statement, panicking on failure.
+unsafe fn sql_prepare(db: *mut c_void, sql: &str) -> *mut c_void {
+    let csql = std::ffi::CString::new(sql)
+        .unwrap_or_else(|_| rt_panic("sql: statement contains a NUL byte".into()));
+    let mut stmt: *mut c_void = std::ptr::null_mut();
+    if sq::sqlite3_prepare_v2(db, csql.as_ptr(), -1, &mut stmt, std::ptr::null()) != sq::SQLITE_OK {
+        rt_panic(format!("sql: prepare failed: {} (in `{}`)", sqlite_errmsg(db), sql));
+    }
+    stmt
+}
+
+/// Bind an MValue to sqlite parameter `idx` (1-based).
+unsafe fn sql_bind_mv(stmt: *mut c_void, idx: std::os::raw::c_int, v: &MValue) {
+    use std::os::raw::c_int;
+    let rc = match v.tag {
+        TAG_INT => sq::sqlite3_bind_int64(stmt, idx, v.i),
+        TAG_FLOAT => sq::sqlite3_bind_double(stmt, idx, v.f),
+        TAG_BOOL => sq::sqlite3_bind_int64(stmt, idx, if v.i != 0 { 1 } else { 0 }),
+        TAG_STRING => {
+            let bytes = str_data(v.p as *mut u8);
+            sq::sqlite3_bind_text(
+                stmt,
+                idx,
+                bytes.as_ptr() as *const std::os::raw::c_char,
+                bytes.len() as c_int,
+                sq::transient(),
+            )
+        }
+        TAG_VOID => sq::sqlite3_bind_null(stmt, idx),
+        other => rt_panic(format!(
+            "sql: cannot bind a value of tag {} (bind Int32, Float64, string, bool or null)",
+            other
+        )),
+    };
+    if rc != sq::SQLITE_OK {
+        rt_panic("sql: bind failed".into());
+    }
+}
+
+/// Connection id out of a `sql.Connection` object (field 0).
+fn sql_conn_id(o: *mut c_void) -> i64 {
+    let obj = unsafe { as_object(o) };
+    obj.data[0].i
+}
+
+fn sql_conn_ptr(o: *mut c_void) -> *mut c_void {
+    let id = sql_conn_id(o);
+    let g = sql_conns().lock().unwrap();
+    match g.0.get(&id) {
+        Some(p) => *p as *mut c_void,
+        None => rt_panic("sql: connection is closed".into()),
+    }
+}
+
+/// `new sql.Connection(driver, url)` — only `sqlite` is supported in v0.2.
+#[no_mangle]
+pub extern "C" fn marina_sql_open(
+    driver: *const MValue,
+    url: *const MValue,
+    class_id: i32,
+    out: *mut MValue,
+) {
+    let drv = unsafe { mv_to_string(&*driver) };
+    if drv != "sqlite" {
+        rt_panic(format!(
+            "sql: driver '{}' is not supported yet (only 'sqlite' is supported in v0.2; mysql, pg and mariadb are planned)",
+            drv
+        ));
+    }
+    let url_s = unsafe { mv_to_string(&*url) };
+    let cpath = std::ffi::CString::new(url_s.clone())
+        .unwrap_or_else(|_| rt_panic("sql: path contains a NUL byte".into()));
+    let mut db: *mut c_void = std::ptr::null_mut();
+    unsafe {
+        if sq::sqlite3_open_v2(
+            cpath.as_ptr(),
+            &mut db,
+            sq::OPEN_READWRITE | sq::OPEN_CREATE,
+            std::ptr::null(),
+        ) != sq::SQLITE_OK
+        {
+            let msg = if db.is_null() {
+                url_s.clone()
+            } else {
+                sqlite_errmsg(db)
+            };
+            rt_panic(format!("sql: cannot open database '{}' ({})", url_s, msg));
+        }
+        let mut g = sql_conns().lock().unwrap();
+        let id = g.1;
+        g.1 += 1;
+        g.0.insert(id, db as usize);
+        let obj = marina_object_new(class_id, 1);
+        as_object(obj).data[0] = mv_int(id);
+        out_mv(out, MValue { tag: TAG_OBJECT, pad: 0, i: 0, f: 0.0, p: obj });
+    }
+}
+
+/// `db.execute(sql.stmt\`...\`)` — run a statement that returns no rows
+/// (INSERT/UPDATE/DELETE/CREATE...); returns a `sql_Result` object.
+#[no_mangle]
+pub extern "C" fn marina_sql_execute(
+    o: *mut c_void,
+    sql: *const MValue,
+    n_binds: i64,
+    binds: *const MValue,
+    result_class: i32,
+    out: *mut MValue,
+) {
+    let sql_s = unsafe { mv_to_string(&*sql) };
+    let db = sql_conn_ptr(o);
+    unsafe {
+        let stmt = sql_prepare(db, &sql_s);
+        for i in 0..n_binds {
+            sql_bind_mv(stmt, (i + 1) as i32, &*binds.offset(i as isize));
+        }
+        let rc = sq::sqlite3_step(stmt);
+        if rc == sq::SQLITE_ROW {
+            sq::sqlite3_finalize(stmt);
+            rt_panic(format!(
+                "sql: statement returned rows (use db.query() instead): `{}`",
+                sql_s
+            ));
+        }
+        if rc != sq::SQLITE_DONE {
+            let msg = sqlite_errmsg(db);
+            sq::sqlite3_finalize(stmt);
+            rt_panic(format!("sql: execute failed: {} (in `{}`)", msg, sql_s));
+        }
+        sq::sqlite3_finalize(stmt);
+        let obj = marina_object_new(result_class, 2);
+        as_object(obj).data[0] = mv_int(sq::sqlite3_last_insert_rowid(db));
+        as_object(obj).data[1] = mv_int(sq::sqlite3_changes(db) as i64);
+        out_mv(out, MValue { tag: TAG_OBJECT, pad: 0, i: 0, f: 0.0, p: obj });
+    }
+}
+
+/// `db.query(sql.stmt\`...\`)` — run a statement and collect the rows as
+/// objects whose fields are the column names (Array<sql_Row>).
+#[no_mangle]
+pub extern "C" fn marina_sql_query(
+    o: *mut c_void,
+    sql: *const MValue,
+    n_binds: i64,
+    binds: *const MValue,
+    out: *mut MValue,
+) {
+    let sql_s = unsafe { mv_to_string(&*sql) };
+    let db = sql_conn_ptr(o);
+    unsafe {
+        let stmt = sql_prepare(db, &sql_s);
+        for i in 0..n_binds {
+            sql_bind_mv(stmt, (i + 1) as i32, &*binds.offset(i as isize));
+        }
+        let mut arr: *mut c_void = std::ptr::null_mut();
+        let mut class_id: i32 = 0;
+        let mut ncols = 0usize;
+        loop {
+            let rc = sq::sqlite3_step(stmt);
+            if rc == sq::SQLITE_DONE {
+                break;
+            }
+            if rc != sq::SQLITE_ROW {
+                let msg = sqlite_errmsg(db);
+                sq::sqlite3_finalize(stmt);
+                rt_panic(format!("sql: query failed: {} (in `{}`)", msg, sql_s));
+            }
+            if arr.is_null() {
+                ncols = sq::sqlite3_column_count(stmt) as usize;
+                // virtual row class: fields = column names
+                let names: Vec<String> = (0..ncols)
+                    .map(|i| cstr(sq::sqlite3_column_name(stmt, i as i32)))
+                    .collect();
+                let key = names.join(",");
+                let cached = {
+                    let g = sql_row_classes().lock().unwrap();
+                    g.0.get(&key).copied()
+                };
+                class_id = match cached {
+                    Some(c) => c,
+                    None => {
+                        let mut g = sql_row_classes().lock().unwrap();
+                        // another row pass may have registered it meanwhile
+                        if let Some(c) = g.0.get(&key).copied() {
+                            c
+                        } else {
+                            let id = g.1;
+                            g.1 += 1;
+                            g.0.insert(key, id);
+                            drop(g);
+                            let mut meta: Vec<u8> = b"sql_Row".to_vec();
+                            for n in &names {
+                                meta.push(0);
+                                meta.extend_from_slice(n.as_bytes());
+                            }
+                            marina_class_register(
+                                id,
+                                meta.as_ptr() as *const c_void,
+                                meta.len() as i64,
+                            );
+                            id
+                        }
+                    }
+                };
+                arr = marina_array_new(TAG_OBJECT);
+            }
+            let obj = marina_object_new(class_id, ncols as i64);
+            for i in 0..ncols {
+                let v = match sq::sqlite3_column_type(stmt, i as i32) {
+                    sq::INTEGER => mv_int(sq::sqlite3_column_int64(stmt, i as i32)),
+                    sq::FLOAT => MValue {
+                        tag: TAG_FLOAT,
+                        pad: 0,
+                        i: 0,
+                        f: sq::sqlite3_column_double(stmt, i as i32),
+                        p: std::ptr::null_mut(),
+                    },
+                    sq::TEXT | sq::BLOB => {
+                        let bytes = std::slice::from_raw_parts(
+                            sq::sqlite3_column_text(stmt, i as i32),
+                            sq::sqlite3_column_bytes(stmt, i as i32) as usize,
+                        );
+                        mv_str_owned(String::from_utf8_lossy(bytes).into_owned())
+                    }
+                    _ => MValue { tag: TAG_VOID, pad: 0, i: 0, f: 0.0, p: std::ptr::null_mut() },
+                };
+                as_object(obj).data[i] = v;
+            }
+            let obj_mv = MValue { tag: TAG_OBJECT, pad: 0, i: 0, f: 0.0, p: obj };
+            marina_array_push(arr, &obj_mv);
+            drop_mv(&obj_mv);
+        }
+        sq::sqlite3_finalize(stmt);
+        if arr.is_null() {
+            // no rows: still hand back an empty array
+            arr = marina_array_new(TAG_OBJECT);
+        }
+        out_mv(out, MValue { tag: TAG_ARRAY, pad: 0, i: 0, f: 0.0, p: arr });
+    }
+}
+
+/// `db.close()` — closes the database connection.
+#[no_mangle]
+pub extern "C" fn marina_sql_close(o: *mut c_void) {
+    let id = sql_conn_id(o);
+    let db = match sql_conns().lock().unwrap().0.remove(&id) {
+        Some(p) => p as *mut c_void,
+        None => rt_panic("sql: connection is closed".into()),
+    };
+    unsafe { sq::sqlite3_close_v2(db) };
+}

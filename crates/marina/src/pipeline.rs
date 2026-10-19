@@ -128,13 +128,15 @@ pub fn compile_source(
         .find(|c| which(c).is_some())
         .copied()
         .unwrap_or("clang");
-    let status = Command::new(clang)
-        .arg("-O2")
-        .arg(&ll_path)
-        .arg(&runtime)
-        .arg("-o")
-        .arg(&bin_path)
-        .status();
+    let status = {
+        let mut cmd = Command::new(clang);
+        cmd.arg("-O2").arg(&ll_path).arg(&runtime);
+        // the runtime contains the sql module (sqlite FFI), so libsqlite3 is
+        // always required (macOS ships it; Linux needs the sqlite3 package)
+        cmd.arg("-lsqlite3");
+        cmd.arg("-o").arg(&bin_path);
+        cmd.status()
+    };
     match status {
         Ok(s) if s.success() => Ok(Artifact { bin_path, ll_path }),
         Ok(_) => Err(Fail::Tool(format!(
@@ -203,7 +205,7 @@ pub fn resolve_uses(program: &mut crate::ast::Program) -> Result<(), Vec<SrcDiag
     let mut extra_classes = Vec::new();
 
     for (name, span) in program.uses.drain(..) {
-        if matches!(name.as_str(), "net" | "http" | "fs" | "crypto") {
+        if matches!(name.as_str(), "net" | "http" | "fs" | "crypto" | "sql") {
             kept.push((name, span));
             continue;
         }
@@ -245,7 +247,7 @@ pub fn resolve_uses(program: &mut crate::ast::Program) -> Result<(), Vec<SrcDiag
                     ));
                 }
                 for (u, s) in pkg.uses.drain(..) {
-                    if matches!(u.as_str(), "net" | "http" | "fs" | "crypto") {
+                    if matches!(u.as_str(), "net" | "http" | "fs" | "crypto" | "sql") {
                         // make the std module visible to the merged functions
                         if !kept.iter().any(|(n, _)| *n == u) {
                             kept.push((u, s));

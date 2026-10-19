@@ -23,7 +23,7 @@ async function main() {
         return res.json(todos)
     })
 
-    await server.listen("0.0.0.0", 5000)
+    await server.listen("0.0.0.0", 8080)
 
-    console.log("Server is running on port localhost:5000")
+    console.log("Server is running on port localhost:8080")
 }

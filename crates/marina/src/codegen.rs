@@ -264,6 +264,10 @@ declare void @marina_http_validator_init(ptr, ptr)
 declare void @marina_http_field_init(ptr, i32)
 declare void @marina_http_field_op(ptr, i32, ptr)
 declare void @marina_http_validate(ptr, ptr, i32, ptr)
+declare void @marina_sql_open(ptr, ptr, i32, ptr)
+declare void @marina_sql_execute(ptr, ptr, i64, ptr, i32, ptr)
+declare void @marina_sql_query(ptr, ptr, i64, ptr, ptr)
+declare void @marina_sql_close(ptr)
 declare void @marina_event_loop_start()
 declare i32 @marina_event_loop_run()";
 
@@ -1953,7 +1957,99 @@ fn pop_scope(&mut self) {
                 self.emit(format!("call void @marina_crypto_uuid(ptr {})", out));
                 self.mv_load(&out, CgTy::Str)
             }
+            CExpr::SqlOpen { driver, url } => {
+                let d = self.cg_expr(driver);
+                let dmv = self.build_mv(&d);
+                let u = self.cg_expr(url);
+                let umv = self.build_mv(&u);
+                let cls = self.builtin_class("sql_Connection");
+                let out = self.alloca("%mv");
+                self.emit(format!(
+                    "call void @marina_sql_open(ptr {}, ptr {}, i32 {}, ptr {})",
+                    dmv, umv, cls, out
+                ));
+                self.discard(&d);
+                self.discard(&u);
+                self.mv_load(&out, CgTy::Object)
+            }
+            CExpr::SqlExec { conn, sql, binds, result_class } => {
+                let cv = self.cg_expr(conn);
+                // cg_sql_call borrows the connection (single queued release)
+                let out = self.cg_sql_call(&cv, sql, binds, Some(*result_class));
+                self.mv_load(&out, CgTy::Object)
+            }
+            CExpr::SqlQuery { conn, sql, binds } => {
+                let cv = self.cg_expr(conn);
+                let out = self.cg_sql_call(&cv, sql, binds, None);
+                self.mv_load(&out, CgTy::Array)
+            }
+            CExpr::SqlClose { conn } => {
+                let cv = self.cg_expr(conn);
+                let p = self.borrow(&cv);
+                self.emit(format!("call void @marina_sql_close(ptr {})", p));
+                CgVal { ty: CgTy::Void, ir: String::new(), owned: false }
+            }
         }
+    }
+
+    /// Emit a `marina_sql_execute` / `marina_sql_query` call: the connection
+    /// object pointer is passed directly; `sql` becomes a string literal
+    /// MValue; binds go through an alloca'd %mv buffer.
+    /// Returns the alloca holding the result MValue.
+    fn cg_sql_call(
+        &mut self,
+        conn: &CgVal,
+        sql: &str,
+        binds: &[CExpr],
+        result_class: Option<usize>,
+    ) -> String {
+        let p = self.borrow(conn);
+        let sv = self.string_lit(sql);
+        let smv = self.build_mv(&sv);
+        let n = binds.len().max(1);
+        let buf = self.fresh("bnds");
+        self.fns[self.cur]
+            .allocas
+            .push(format!("{} = alloca %mv, i64 {}", buf, n));
+        for (i, b) in binds.iter().enumerate() {
+            let bv = self.cg_expr(b);
+            let bmv = self.build_mv(&bv);
+            let ld = self.fresh("bl");
+            self.emit(format!("{} = load %mv, ptr {}", ld, bmv));
+            let slot = self.fresh("bs");
+            self.emit(format!(
+                "{} = getelementptr inbounds %mv, ptr {}, i64 {}",
+                slot, buf, i
+            ));
+            self.emit(format!("store %mv {}, ptr {}", ld, slot));
+            self.discard(&bv);
+        }
+        let out = self.alloca("%mv");
+        match result_class {
+            Some(cls) => {
+                self.emit(format!(
+                    "call void @marina_sql_execute(ptr {}, ptr {}, i64 {}, ptr {}, i32 {}, ptr {})",
+                    p,
+                    smv,
+                    binds.len() as i64,
+                    buf,
+                    cls,
+                    out
+                ));
+            }
+            None => {
+                self.emit(format!(
+                    "call void @marina_sql_query(ptr {}, ptr {}, i64 {}, ptr {}, ptr {})",
+                    p,
+                    smv,
+                    binds.len() as i64,
+                    buf,
+                    out
+                ));
+            }
+        }
+        self.discard(&sv);
+        out
     }
 
     /// Lambda layout: executor params first (Plain ABI only), then captured
