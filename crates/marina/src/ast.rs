@@ -35,6 +35,8 @@ pub enum TPart {
 pub struct Lambda {
     pub params: Vec<Param>,
     pub body: Vec<Stmt>,
+    /// `async (params) => { ... }` — may await; returns a Promise
+    pub is_async: bool,
     pub span: Span,
 }
 

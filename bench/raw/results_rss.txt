@@ -1,0 +1,4 @@
+marina	oaded_peak_rss_kb=21096
+node	oaded_peak_rss_kb=84544
+bun	oaded_peak_rss_kb=40728
+go	oaded_peak_rss_kb=19984

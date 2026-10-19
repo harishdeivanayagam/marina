@@ -1,0 +1,16 @@
+marina	run=async-v0.2	idle_rss_kb=4236	peak_rss_kb=7148
+GET_c2_rps=10079.43
+GET_c64_p50=5.71ms
+GET_c64_p99=10.02ms
+GET_c64_total=333580
+GET_c64_rps=11102.21
+POST_c64_p50=45.38ms
+POST_c64_total=28032
+POST_c64_rps=1400.06
+sweep	c=1	rps=
+sweep	c=2	rps=10998.77
+sweep	c=4	rps=11826.57
+sweep	c=8	rps=12192.57
+sweep	c=16	rps=13085.99
+sweep	c=32	rps=12990.18
+sweep	c=64	rps=12468.72

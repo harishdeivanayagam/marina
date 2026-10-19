@@ -1,0 +1,4 @@
+marina	idle_rss_kb=4140	peak_rss_kb=NA	GET_c2_rps=909.79	GET_c64_rps=18.73	GET_c64_total=563	GET_c64_p50=9.13ms	GET_c64_p99=15.62ms	POST_c64_rps=29.40	POST_c64_total=589	POST_c64_p50=54.17ms
+node	idle_rss_kb=60152	peak_rss_kb=NA	GET_c2_rps=9608.67	GET_c64_rps=10162.65	GET_c64_total=305387	GET_c64_p50=5.82ms	GET_c64_p99=15.19ms	POST_c64_rps=922.45	POST_c64_total=18468	POST_c64_p50=67.19ms
+bun	idle_rss_kb=23080	peak_rss_kb=NA	GET_c2_rps=19829.19	GET_c64_rps=19903.31	GET_c64_total=597567	GET_c64_p50=3.03ms	GET_c64_p99=6.72ms	POST_c64_rps=963.64	POST_c64_total=19293	POST_c64_p50=65.99ms
+go	idle_rss_kb=11816	peak_rss_kb=NA	GET_c2_rps=10741.92	GET_c64_rps=10566.27	GET_c64_total=317317	GET_c64_p50=7.22ms	GET_c64_p99=55.27ms	POST_c64_rps=3014.62	POST_c64_total=60334	POST_c64_p50=25.05ms

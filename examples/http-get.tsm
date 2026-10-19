@@ -3,7 +3,7 @@ use http
 // HTTP client built on the net module.
 // Start the todo server first: `wave run examples/todo-http.tsm`
 async function main() {
-    let resp = http.get("http://localhost:8080/todos")
+    let resp = await http.get("http://localhost:8080/todos")
     console.log(resp.status)
     console.log(resp.body)
 }

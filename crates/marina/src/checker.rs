@@ -300,6 +300,8 @@ pub enum CExpr {
         method: String,
         path: Box<CExpr>,
         lambda: usize,
+        /// handler is an async lambda (responds after awaiting)
+        is_async: bool,
     },
     /// `await server.listen(host, port)` — start the accept loop; resolves
     /// its promise once the listener is bound.
@@ -459,6 +461,9 @@ pub struct CLambda {
     /// promise handle). Kept for diagnostics/future lowering work.
     #[allow(dead_code)]
     pub is_executor: bool,
+    /// `async (...) => { ... }` — the lambda may await and runs as an
+    /// async state machine (its Listen-ABI shim returns a promise).
+    pub is_async: bool,
 }
 
 pub struct Checked {
@@ -1773,13 +1778,12 @@ impl Checker {
                 CTy::Object(ObjectTy { id: *class_id, name })
             }
             CExpr::FieldGet { ty, .. } => ty.clone(),
-            CExpr::NetConnect { .. } => CTy::Stream,
-            CExpr::NetWrite { .. } => CTy::Void,
-            CExpr::NetReadAll { .. } => CTy::Str,
-            CExpr::NetClose { .. } => CTy::Void,
+            CExpr::NetConnect { .. } => CTy::Promise(Box::new(CTy::Stream)),
+            CExpr::NetWrite { .. } | CExpr::NetClose { .. } => CTy::Promise(Box::new(CTy::Void)),
+            CExpr::NetReadAll { .. } => CTy::Promise(Box::new(CTy::Str)),
             CExpr::HttpCall { .. } => {
                 let id = self.class_by_name.get("http_Response").copied().unwrap_or(usize::MAX);
-                CTy::Object(ObjectTy { id, name: "http_Response".into() })
+                CTy::Promise(Box::new(CTy::Object(ObjectTy { id, name: "http_Response".into() })))
             }
             CExpr::HttpListen { .. } => CTy::Void,
             CExpr::ResSend { .. } => CTy::Void,
@@ -1807,10 +1811,12 @@ impl Checker {
             }
             CExpr::IfaceGet { ty, .. } => ty.clone(),
             CExpr::IfaceSet { .. } => CTy::Void,
-            CExpr::FsReadFile { .. } => CTy::Str,
-            CExpr::FsWriteFile { .. } | CExpr::FsMkdir { .. } | CExpr::FsRemove { .. } => CTy::Void,
-            CExpr::FsExists { .. } => CTy::Bool,
-            CExpr::FsReadDir { .. } => CTy::Array(Box::new(CTy::Str)),
+            CExpr::FsReadFile { .. } => CTy::Promise(Box::new(CTy::Str)),
+            CExpr::FsWriteFile { .. } | CExpr::FsMkdir { .. } | CExpr::FsRemove { .. } => {
+                CTy::Promise(Box::new(CTy::Void))
+            }
+            CExpr::FsExists { .. } => CTy::Promise(Box::new(CTy::Bool)),
+            CExpr::FsReadDir { .. } => CTy::Promise(Box::new(CTy::Array(Box::new(CTy::Str)))),
             CExpr::CryptoSha256 { .. } => CTy::Str,
             CExpr::CryptoBase64 { .. } => CTy::Str,
             CExpr::CryptoRandomHex { .. } => CTy::Str,
@@ -1821,10 +1827,10 @@ impl Checker {
             }
             CExpr::SqlExec { .. } => {
                 let id = *self.class_by_name.get("sql_Result").unwrap_or(&usize::MAX);
-                CTy::Object(ObjectTy { id, name: "sql_Result".into() })
+                CTy::Promise(Box::new(CTy::Object(ObjectTy { id, name: "sql_Result".into() })))
             }
             CExpr::SqlQuery { .. } => {
-                CTy::Array(Box::new(CTy::Interface("sql_Row".into())))
+                CTy::Promise(Box::new(CTy::Array(Box::new(CTy::Interface("sql_Row".into())))))
             }
             CExpr::SqlClose { .. } => CTy::Void,
         }
@@ -2608,6 +2614,7 @@ fn check_http_object_method(
         self.coerce(&self.expr_ty(&path), &CTy::Str, args[0].span());
         let lambda = match &args[1] {
             Expr::Lambda(l, _) => {
+                let is_async = l.is_async;
                 let req_id = *self.class_by_name.get("http_Request").unwrap_or(&usize::MAX);
                 let res_id = *self.class_by_name.get("http_Res").unwrap_or(&usize::MAX);
                 let (li, _ret) = self.check_callback_lambda(
@@ -2619,18 +2626,23 @@ fn check_http_object_method(
                     Some(CTy::Void),
                     LambdaAbi::Listen,
                 );
-                li
+                if is_async {
+                    self.lambdas[li].is_async = true;
+                }
+                (li, is_async)
             }
             _ => {
                 self.diag(format!("router.{} takes a handler lambda (req, res) => {{ ... }}", name), span);
                 return CExpr::Bool(false);
             }
         };
+        let (lambda, handler_async) = lambda;
         CExpr::HttpRouteAdd {
             router: Box::new(router),
             method: method.to_string(),
             path: Box::new(path),
             lambda,
+            is_async: handler_async,
         }
     }
 
@@ -3553,6 +3565,7 @@ fn check_fs_module(&mut self, name: &str, args: &[Expr], span: Span) -> CExpr {
             ret: CTy::Void,
             abi: LambdaAbi::Plain,
             is_executor: false,
+            is_async: l.is_async,
         });
         self.enter_lambda_scope(idx);
         self.ret_ty = None;
@@ -3584,6 +3597,7 @@ fn check_fs_module(&mut self, name: &str, args: &[Expr], span: Span) -> CExpr {
                 ret: CTy::Void,
                 abi: LambdaAbi::Plain,
                 is_executor: true,
+                is_async: l.is_async,
             });
             return idx;
         }
@@ -3595,6 +3609,7 @@ fn check_fs_module(&mut self, name: &str, args: &[Expr], span: Span) -> CExpr {
             ret: CTy::Void,
             abi: LambdaAbi::Plain,
             is_executor: true,
+            is_async: l.is_async,
         });
         let base = self.enter_lambda_scope(idx);
         let _ = base;
@@ -3687,6 +3702,7 @@ fn check_fs_module(&mut self, name: &str, args: &[Expr], span: Span) -> CExpr {
             ret: CTy::Void,
             abi,
             is_executor: false,
+            is_async: l.is_async,
         });
         self.enter_lambda_scope(idx);
         // callbacks may return a value
@@ -3704,7 +3720,10 @@ fn check_fs_module(&mut self, name: &str, args: &[Expr], span: Span) -> CExpr {
         }
         self.ret_ty = None;
         self.saw_float_ret = false;
+        let saved_async = self.is_async;
+        self.is_async = l.is_async;
         let body = self.check_stmts(&l.body);
+        self.is_async = saved_async;
         let mut ret = self.ret_ty.clone().unwrap_or(CTy::Void);
         if self.saw_float_ret && ret == CTy::Int {
             ret = CTy::Float;

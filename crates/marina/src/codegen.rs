@@ -268,6 +268,19 @@ declare void @marina_sql_open(ptr, ptr, i32, ptr)
 declare void @marina_sql_execute(ptr, ptr, i64, ptr, i32, ptr)
 declare void @marina_sql_query(ptr, ptr, i64, ptr, ptr)
 declare void @marina_sql_close(ptr)
+declare ptr @marina_sql_execute_async(ptr, ptr, i64, ptr, i32)
+declare ptr @marina_sql_query_async(ptr, ptr, i64, ptr)
+declare ptr @marina_fs_read_file_async(ptr)
+declare ptr @marina_fs_write_file_async(ptr, ptr)
+declare ptr @marina_fs_exists_async(ptr)
+declare ptr @marina_fs_read_dir_async(ptr)
+declare ptr @marina_fs_mkdir_async(ptr)
+declare ptr @marina_fs_remove_async(ptr)
+declare ptr @marina_net_connect_async(ptr, ptr)
+declare ptr @marina_net_write_async(ptr, ptr)
+declare ptr @marina_net_read_all_async(ptr)
+declare ptr @marina_net_close_async(ptr)
+declare ptr @marina_http_request_async(ptr, ptr, ptr, i32)
 declare void @marina_event_loop_start()
 declare i32 @marina_event_loop_run()";
 
@@ -1426,33 +1439,35 @@ fn pop_scope(&mut self) {
                 let hmv = self.build_mv(&h);
                 let p = self.cg_expr(port);
                 let pmv = self.build_mv(&p);
-                let out = self.alloca("%mv");
+                let pr = self.fresh("pr");
                 self.emit(format!(
-                    "call void @marina_net_connect(ptr {}, ptr {}, ptr {})",
-                    hmv, pmv, out
+                    "{} = call ptr @marina_net_connect_async(ptr {}, ptr {})",
+                    pr, hmv, pmv
                 ));
-                self.mv_load(&out, CgTy::Stream)
+                CgVal { ty: CgTy::Promise, ir: pr, owned: true }
             }
             CExpr::NetWrite { stream, data } => {
                 let s = self.cg_expr(stream);
                 let smv = self.build_mv(&s);
                 let d = self.cg_expr(data);
                 let dmv = self.build_mv(&d);
-                self.emit(format!("call void @marina_net_write(ptr {}, ptr {})", smv, dmv));
-                CgVal { ty: CgTy::Void, ir: String::new(), owned: false }
+                let pr = self.fresh("pr");
+                self.emit(format!("{} = call ptr @marina_net_write_async(ptr {}, ptr {})", pr, smv, dmv));
+                CgVal { ty: CgTy::Promise, ir: pr, owned: true }
             }
             CExpr::NetReadAll { stream } => {
                 let s = self.cg_expr(stream);
                 let smv = self.build_mv(&s);
-                let out = self.alloca("%mv");
-                self.emit(format!("call void @marina_net_read_all(ptr {}, ptr {})", smv, out));
-                self.mv_load(&out, CgTy::Str)
+                let pr = self.fresh("pr");
+                self.emit(format!("{} = call ptr @marina_net_read_all_async(ptr {})", pr, smv));
+                CgVal { ty: CgTy::Promise, ir: pr, owned: true }
             }
             CExpr::NetClose { stream } => {
                 let s = self.cg_expr(stream);
                 let smv = self.build_mv(&s);
-                self.emit(format!("call void @marina_net_close(ptr {})", smv));
-                CgVal { ty: CgTy::Void, ir: String::new(), owned: false }
+                let pr = self.fresh("pr");
+                self.emit(format!("{} = call ptr @marina_net_close_async(ptr {})", pr, smv));
+                CgVal { ty: CgTy::Promise, ir: pr, owned: true }
             }
             CExpr::HttpCall { method, url, body } => {
                 let u = self.cg_expr(url);
@@ -1479,12 +1494,12 @@ fn pop_scope(&mut self) {
                     .iter()
                     .position(|d| d.name == "http_Response")
                     .unwrap_or(usize::MAX);
-                let out = self.alloca("%mv");
+                let pr = self.fresh("pr");
                 self.emit(format!(
-                    "call void @marina_http_request(ptr {}, ptr {}, ptr {}, i32 {}, ptr {})",
-                    mmv, umv, bm, cls as i32, out
+                    "{} = call ptr @marina_http_request_async(ptr {}, ptr {}, ptr {}, i32 {})",
+                    pr, mmv, umv, bm, cls as i32
                 ));
-                self.mv_load(&out, CgTy::Object)
+                CgVal { ty: CgTy::Promise, ir: pr, owned: true }
             }
             CExpr::HttpListen { port, lambda } => {
                 let p = self.cg_expr(port);
@@ -1533,7 +1548,7 @@ fn pop_scope(&mut self) {
                 self.discard(&s);
                 CgVal { ty: CgTy::Object, ir: obj, owned: true }
             }
-            CExpr::HttpRouteAdd { router, method, path, lambda } => {
+            CExpr::HttpRouteAdd { router, method, path, lambda, is_async } => {
                 let r = self.cg_expr(router);
                 let rmv = self.build_mv(&r);
                 let pv = self.cg_expr(path);
@@ -1541,9 +1556,10 @@ fn pop_scope(&mut self) {
                 let mlit = self.string_lit(method.as_str());
                 let mmv = self.build_mv(&CgVal { ty: CgTy::Str, ir: mlit.ir, owned: true });
                 let env = self.build_env(*lambda, None);
+                let aflag = if *is_async { 1 } else { 0 };
                 self.emit(format!(
-                    "call void @marina_http_route_add(ptr {}, ptr {}, ptr {}, ptr @lambda.{}, ptr {}, ptr @lambda.{}.drop)",
-                    rmv, mmv, pmv, lambda, env, lambda
+                    "call void @marina_http_route_add(ptr {}, ptr {}, ptr {}, ptr @lambda.{}, ptr {}, ptr @lambda.{}.drop, i32 {})",
+                    rmv, mmv, pmv, lambda, env, lambda, aflag
                 ));
                 self.discard(&r);
                 CgVal { ty: CgTy::Void, ir: String::new(), owned: false }
@@ -1883,44 +1899,47 @@ fn pop_scope(&mut self) {
             CExpr::FsReadFile { path } => {
                 let p = self.cg_expr(path);
                 let pmv = self.build_mv(&p);
-                let out = self.alloca("%mv");
-                self.emit(format!("call void @marina_fs_read_file(ptr {}, ptr {})", pmv, out));
-                self.mv_load(&out, CgTy::Str)
+                let pr = self.fresh("pr");
+                self.emit(format!("{} = call ptr @marina_fs_read_file_async(ptr {})", pr, pmv));
+                CgVal { ty: CgTy::Promise, ir: pr, owned: true }
             }
             CExpr::FsWriteFile { path, data } => {
                 let p = self.cg_expr(path);
                 let pmv = self.build_mv(&p);
                 let d = self.cg_expr(data);
                 let dmv = self.build_mv(&d);
-                self.emit(format!("call void @marina_fs_write_file(ptr {}, ptr {})", pmv, dmv));
+                let pr = self.fresh("pr");
+                self.emit(format!("{} = call ptr @marina_fs_write_file_async(ptr {}, ptr {})", pr, pmv, dmv));
                 self.discard(&d);
-                CgVal { ty: CgTy::Void, ir: String::new(), owned: false }
+                CgVal { ty: CgTy::Promise, ir: pr, owned: true }
             }
             CExpr::FsExists { path } => {
                 let p = self.cg_expr(path);
                 let pmv = self.build_mv(&p);
-                let out = self.alloca("%mv");
-                self.emit(format!("call void @marina_fs_exists(ptr {}, ptr {})", pmv, out));
-                self.mv_load(&out, CgTy::Bool)
+                let pr = self.fresh("pr");
+                self.emit(format!("{} = call ptr @marina_fs_exists_async(ptr {})", pr, pmv));
+                CgVal { ty: CgTy::Promise, ir: pr, owned: true }
             }
             CExpr::FsReadDir { path } => {
                 let p = self.cg_expr(path);
                 let pmv = self.build_mv(&p);
-                let out = self.alloca("%mv");
-                self.emit(format!("call void @marina_fs_read_dir(ptr {}, ptr {})", pmv, out));
-                self.mv_load(&out, CgTy::Array)
+                let pr = self.fresh("pr");
+                self.emit(format!("{} = call ptr @marina_fs_read_dir_async(ptr {})", pr, pmv));
+                CgVal { ty: CgTy::Promise, ir: pr, owned: true }
             }
             CExpr::FsMkdir { path } => {
                 let p = self.cg_expr(path);
                 let pmv = self.build_mv(&p);
-                self.emit(format!("call void @marina_fs_mkdir(ptr {})", pmv));
-                CgVal { ty: CgTy::Void, ir: String::new(), owned: false }
+                let pr = self.fresh("pr");
+                self.emit(format!("{} = call ptr @marina_fs_mkdir_async(ptr {})", pr, pmv));
+                CgVal { ty: CgTy::Promise, ir: pr, owned: true }
             }
             CExpr::FsRemove { path } => {
                 let p = self.cg_expr(path);
                 let pmv = self.build_mv(&p);
-                self.emit(format!("call void @marina_fs_remove(ptr {})", pmv));
-                CgVal { ty: CgTy::Void, ir: String::new(), owned: false }
+                let pr = self.fresh("pr");
+                self.emit(format!("{} = call ptr @marina_fs_remove_async(ptr {})", pr, pmv));
+                CgVal { ty: CgTy::Promise, ir: pr, owned: true }
             }
             CExpr::CryptoSha256 { v } => {
                 let d = self.cg_expr(v);
@@ -1975,13 +1994,13 @@ fn pop_scope(&mut self) {
             CExpr::SqlExec { conn, sql, binds, result_class } => {
                 let cv = self.cg_expr(conn);
                 // cg_sql_call borrows the connection (single queued release)
-                let out = self.cg_sql_call(&cv, sql, binds, Some(*result_class));
-                self.mv_load(&out, CgTy::Object)
+                let pr = self.cg_sql_call_async(&cv, sql, binds, Some(*result_class));
+                CgVal { ty: CgTy::Promise, ir: pr, owned: true }
             }
             CExpr::SqlQuery { conn, sql, binds } => {
                 let cv = self.cg_expr(conn);
-                let out = self.cg_sql_call(&cv, sql, binds, None);
-                self.mv_load(&out, CgTy::Array)
+                let pr = self.cg_sql_call_async(&cv, sql, binds, None);
+                CgVal { ty: CgTy::Promise, ir: pr, owned: true }
             }
             CExpr::SqlClose { conn } => {
                 let cv = self.cg_expr(conn);
@@ -1992,11 +2011,9 @@ fn pop_scope(&mut self) {
         }
     }
 
-    /// Emit a `marina_sql_execute` / `marina_sql_query` call: the connection
-    /// object pointer is passed directly; `sql` becomes a string literal
-    /// MValue; binds go through an alloca'd %mv buffer.
-    /// Returns the alloca holding the result MValue.
-    fn cg_sql_call(
+    /// Async variant of `cg_sql_call`: emits the `_async` runtime call and
+    /// returns the promise pointer.
+    fn cg_sql_call_async(
         &mut self,
         conn: &CgVal,
         sql: &str,
@@ -2024,32 +2041,32 @@ fn pop_scope(&mut self) {
             self.emit(format!("store %mv {}, ptr {}", ld, slot));
             self.discard(&bv);
         }
-        let out = self.alloca("%mv");
+        let pr = self.fresh("pr");
         match result_class {
             Some(cls) => {
                 self.emit(format!(
-                    "call void @marina_sql_execute(ptr {}, ptr {}, i64 {}, ptr {}, i32 {}, ptr {})",
+                    "{} = call ptr @marina_sql_execute_async(ptr {}, ptr {}, i64 {}, ptr {}, i32 {})",
+                    pr,
                     p,
                     smv,
                     binds.len() as i64,
                     buf,
-                    cls,
-                    out
+                    cls
                 ));
             }
             None => {
                 self.emit(format!(
-                    "call void @marina_sql_query(ptr {}, ptr {}, i64 {}, ptr {}, ptr {})",
+                    "{} = call ptr @marina_sql_query_async(ptr {}, ptr {}, i64 {}, ptr {})",
+                    pr,
                     p,
                     smv,
                     binds.len() as i64,
-                    buf,
-                    out
+                    buf
                 ));
             }
         }
         self.discard(&sv);
-        out
+        pr
     }
 
     /// Lambda layout: executor params first (Plain ABI only), then captured
@@ -2140,6 +2157,12 @@ fn builtin_class(&self, name: &str) -> i32 {
     // ------------------------------------------------------------------
 
     fn gen_lambda(&mut self, li: usize) {
+        let lam = &self.c.lambdas[li];
+        if lam.is_async && lam.abi == LambdaAbi::Listen {
+            // async route handler: shim + promise state machine
+            self.gen_async_listen_lambda(li);
+            return;
+        }
         let (abi, lret) = {
             let lam = &self.c.lambdas[li];
             (lam.abi, lam.ret.clone())
@@ -2308,6 +2331,213 @@ fn builtin_class(&self, name: &str) -> i32 {
         let ret = f.ret.clone();
         let body = f.body.clone();
         self.gen_sync_fn_into(name, &params, &ret, &body);
+    }
+
+    /// An `async (req, res) => { ... }` route handler compiles to:
+    ///   * `lambda.N` — the Listen-ABI shim the runtime registers; returns
+    ///     the handler's promise,
+    ///   * `lambda.N.async` — state machine entry: creates the promise,
+    ///     copies captures + (req, res) into the frame, runs segment 0,
+    ///   * `lambda.N.async.resume` — continuations after each await,
+    ///   * `lambda.N.drop` — env cleanup (unchanged).
+    fn gen_async_listen_lambda(&mut self, li: usize) {
+        let lret = self.c.lambdas[li].ret.clone();
+        let captures = self.lambda_slots(li); // Listen ABI: captures only
+        let lam_params: Vec<(usize, CTy)> = self.c.lambdas[li].params.clone();
+        let body = self.c.lambdas[li].body.clone();
+        let fty = format!("%frame.lambda.{}", li);
+        let entry_name = format!("lambda.{}.async", li);
+
+        // ---- 1. shim: the runtime calls this; it returns the promise ----
+        self.push_fn(IrFn {
+            name: format!("lambda.{}", li),
+            ret: "ptr",
+            params: vec!["ptr %env".into(), "ptr %req".into(), "ptr %res".into()],
+            allocas: Vec::new(),
+            blocks: vec![IrBlock { label: "entry".into(), instrs: Vec::new(), term: None }],
+            frame_ty: None,
+        });
+        self.cur_ret = CgTy::Promise;
+        let sp = self.fresh("sp");
+        self.emit(format!(
+            "{} = call ptr @{}(ptr %env, ptr %req, ptr %res)",
+            sp, entry_name
+        ));
+        self.term(format!("ret ptr {}", sp));
+
+        // ---- 2. state machine frame ----
+        self.frame = Some(FrameInfo {
+            ty: fty.clone(),
+            slots: vec![CgTy::Promise],
+            map: HashMap::new(),
+        });
+        let env_ty = self.env_type_def(li);
+        self.env = Some(EnvInfo {
+            slot_tys: captures.iter().map(|(_, t)| cg_ty(t)).collect(),
+            map: captures.iter().enumerate().map(|(i, (id, _))| (*id, i)).collect(),
+            ty: env_ty.clone(),
+        });
+
+        // ---- 3. entry: create promise + frame, unpack, run segment 0 ----
+        self.push_fn(IrFn {
+            name: entry_name.clone(),
+            ret: "ptr",
+            params: vec!["ptr %env".into(), "ptr %req".into(), "ptr %res".into()],
+            allocas: Vec::new(),
+            blocks: vec![IrBlock { label: "entry".into(), instrs: Vec::new(), term: None }],
+            frame_ty: Some(fty.clone()),
+        });
+        self.cur_ret = CgTy::Promise;
+        let pr = self.fresh("pr");
+        self.emit(format!("{} = call ptr @marina_promise_create()", pr));
+        {
+            let gep = self.gep_ssa(&Access::Frame(0, CgTy::Promise));
+            self.emit(format!("store ptr {}, ptr {}", pr, gep));
+        }
+        // captures: the env owns its refs; the frame gets its own (retained)
+        for (i, (id, t)) in captures.iter().enumerate() {
+            let ct = cg_ty(t);
+            let slot = self.slot_for(*id, ct);
+            let gep = self.gep_ssa(&Access::Frame(slot, ct));
+            if ct.is_ptr() {
+                let egep = self.gep_ssa(&Access::Env(i, ct));
+                let v = self.fresh("cv");
+                self.emit(format!("{} = load ptr, ptr {}", v, egep));
+                let r = self.fresh("cr");
+                self.emit(format!("{} = call ptr @marina_retain(ptr {})", r, v));
+                self.emit(format!("store ptr {}, ptr {}", r, gep));
+            } else {
+                let egep = self.gep_ssa(&Access::Env(i, ct));
+                let v = self.fresh("cv");
+                self.emit(format!("{} = load {}, ptr {}", v, ct.ir(), egep));
+                self.emit(format!("store {} {}, ptr {}", ct.ir(), v, gep));
+            }
+        }
+        // Listen-ABI params arrive as pointers to MValues (rc 1 handed over)
+        for (i, (id, t)) in lam_params.iter().enumerate() {
+            let ct = cg_ty(t);
+            let slot = self.slot_for(*id, ct);
+            let gep = self.gep_ssa(&Access::Frame(slot, ct));
+            let src = if i == 0 { "%req" } else { "%res" };
+            self.store_from_mv(src, ct, &gep);
+        }
+        let rv = self.fresh("rv");
+        self.emit(format!("{} = call ptr @marina_retain(ptr {})", rv, pr));
+        self.emit(format!(
+            "call void @{}.resume(ptr %fr, i32 0, ptr null)",
+            entry_name
+        ));
+        self.term(format!("ret ptr {}", rv));
+
+        // ---- 4. resume: continuations (mirrors gen_async_fn) ----
+        let mut segs: Vec<Segment> = Vec::new();
+        self.transform(body, &mut segs);
+        self.push_fn(IrFn {
+            name: format!("{}.resume", entry_name),
+            ret: "void",
+            params: vec!["ptr %fr".into(), "i32 %st".into(), "ptr %val".into()],
+            allocas: Vec::new(),
+            blocks: vec![IrBlock { label: "pro".into(), instrs: Vec::new(), term: None }],
+            frame_ty: None,
+        });
+        self.cur_ret = CgTy::Void;
+
+        let mut vblock: Vec<Option<usize>> = Vec::new();
+        let mut sblock: Vec<usize> = Vec::new();
+        for k in 0..segs.len() {
+            if k > 0 {
+                vblock.push(Some(self.new_block_fixed(format!("seg.{}v", k))));
+            } else {
+                vblock.push(None);
+            }
+            sblock.push(self.new_block_fixed(format!("seg.{}", k)));
+        }
+        let await_targets: Vec<Option<(usize, CTy)>> = segs
+            .iter()
+            .map(|s| match &s.end {
+                SegEnd::Await { target, .. } => target.clone(),
+                _ => None,
+            })
+            .collect();
+        for (k, seg) in segs.into_iter().enumerate() {
+            if k > 0 {
+                self.switch_block(vblock[k].unwrap());
+                if let Some((id, ty)) = await_targets[k - 1].clone() {
+                    self.materialize_await_value(id, &ty);
+                }
+                let sl = self.label_of(sblock[k]);
+                self.term(format!("br label %{}", sl));
+            }
+            self.switch_block(sblock[k]);
+            self.scopes.push(HashMap::new());
+            self.cg_body(&seg.stmts);
+            if !self.terminated() {
+                match &seg.end {
+                    SegEnd::Await { expr, next, .. } => {
+                        let v = self.cg_expr(expr);
+                        let v = self.to_owned(v);
+                        self.emit(format!(
+                            "call void @marina_await(ptr {}, ptr @{}.resume, ptr %fr, i32 {})",
+                            v.ir, entry_name, next
+                        ));
+                        self.flush_pending();
+                        self.term("ret void".to_string());
+                    }
+                    SegEnd::ReturnExpr(e) => {
+                        let v = self.cg_expr(e);
+                        let v = self.coerce_val(v, cg_ty(&lret));
+                        self.finish_async(Some(v));
+                    }
+                    SegEnd::ReturnVoid => self.finish_async(None),
+                    SegEnd::ResolveReturn { id, ty } => {
+                        let slot = self.slot_for(*id, cg_ty(ty));
+                        let (v, _) = self.load_access(&Access::Frame(slot, cg_ty(ty)));
+                        self.finish_async(Some(CgVal { ty: cg_ty(ty), ir: v, owned: false }));
+                    }
+                }
+            }
+            self.pop_scope();
+        }
+
+        let mut sw = format!("switch i32 %st, label %{} [", self.label_of(sblock[0]));
+        for k in 1..sblock.len() {
+            sw.push_str(&format!(
+                " i32 {}, label %{}",
+                k,
+                self.label_of(vblock[k].unwrap())
+            ));
+        }
+        sw.push_str(" ]");
+        self.switch_block(0);
+        self.term(sw);
+
+        let slots = self.frame.as_ref().unwrap().slots.clone();
+        let tys: Vec<String> = slots.iter().map(|t| t.mem().to_string()).collect();
+        self.type_defs
+            .push(format!("{} = type {{ {} }}", fty, tys.join(", ")));
+        self.frame = None;
+
+        // ---- 5. drop function (env cleanup, same as sync lambdas) ----
+        self.push_fn(IrFn {
+            name: format!("lambda.{}.drop", li),
+            ret: "void",
+            params: vec!["ptr %env".to_string()],
+            allocas: Vec::new(),
+            blocks: vec![IrBlock { label: "entry".into(), instrs: Vec::new(), term: None }],
+            frame_ty: None,
+        });
+        for (i, (_, t)) in captures.iter().enumerate() {
+            let ct = cg_ty(t);
+            if ct.is_ptr() {
+                let gep = self.gep_ssa(&Access::Env(i, ct));
+                let v = self.fresh("dl");
+                self.emit(format!("{} = load ptr, ptr {}", v, gep));
+                self.emit(format!("call void @marina_release(ptr {})", v));
+            }
+        }
+        self.emit("call void @marina_closure_free(ptr %env)".to_string());
+        self.term("ret void".to_string());
+        self.env = None;
     }
 
     // ------------------------------------------------------------------
@@ -2585,6 +2815,23 @@ fn builtin_class(&self, name: &str) -> i32 {
                 let z = self.fresh("az");
                 self.emit(format!("{} = zext i1 {} to i8", z, t));
                 self.emit(format!("store i8 {}, ptr {}", z, gep));
+            }
+            // Reference values: the waiter task hands us a retained copy
+            // (marina_promise_resolve retains per waiter), so retain again
+            // for the frame slot — the slot releases it when the frame dies
+            // and run_waiter drops the task's copy. Stream values are plain
+            // integer handles (no payload to move).
+            CgTy::Stream => {
+                let l = self.fresh("aw");
+                self.emit(format!("{} = load i64, ptr {}", l, vgep2));
+                self.emit(format!("store i64 {}, ptr {}", l, gep));
+            }
+            CgTy::Array | CgTy::Object | CgTy::Promise | CgTy::Resolver => {
+                let l = self.fresh("aw");
+                self.emit(format!("{} = load ptr, ptr {}", l, vgep4));
+                let r = self.fresh("ar");
+                self.emit(format!("{} = call ptr @marina_retain(ptr {})", r, l));
+                self.emit(format!("store ptr {}, ptr {}", r, gep));
             }
             _ => {}
         }

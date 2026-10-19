@@ -16,9 +16,102 @@ use std::collections::{BinaryHeap, HashMap, VecDeque};
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::os::raw::c_void;
+#[cfg(unix)]
+use std::os::unix::net::UnixStream;
 use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 use std::sync::{Condvar, Mutex, OnceLock};
 use std::time::{Duration, Instant};
+
+// ---- poll(2): readiness multiplexing for the evented HTTP server ----
+#[repr(C)]
+struct PollFd {
+    fd: i32,
+    events: i16,
+    revents: i16,
+}
+// nfds_t is u32 on macOS, u64 on linux-gnu x86_64.
+#[cfg(target_os = "macos")]
+type NfdsT = u32;
+#[cfg(not(target_os = "macos"))]
+type NfdsT = u64;
+extern "C" {
+    fn poll(fds: *mut PollFd, nfds: NfdsT, timeout: i32) -> i32;
+}
+const POLLIN: i16 = 0x0001;
+const POLLOUT: i16 = 0x0004;
+
+// ---- bind with SO_REUSEADDR (std's TcpListener::bind doesn't set it, so a
+// quick server restart hits EADDRINUSE against lingering TIME-WAIT sockets)
+#[repr(C)]
+struct SockAddrIn {
+    sin_family: u16,
+    sin_port: u16, // big-endian
+    sin_addr: u32, // big-endian
+    sin_zero: [u8; 8],
+}
+#[cfg(target_os = "macos")]
+const SOL_SOCKET: i32 = 0xffff;
+#[cfg(not(target_os = "macos"))]
+const SOL_SOCKET: i32 = 1;
+#[cfg(target_os = "macos")]
+const SO_REUSEADDR: i32 = 0x0004;
+#[cfg(not(target_os = "macos"))]
+const SO_REUSEADDR: i32 = 2;
+const AF_INET: i32 = 2;
+const SOCK_STREAM: i32 = 1;
+extern "C" {
+    fn socket(domain: i32, ty: i32, protocol: i32) -> i32;
+    fn setsockopt(fd: i32, level: i32, name: i32, val: *const c_void, len: u32) -> i32;
+    fn bind(fd: i32, addr: *const SockAddrIn, len: u32) -> i32;
+    fn listen(fd: i32, backlog: i32) -> i32;
+    fn close(fd: i32) -> i32;
+}
+fn bind_tcp_reuse(host: &str, port: u16) -> std::io::Result<TcpListener> {
+    use std::net::Ipv4Addr;
+    use std::os::fd::FromRawFd;
+    let ip: Ipv4Addr = match host.parse() {
+        Ok(ip) => ip,
+        // non-literal host (hostname): fall back to std's resolver
+        Err(_) => return TcpListener::bind((host, port)),
+    };
+    unsafe {
+        let fd = socket(AF_INET, SOCK_STREAM, 0);
+        if fd < 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        let one: i32 = 1;
+        let _ = setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &one as *const i32 as *const c_void, 4);
+        let sa = SockAddrIn {
+            sin_family: AF_INET as u16,
+            sin_port: port.to_be(),
+            sin_addr: u32::from(ip).to_be(),
+            sin_zero: [0; 8],
+        };
+        if bind(fd, &sa, std::mem::size_of::<SockAddrIn>() as u32) != 0 {
+            let e = std::io::Error::last_os_error();
+            close(fd);
+            return Err(e);
+        }
+        if listen(fd, 128) != 0 {
+            let e = std::io::Error::last_os_error();
+            close(fd);
+            return Err(e);
+        }
+        Ok(TcpListener::from_raw_fd(fd))
+    }
+}
+
+// Self-pipe: http_respond (running on worker threads) nudges the evented
+// listener loop the moment a response is written, so the connection is
+// retired (fd closed) without waiting for the poll timeout.
+static WAKE_TX: OnceLock<UnixStream> = OnceLock::new();
+fn wake_listener() {
+    if let Some(w) = WAKE_TX.get() {
+        let _ = w.set_nonblocking(true);
+        let mut w = w;
+        let _ = w.write_all(&[1]);
+    }
+}
 
 // ---------------------------------------------------------------------------
 // Values
@@ -125,20 +218,23 @@ unsafe fn free_obj(p: *mut u8) {
         }
         KIND_PROMISE => {
             let pr = p as *mut Promise;
-            let v = (*pr).inner.lock().unwrap().value;
-            if v.tag == TAG_STRING && !v.p.is_null() {
-                release_ptr(v.p as *mut u8);
-            }
+            release_value(&(*pr).inner.lock().unwrap().value);
+            // Drop the Rust-side fields properly (the Mutex may own a heap
+            // allocation of its own) before freeing the block.
+            std::ptr::drop_in_place(&mut (*pr).inner);
             dealloc(p as *mut u8, Layout::new::<Promise>());
         }
         KIND_ARRAY => {
             let arr = p as *mut ArrayObj;
             release_elements(&(*arr).data);
+            // release the Vec's heap buffer too (MValue has no Drop)
+            std::ptr::drop_in_place(&mut (*arr).data);
             dealloc(p as *mut u8, Layout::new::<ArrayObj>());
         }
         KIND_OBJECT => {
             let obj = p as *mut ObjectObj;
             release_elements(&(*obj).data);
+            std::ptr::drop_in_place(&mut (*obj).data);
             dealloc(p as *mut u8, Layout::new::<ObjectObj>());
         }
         _ => {}
@@ -183,6 +279,10 @@ struct Waiter {
     resume: ResumeFn,
     frame: *mut c_void,
     state: i32,
+    /// Set by `marina_await`: this waiter took over the awaiting frame's
+    /// reference to the promise (the await consumes the caller's ref), so
+    /// the scheduled waiter task owns it and releases it after resume.
+    owns_promise_ref: bool,
 }
 unsafe impl Send for Waiter {}
 
@@ -210,7 +310,98 @@ unsafe impl Send for WaiterTask {}
 fn run_waiter(t: WaiterTask) {
     (t.waiter.resume)(t.waiter.frame, t.waiter.state, &t.value);
     unsafe { release_ptr(t.promise as *mut u8) };
+    // The waiter task owned a copy of the resolved value (retained by
+    // marina_promise_resolve / the marina_await fast path). The resumed
+    // frame has taken over ownership (or retained its own), so drop ours.
+    unsafe { release_value(&t.value) };
 }
+
+// ---------------------------------------------------------------------------
+// Async std I/O: promise-returning wrappers over blocking operations
+// ---------------------------------------------------------------------------
+//
+// `await db.query(...)` / `await fs.read_file(...)` / `await http.get(...)`
+// lower to runtime entry points that:
+//   1. deep-copy their inputs (retaining payloads) — the caller's frame may
+//      suspend and its slots are still alive, but we don't rely on that,
+//   2. create a promise,
+//   3. enqueue the blocking work as a task on the event loop (a worker
+//      thread picks it up, runs it, resolves the promise with the result),
+//   4. return the promise to the awaiting caller.
+// The task owns one reference to the promise (released after resolve) and
+// one per retained input payload.
+
+struct PromiseWork {
+    promise: *mut Promise,
+    work: Box<dyn FnOnce() -> MValue + Send>,
+    /// (tag, payload) pairs retained on behalf of the task; released when
+    /// the task finishes.
+    owns: Vec<(i32, *mut c_void)>,
+}
+unsafe impl Send for PromiseWork {}
+
+/// Retain `v`'s payload for a background task and record the release pair.
+unsafe fn own_into(owns: &mut Vec<(i32, *mut c_void)>, v: &MValue) {
+    if matches!(v.tag, TAG_STRING | TAG_ARRAY | TAG_OBJECT | TAG_STREAM) && !v.p.is_null() {
+        retain_ptr(v.p as *mut u8);
+        owns.push((v.tag, v.p));
+    }
+}
+
+/// Retain `v`'s payload if it is heap-owned (for a raw-copied value).
+unsafe fn retain_value(v: &MValue) {
+    if matches!(v.tag, TAG_STRING | TAG_ARRAY | TAG_OBJECT | TAG_STREAM) && !v.p.is_null() {
+        retain_ptr(v.p as *mut u8);
+    }
+}
+
+/// Release `v`'s payload if it is heap-owned.
+unsafe fn release_value(v: &MValue) {
+    if matches!(v.tag, TAG_STRING | TAG_ARRAY | TAG_OBJECT | TAG_STREAM) && !v.p.is_null() {
+        release_ptr(v.p as *mut u8);
+    }
+}
+
+/// Release payloads owned via `own_into`.
+unsafe fn drop_owns(owns: &[(i32, *mut c_void)]) {
+    for &(tag, p) in owns {
+        if matches!(tag, TAG_STRING | TAG_ARRAY | TAG_OBJECT | TAG_STREAM) && !p.is_null() {
+            release_ptr(p as *mut u8);
+        }
+    }
+}
+
+fn spawn_promise_io(work: Box<dyn FnOnce() -> MValue + Send>, owns: Vec<(i32, *mut c_void)>) -> *mut c_void {
+    let p = marina_promise_create();
+    unsafe { retain_ptr(p as *mut u8) }; // the task's reference
+    let w = PromiseWork { promise: p as *mut Promise, work, owns };
+    let (m, cv) = rt();
+    let mut g = m.lock().unwrap();
+    g.tasks.push_back(Box::new(move || run_promise_work(w)));
+    cv.notify_all();
+    p as *mut c_void
+}
+
+/// MValue contains a raw pointer, so vectors of them aren't Send — wrap
+/// bind lists for background tasks (the payloads are refcounted heap objects
+/// the runtime already shares across threads).
+struct Bindings(Vec<MValue>);
+unsafe impl Send for Bindings {}
+
+struct MvArg(MValue);
+unsafe impl Send for MvArg {}
+
+fn run_promise_work(w: PromiseWork) {
+    let PromiseWork { promise, work, owns } = w;
+    let v = work();
+    marina_promise_resolve(promise as *mut c_void, &v);
+    unsafe { drop_owns(&owns) };
+    unsafe { release_ptr(promise as *mut u8) };
+}
+
+/// No-op resume used to hand a promise's final reference to the event loop
+/// (the waiter task releases it after running).
+extern "C" fn noop_resume(_frame: *mut c_void, _state: i32, _value: &MValue) {}
 
 // ---------------------------------------------------------------------------
 // Event loop state (shared by workers, the timer thread and the main thread)
@@ -414,12 +605,20 @@ pub extern "C" fn marina_release(p: *mut c_void) {
 pub extern "C" fn marina_promise_create() -> *mut c_void {
     let p = unsafe {
         let p = alloc(Layout::new::<Promise>()) as *mut Promise;
-        (*p).h = Header { rc: AtomicI64::new(1), kind: KIND_PROMISE, _pad: [0; 7] };
-        (*p).inner = Mutex::new(PromiseInner {
-            done: false,
-            value: MValue::default(),
-            waiters: Vec::new(),
-        });
+        // p is UNINITIALIZED memory: never assign into it (that would drop
+        // the garbage old value) — use ptr::write for non-trivial fields.
+        std::ptr::write(
+            &mut (*p).h,
+            Header { rc: AtomicI64::new(1), kind: KIND_PROMISE, _pad: [0; 7] },
+        );
+        std::ptr::write(
+            &mut (*p).inner,
+            Mutex::new(PromiseInner {
+                done: false,
+                value: MValue::default(),
+                waiters: Vec::new(),
+            }),
+        );
         p
     };
     let (m, _) = rt();
@@ -456,10 +655,7 @@ pub extern "C" fn marina_promise_resolve(promise: *mut c_void, value: *const MVa
             if inner.done {
                 return;
             }
-            let v = *value;
-            if v.tag == TAG_STRING && !v.p.is_null() {
-                retain_ptr(v.p as *mut u8);
-            }
+            let v = *value; // TRANSFERS the task's ref to the promise
             inner.value = v;
             inner.done = true;
             waiters = std::mem::take(&mut inner.waiters);
@@ -468,7 +664,11 @@ pub extern "C" fn marina_promise_resolve(promise: *mut c_void, value: *const MVa
         let (m, cv) = rt();
         let mut g = m.lock().unwrap();
         for w in waiters {
-            retain_ptr(promise as *mut u8); // task owns this ref
+            if !w.owns_promise_ref {
+                retain_ptr(promise as *mut u8); // waiter task owns a ref
+            }
+            // (if the waiter owns the caller's ref, the task inherits it)
+            retain_value(&value); // the waiter task owns a copy of the value
             let t = WaiterTask { promise: p, waiter: w, value };
             g.tasks.push_back(Box::new(move || run_waiter(t)));
         }
@@ -496,14 +696,19 @@ pub extern "C" fn marina_await(
             if inner.done {
                 done_value = Some(inner.value);
             } else {
-                inner.waiters.push(Waiter { resume: f, frame, state });
+                // The await consumes the caller's reference to the promise:
+                // the waiter task inherits it and releases it after resume.
+                inner.waiters.push(Waiter { resume: f, frame, state, owns_promise_ref: true });
                 return;
             }
         }
         if let Some(value) = done_value {
+            // The await consumes the caller's promise reference: hand it to
+            // the waiter task (run_waiter releases it after resume).
+            retain_value(&value);
             let t = WaiterTask {
                 promise: p,
-                waiter: Waiter { resume: f, frame, state },
+                waiter: Waiter { resume: f, frame, state, owns_promise_ref: true },
                 value,
             };
             let (m, cv) = rt();
@@ -714,9 +919,14 @@ fn is_ptr_tag(tag: i32) -> bool {
 pub extern "C" fn marina_array_new(tag: i32) -> *mut c_void {
     let p = unsafe {
         let p = alloc(Layout::new::<ArrayObj>()) as *mut ArrayObj;
-        (*p).h = Header { rc: AtomicI64::new(1), kind: KIND_ARRAY, _pad: [0; 7] };
+        // p is UNINITIALIZED memory: ptr::write, never assignment (see
+        // marina_promise_create).
+        std::ptr::write(
+            &mut (*p).h,
+            Header { rc: AtomicI64::new(1), kind: KIND_ARRAY, _pad: [0; 7] },
+        );
         (*p).tag = tag;
-        (*p).data = Vec::new();
+        std::ptr::write(&mut (*p).data, Vec::new());
         p
     };
     p as *mut c_void
@@ -1047,9 +1257,14 @@ pub extern "C" fn marina_class_register(class_id: i32, meta: *const c_void, len:
 pub extern "C" fn marina_object_new(class_id: i32, n_fields: i64) -> *mut c_void {
     unsafe {
         let p = alloc(Layout::new::<ObjectObj>()) as *mut ObjectObj;
-        (*p).h = Header { rc: AtomicI64::new(1), kind: KIND_OBJECT, _pad: [0; 7] };
+        // p is UNINITIALIZED memory: ptr::write, never assignment (see
+        // marina_promise_create) — assigning the Vec would drop garbage.
+        std::ptr::write(
+            &mut (*p).h,
+            Header { rc: AtomicI64::new(1), kind: KIND_OBJECT, _pad: [0; 7] },
+        );
         (*p).class_id = class_id;
-        (*p).data = vec![MValue::default(); n_fields.max(0) as usize];
+        std::ptr::write(&mut (*p).data, vec![MValue::default(); n_fields.max(0) as usize]);
         p as *mut c_void
     }
 }
@@ -1210,6 +1425,64 @@ pub extern "C" fn marina_net_close(s: *const MValue) {
     streams().lock().unwrap().0.remove(&id);
 }
 
+// --- async net: `await net.connect(...)` & friends --------------------------
+
+#[no_mangle]
+pub extern "C" fn marina_net_connect_async(host: *const MValue, port: *const MValue) -> *mut c_void {
+    let host_s = unsafe { mv_to_string(&*host) };
+    let port_n = unsafe { (*port).i };
+    let work = Box::new(move || match TcpStream::connect((host_s.as_str(), port_n as u16)) {
+        Ok(s) => {
+            let _ = s.set_read_timeout(Some(Duration::from_secs(30)));
+            let mut g = streams().lock().unwrap();
+            let id = g.1;
+            g.1 += 1;
+            g.0.insert(id, s);
+            MValue { tag: TAG_STREAM, pad: 0, i: id, f: 0.0, p: std::ptr::null_mut() }
+        }
+        Err(e) => rt_panic(format!("cannot connect to {}:{} ({})", host_s, port_n, e)),
+    });
+    return spawn_promise_io(work, vec![]);
+}
+
+#[no_mangle]
+pub extern "C" fn marina_net_write_async(s: *const MValue, data: *const MValue) -> *mut c_void {
+    let id = unsafe { (*s).i };
+    let bytes = unsafe { mv_to_string(&*data).into_bytes() };
+    let work = Box::new(move || {
+        let mut st = stream_get(id);
+        if let Err(e) = st.write_all(&bytes) {
+            rt_panic(format!("stream {}: write failed ({})", id, e));
+        }
+        MValue { tag: TAG_VOID, pad: 0, i: 0, f: 0.0, p: std::ptr::null_mut() }
+    });
+    return spawn_promise_io(work, vec![]);
+}
+
+#[no_mangle]
+pub extern "C" fn marina_net_read_all_async(s: *const MValue) -> *mut c_void {
+    let id = unsafe { (*s).i };
+    let work = Box::new(move || {
+        let mut st = stream_get(id);
+        let mut buf = Vec::new();
+        if let Err(e) = st.read_to_end(&mut buf) {
+            rt_panic(format!("stream {}: read failed ({})", id, e));
+        }
+        mv_str_owned(String::from_utf8_lossy(&buf).into_owned())
+    });
+    return spawn_promise_io(work, vec![]);
+}
+
+#[no_mangle]
+pub extern "C" fn marina_net_close_async(s: *const MValue) -> *mut c_void {
+    let id = unsafe { (*s).i };
+    let work = Box::new(move || {
+        streams().lock().unwrap().0.remove(&id);
+        MValue { tag: TAG_VOID, pad: 0, i: 0, f: 0.0, p: std::ptr::null_mut() }
+    });
+    return spawn_promise_io(work, vec![]);
+}
+
 /// `str == str` / `str != str` — content comparison over two string MValues.
 #[no_mangle]
 pub extern "C" fn marina_str_eq(a: *const MValue, b: *const MValue) -> bool {
@@ -1333,6 +1606,76 @@ pub extern "C" fn marina_http_request(
     );
 }
 
+/// `await http.get(url)` / `await http.post(url, body)` — async variant of
+/// `marina_http_request`; resolves to an `http_Response` object.
+#[no_mangle]
+pub extern "C" fn marina_http_request_async(
+    method: *const MValue,
+    url: *const MValue,
+    body: *const MValue,
+    class_id: i32,
+) -> *mut c_void {
+let m = unsafe { mv_to_string(&*method) };
+    let u = unsafe { mv_to_string(&*url) };
+    let b = unsafe {
+        if (*body).tag == TAG_STRING {
+            Some(mv_to_string(&*body))
+        } else {
+            None
+        }
+    };
+    let work = Box::new(move || {
+        let (status, resp_body) = http_do_request(&m, &u, b);
+        let o = marina_object_new(class_id, 2);
+        set_object_field(o, 0, mv_int(status));
+        set_object_field(o, 1, mv_str_owned(resp_body));
+        MValue { tag: TAG_OBJECT, pad: 0, i: 0, f: 0.0, p: o }
+    });
+    return spawn_promise_io(work, vec![]);
+}
+
+/// Incrementally parse an HTTP request from an in-progress byte buffer.
+/// Returns `None` while the request is still incomplete, `Some(None)` if the
+/// request is malformed or oversized (caller should drop the connection), and
+/// `Some(Some((method, path, body, consumed)))` once a full request is
+/// buffered — `consumed` bytes belong to the request.
+type ParsedReq = Option<(String, String, String, usize)>;
+fn try_parse_http(buf: &[u8]) -> Option<ParsedReq> {
+    let head_end = match buf.windows(4).position(|w| w == b"\r\n\r\n") {
+        Some(p) => p,
+        None => {
+            if buf.len() > 64 * 1024 {
+                return Some(None); // header too large
+            }
+            return None; // incomplete
+        }
+    };
+    let head = String::from_utf8_lossy(&buf[..head_end]);
+    let mut lines = head.split("\r\n");
+    let reqline = lines.next().unwrap_or("");
+    let mut parts = reqline.split_whitespace();
+    let method = parts.next().unwrap_or("").to_string();
+    let path = parts.next().unwrap_or("/").to_string();
+    if method.is_empty() || parts.next().is_none() {
+        return Some(None); // malformed request line
+    }
+    let mut content_len = 0usize;
+    for line in lines {
+        if let Some(v) = line.to_lowercase().strip_prefix("content-length:") {
+            content_len = v.trim().parse().unwrap_or(0);
+        }
+    }
+    if content_len > 16 * 1024 * 1024 {
+        return Some(None); // body too large
+    }
+    let total = head_end + 4 + content_len;
+    if buf.len() < total {
+        return None; // incomplete body
+    }
+    let body = String::from_utf8_lossy(&buf[head_end + 4..total]).into_owned();
+    Some(Some((method, path, body, total)))
+}
+
 /// Read one HTTP request from a connection: request line + headers + body.
 fn read_http_request(conn: &mut TcpStream) -> Option<(String, String, String)> {
     let _ = conn.set_read_timeout(Some(Duration::from_secs(30)));
@@ -1404,8 +1747,7 @@ pub extern "C" fn marina_http_listen(
     std::thread::spawn(move || {
         let job = job;
         let ListenJob { env, f, port_n, req_class_id, res_class_id } = job;
-        let listener =
-            match TcpListener::bind(("0.0.0.0", port_n)) {
+        let listener = match bind_tcp_reuse("0.0.0.0", port_n) {
                 Ok(l) => l,
                 Err(e) => rt_panic(format!("http: cannot listen on port {} ({})", port_n, e)),
             };
@@ -1454,18 +1796,49 @@ fn http_respond(res: *mut c_void, value: *const MValue, json: bool) {
             return;
         }
     };
+    // The socket is (and stays) non-blocking: dup'd descriptors share the
+    // O_NONBLOCK flag with the event loop's read side, so we must NOT flip
+    // it to blocking here. Short/WouldBlock writes wait via poll(POLLOUT).
     let (ctype, payload) = if json {
         ("application/json", json_value(unsafe { &*value }))
     } else {
         ("text/plain", value_to_string(unsafe { &*value }))
     };
     let resp = format!(
-        "HTTP/1.1 200 OK\r\nContent-Type: {}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+        "HTTP/1.1 200 OK\r\nContent-Type: {}\r\nContent-Length: {}\r\nConnection: keep-alive\r\n\r\n{}",
         ctype,
         payload.len(),
         payload
     );
-    let _ = stream.write_all(resp.as_bytes());
+    {
+        use std::os::fd::AsRawFd;
+        use std::io::Write;
+        let bytes = resp.as_bytes();
+        let mut off = 0usize;
+        while off < bytes.len() {
+            match stream.write(&bytes[off..]) {
+                Ok(0) => break,
+                Ok(n) => off += n,
+                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                    let mut pfd = PollFd {
+                        fd: stream.as_raw_fd(),
+                        events: POLLOUT,
+                        revents: 0,
+                    };
+                    let r = unsafe { poll(&mut pfd, 1, 5_000) };
+                    if r <= 0 {
+                        break; // peer gone or poll failed
+                    }
+                }
+                Err(_) => break,
+            }
+        }
+    }
+    if std::env::var_os("MARINA_HTTP_DEBUG").is_some() {
+        eprintln!("[evloop] responded {} bytes", resp.len());
+    }
+    // nudge the evented listener loop so the connection is retired now
+    wake_listener();
 }
 
 /// `res.send(value)` — plain-text response.
@@ -1563,6 +1936,8 @@ struct HttpRoute {
     prefix: String,
     f: ListenCb,
     env: *mut c_void,
+    /// handler is an async lambda: it returns a promise and responds later
+    is_async: bool,
 }
 
 unsafe impl Send for HttpRoute {}
@@ -1601,6 +1976,7 @@ pub extern "C" fn marina_http_route_add(
     f: ListenCb,
     env: *mut c_void,
     _env_drop: *const c_void,
+    is_async: i32,
 ) {
     let rp = unsafe { (*router).p } as usize;
     let prefix = http_routers()
@@ -1612,7 +1988,7 @@ pub extern "C" fn marina_http_route_add(
     let m = unsafe { mv_to_string(&*method) };
     let p = unsafe { mv_to_string(&*path) };
     let exact = if p == "/" { prefix.clone() } else { format!("{}{}", prefix, p) };
-    http_routes().lock().unwrap().push(HttpRoute { method: m, exact, prefix, f, env });
+    http_routes().lock().unwrap().push(HttpRoute { method: m, exact, prefix, f, env, is_async: is_async != 0 });
 }
 
 /// `await server.listen(host, port)` — bind and start the accept loop.
@@ -1640,55 +2016,276 @@ pub extern "C" fn marina_http_server_listen(
     std::thread::spawn(move || {
         let job = job;
         let ListenJob { host_s, port_n, promise, req_class_id, res_class_id } = job;
-        let listener = match TcpListener::bind((host_s.as_str(), port_n)) {
+        let listener = match bind_tcp_reuse(&host_s, port_n) {
             Ok(l) => l,
             Err(e) => rt_panic(format!("http: cannot listen on {}:{} ({})", host_s, port_n, e)),
         };
         // bound successfully: resume the awaiting main function
         marina_promise_resolve(promise, &MValue::default());
 
-        for stream in listener.incoming() {
-            let Ok(mut stream) = stream else { continue };
-            let (method, path, body) = match read_http_request(&mut stream) {
-                Some(r) => r,
-                None => continue,
-            };
-            let route = http_routes()
-                .lock()
-                .unwrap()
-                .iter()
-                .find(|r| {
-                    r.method == method
-                        && (path == r.exact || (path == r.prefix && r.exact == r.prefix))
-                })
-                .cloned();
-            let Some(route) = route else {
-                let resp = "HTTP/1.1 404 Not Found\r\nContent-Type: text/plain\r\nContent-Length: 9\r\nConnection: close\r\n\r\nnot found";
-                let _ = stream.write_all(resp.as_bytes());
-                continue;
-            };
-            // req object: { method, path, body }
-            let req = marina_object_new(req_class_id, 3);
-            set_object_field(req, 0, mv_str_owned(method));
-            set_object_field(req, 1, mv_str_owned(path));
-            set_object_field(req, 2, mv_str_owned(body));
-            // res object backed by this connection
-            let res = marina_object_new(res_class_id, 0);
-            match stream.try_clone() {
-                Ok(sock) => {
-                    res_sockets().lock().unwrap().insert(res as usize, sock);
+        // self-pipe wakeup: http_respond writes a byte here after each
+        // response so retirements happen immediately, not on poll timeout
+        let (mut wake_rx, wake_tx) = match UnixStream::pair() {
+            Ok(p) => p,
+            Err(e) => rt_panic(format!("http: cannot create wakeup pipe ({})", e)),
+        };
+        let _ = WAKE_TX.set(wake_tx);
+        let _ = wake_rx.set_nonblocking(true);
+
+        // Evented accept loop: a single listener thread multiplexes every
+        // open connection with poll(2). No per-connection threads, no
+        // blocking reads. Each fully-read request is handed to its route:
+        //   * sync handler  — runs inline here, respond-or-404 immediately;
+        //   * async handler — runs to its first await, returns a promise,
+        //     and the worker-thread continuation responds via http_respond.
+        // A connection is retired when its res socket leaves res_sockets()
+        // (response written) or after 30s without a response.
+        let _ = listener.set_nonblocking(true);
+        struct Conn {
+            stream: TcpStream,
+            buf: Vec<u8>,
+            res: *mut c_void,     // set while a request is in flight (pinned)
+            dispatched: bool,     // request handed to an async handler
+            deadline: Instant,    // idle deadline (30s, reset per request)
+        }
+        let mut conns: Vec<Conn> = Vec::new();
+        loop {
+            // Retire connections past their idle deadline (stuck handler or
+            // idle keep-alive connection): close silently. A late response
+            // still finds its res_sockets entry and its write fails (peer
+            // gone), which removes the entry.
+            let now = Instant::now();
+            let mut i = 0;
+            while i < conns.len() {
+                if now >= conns[i].deadline {
+                    let c = conns.remove(i);
+                    if c.dispatched {
+                        unsafe { release_ptr(c.res as *mut u8) };
+                    }
+                } else {
+                    i += 1;
                 }
-                Err(_) => continue,
             }
-            let req_mv = MValue { tag: TAG_OBJECT, pad: 0, i: 0, f: 0.0, p: req };
-            let res_mv = MValue { tag: TAG_OBJECT, pad: 0, i: 0, f: 0.0, p: res };
-            // ownership: both objects are handed to the handler with rc 1;
-            // the compiled handler releases them when it returns.
-            (route.f)(route.env, &req_mv, &res_mv);
-            // handler never responded -> 404
-            if res_sockets().lock().unwrap().remove(&(res as usize)).is_some() {
-                let resp = "HTTP/1.1 404 Not Found\r\nContent-Type: text/plain\r\nContent-Length: 9\r\nConnection: close\r\n\r\nnot found";
-                let _ = stream.write_all(resp.as_bytes());
+
+            // Build the poll set: listener + wakeup pipe + connections still
+            // reading.
+            let mut fds: Vec<PollFd> = Vec::with_capacity(conns.len() + 2);
+            fds.push(PollFd {
+                fd: std::os::fd::AsRawFd::as_raw_fd(&listener),
+                events: POLLIN,
+                revents: 0,
+            });
+            fds.push(PollFd {
+                fd: std::os::fd::AsRawFd::as_raw_fd(&wake_rx),
+                events: POLLIN,
+                revents: 0,
+            });
+            for c in &conns {
+                fds.push(PollFd {
+                    fd: std::os::fd::AsRawFd::as_raw_fd(&c.stream),
+                    events: POLLIN,
+                    revents: 0,
+                });
+            }
+            let nready = unsafe { poll(fds.as_mut_ptr(), fds.len() as NfdsT, 100) };
+            if std::env::var_os("MARINA_HTTP_DEBUG").is_some() {
+                let ev: Vec<String> = fds
+                    .iter()
+                    .map(|f| format!("fd{}:r{:04x}", f.fd, f.revents))
+                    .collect();
+                eprintln!(
+                    "[evloop] nready={} conns={} fds={}",
+                    nready,
+                    conns.len(),
+                    ev.join(" ")
+                );
+            }
+            if nready <= 0 {
+                continue;
+            }
+            if fds[1].revents & POLLIN != 0 {
+                // drain the wakeup pipe (a response was written somewhere)
+                let mut drain = [0u8; 4096];
+                loop {
+                    match wake_rx.read(&mut drain) {
+                        Ok(0) | Err(_) => break,
+                        Ok(_) => {}
+                    }
+                }
+            }
+            if fds[0].revents & POLLIN != 0 {
+                // accept every queued connection. NOTE: on Linux an accepted
+                // socket does NOT inherit O_NONBLOCK from the listener (macOS
+                // does), so set it explicitly or reads below block the loop.
+                loop {
+                    match listener.accept() {
+                        Ok((mut s, _)) => {
+                            let _ = s.set_nonblocking(true);
+                            conns.push(Conn {
+                                stream: s,
+                                buf: Vec::new(),
+                                res: std::ptr::null_mut(),
+                                dispatched: false,
+                                deadline: Instant::now() + Duration::from_secs(30),
+                            })
+                        }
+                        Err(_) => break,
+                    }
+                }
+            }
+            for i in 2..fds.len() {
+                let polled_fd = fds[i].fd;
+                if fds[i].revents == 0 {
+                    continue;
+                }
+                let idx = match conns
+                    .iter()
+                    .position(|c| std::os::fd::AsRawFd::as_raw_fd(&c.stream) == polled_fd)
+                {
+                    Some(p) => p,
+                    None => continue,
+                };
+                if conns[idx].dispatched {
+                    // A signal on an in-flight connection: either the client
+                    // aborted (res_sockets entry still present — the handler
+                    // hasn't responded) or the response was written (entry
+                    // gone) and this is the client's NEXT request / its close.
+                    if res_sockets().lock().unwrap().contains_key(&(conns[idx].res as usize)) {
+                        if std::env::var_os("MARINA_HTTP_DEBUG").is_some() {
+                            eprintln!("[evloop] in-flight fd={} aborted -> retire", polled_fd);
+                        }
+                        let c = conns.remove(idx);
+                        unsafe { release_ptr(c.res as *mut u8) };
+                        continue;
+                    }
+                    // response was written: connection goes back to reading
+                    // (HTTP keep-alive). The pin keeps this res address ours.
+                    if std::env::var_os("MARINA_HTTP_DEBUG").is_some() {
+                        eprintln!("[evloop] fd={} keep-alive -> next request", polled_fd);
+                    }
+                    // undo http_respond's blocking flip (shared description!)
+                    let _ = conns[idx].stream.set_nonblocking(true);
+                    unsafe { release_ptr(conns[idx].res as *mut u8) };
+                    conns[idx].dispatched = false;
+                    conns[idx].res = std::ptr::null_mut();
+                    conns[idx].deadline = Instant::now() + Duration::from_secs(30);
+                }
+                // read everything currently available (socket is nonblocking)
+                let mut tmp = [0u8; 8192];
+                let mut dead = false;
+                let mut eof = false;
+                if std::env::var_os("MARINA_HTTP_DEBUG").is_some() {
+                    eprintln!("[evloop] reading fd={}", polled_fd);
+                }
+                loop {
+                    match conns[idx].stream.read(&mut tmp) {
+                        Ok(0) => {
+                            eof = true;
+                            break;
+                        }
+                        Ok(n) => {
+                            conns[idx].buf.extend_from_slice(&tmp[..n]);
+                            if conns[idx].buf.len() > 64 * 1024 + 16 * 1024 * 1024 {
+                                dead = true;
+                                break;
+                            }
+                        }
+                        Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => break,
+                        Err(_) => {
+                            dead = true;
+                            break;
+                        }
+                    }
+                }
+                if dead {
+                    conns.remove(idx);
+                    continue;
+                }
+                // try to parse a full request out of the buffer
+                let parsed = match try_parse_http(&conns[idx].buf) {
+                    None => {
+                        if eof {
+                            conns.remove(idx); // EOF mid-request
+                        }
+                        continue;
+                    }
+                    Some(None) => {
+                        conns.remove(idx); // malformed/oversized
+                        continue;
+                    }
+                    Some(Some(r)) => r,
+                };
+                let (method, path, body, consumed) = parsed;
+                conns[idx].buf.drain(..consumed);
+                if std::env::var_os("MARINA_HTTP_DEBUG").is_some() {
+                    eprintln!("[evloop] request {} {} ({} bytes body)", method, path, body.len());
+                }
+
+                let route = http_routes()
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .find(|r| {
+                        r.method == method
+                            && (path == r.exact || (path == r.prefix && r.exact == r.prefix))
+                    })
+                    .cloned();
+                let Some(route) = route else {
+                    let _ = conns[idx].stream.set_nonblocking(false);
+                    let resp = "HTTP/1.1 404 Not Found\r\nContent-Type: text/plain\r\nContent-Length: 9\r\nConnection: close\r\n\r\nnot found";
+                    let _ = conns[idx].stream.write_all(resp.as_bytes());
+                    conns.remove(idx);
+                    continue;
+                };
+                // req object: { method, path, body }
+                let req = marina_object_new(req_class_id, 3);
+                set_object_field(req, 0, mv_str_owned(method));
+                set_object_field(req, 1, mv_str_owned(path));
+                set_object_field(req, 2, mv_str_owned(body));
+                // res object backed by this connection
+                let res = marina_object_new(res_class_id, 0);
+                let Ok(sock) = conns[idx].stream.try_clone() else {
+                    conns.remove(idx);
+                    continue;
+                };
+                res_sockets().lock().unwrap().insert(res as usize, sock);
+                let req_mv = MValue { tag: TAG_OBJECT, pad: 0, i: 0, f: 0.0, p: req };
+                let res_mv = MValue { tag: TAG_OBJECT, pad: 0, i: 0, f: 0.0, p: res };
+                // ownership: both objects are handed to the handler with rc 1;
+                // the compiled handler releases them when its frame dies.
+                if route.is_async {
+                    // The handler is an async lambda: it runs to its first
+                    // await on this thread and returns a promise; the worker
+                    // continuation responds later via http_respond. Hand our
+                    // reference to the event loop with a no-op waiter so the
+                    // promise is released after resolution.
+                    type AsyncListenCb =
+                        extern "C" fn(*mut c_void, *const MValue, *const MValue) -> *mut c_void;
+                    // Pin the res object for the connection's lifetime: the
+                    // handler frees it as soon as its frame dies, and if its
+                    // address were reused by a later connection the retire
+                    // sweep below could mistake this connection for
+                    // responded. (Released when the connection retires.)
+                    unsafe { retain_ptr(res as *mut u8) };
+                    let af: AsyncListenCb = unsafe { std::mem::transmute(route.f) };
+                    let pr = af(route.env, &req_mv, &res_mv);
+                    if std::env::var_os("MARINA_HTTP_DEBUG").is_some() {
+                        eprintln!("[evloop] async dispatch -> promise {:p}", pr);
+                    }
+                    marina_await(pr, noop_resume as *const c_void, std::ptr::null_mut(), 0);
+                    conns[idx].dispatched = true;
+                    conns[idx].res = res;
+                    conns[idx].deadline = Instant::now() + Duration::from_secs(30);
+                } else {
+                    (route.f)(route.env, &req_mv, &res_mv);
+                    // handler never responded -> 404
+                    if res_sockets().lock().unwrap().remove(&(res as usize)).is_some() {
+                        let _ = conns[idx].stream.set_nonblocking(false);
+                        let resp = "HTTP/1.1 404 Not Found\r\nContent-Type: text/plain\r\nContent-Length: 9\r\nConnection: close\r\n\r\nnot found";
+                        let _ = conns[idx].stream.write_all(resp.as_bytes());
+                    }
+                    conns.remove(idx);
+                }
             }
         }
     });
@@ -2103,6 +2700,98 @@ pub extern "C" fn marina_fs_remove(path: *const MValue) {
     }
 }
 
+// --- async fs: `await fs.read_file(...)` & friends -------------------------
+// Each returns a promise resolving to the same value as its sync sibling.
+
+#[no_mangle]
+pub extern "C" fn marina_fs_read_file_async(path: *const MValue) -> *mut c_void {
+    let p = unsafe { mv_to_string(&*path) };
+    let work = Box::new(move || match std::fs::read(&p) {
+        Ok(bytes) => mv_str_owned(String::from_utf8_lossy(&bytes).into_owned()),
+        Err(e) => rt_panic(format!("fs.readFile '{}': {}", p, e)),
+    });
+    return spawn_promise_io(work, vec![]);
+}
+
+#[no_mangle]
+pub extern "C" fn marina_fs_write_file_async(path: *const MValue, data: *const MValue) -> *mut c_void {
+    let p = unsafe { mv_to_string(&*path) };
+    let d = unsafe { mv_to_string(&*data) };
+    let work = Box::new(move || {
+        if let Err(e) = std::fs::write(&p, d.as_bytes()) {
+            rt_panic(format!("fs.writeFile '{}': {}", p, e));
+        }
+        MValue { tag: TAG_VOID, pad: 0, i: 0, f: 0.0, p: std::ptr::null_mut() }
+    });
+    return spawn_promise_io(work, vec![]);
+}
+
+#[no_mangle]
+pub extern "C" fn marina_fs_exists_async(path: *const MValue) -> *mut c_void {
+    let p = unsafe { mv_to_string(&*path) };
+    let work = Box::new(move || {
+        MValue { tag: TAG_BOOL, pad: 0, i: std::path::Path::new(&p).exists() as i64, f: 0.0, p: std::ptr::null_mut() }
+    });
+    return spawn_promise_io(work, vec![]);
+}
+
+#[no_mangle]
+pub extern "C" fn marina_fs_read_dir_async(path: *const MValue) -> *mut c_void {
+    let p = unsafe { mv_to_string(&*path) };
+    let work = Box::new(move || {
+        let entries = match std::fs::read_dir(&p) {
+            Ok(rd) => rd,
+            Err(e) => rt_panic(format!("fs.readDir '{}': {}", p, e)),
+        };
+        let mut names: Vec<String> = Vec::new();
+        for e in entries {
+            match e {
+                Ok(en) => names.push(en.file_name().to_string_lossy().into_owned()),
+                Err(err) => rt_panic(format!("fs.readDir '{}': {}", p, err)),
+            }
+        }
+        names.sort();
+        let arr = marina_array_new(TAG_STRING);
+        for n in names {
+            let mv = mv_str_owned(n);
+            marina_array_push(arr, &mv);
+            unsafe { drop_mv(&mv) };
+        }
+        MValue { tag: TAG_ARRAY, pad: 0, i: 0, f: 0.0, p: arr }
+    });
+    return spawn_promise_io(work, vec![]);
+}
+
+#[no_mangle]
+pub extern "C" fn marina_fs_mkdir_async(path: *const MValue) -> *mut c_void {
+    let p = unsafe { mv_to_string(&*path) };
+    let work = Box::new(move || {
+        if let Err(e) = std::fs::create_dir_all(&p) {
+            rt_panic(format!("fs.mkdir '{}': {}", p, e));
+        }
+        MValue { tag: TAG_VOID, pad: 0, i: 0, f: 0.0, p: std::ptr::null_mut() }
+    });
+    return spawn_promise_io(work, vec![]);
+}
+
+#[no_mangle]
+pub extern "C" fn marina_fs_remove_async(path: *const MValue) -> *mut c_void {
+    let p = unsafe { mv_to_string(&*path) };
+    let work = Box::new(move || {
+        let path = std::path::Path::new(&p);
+        let result = if path.is_dir() {
+            std::fs::remove_dir_all(path)
+        } else {
+            std::fs::remove_file(path)
+        };
+        if let Err(e) = result {
+            rt_panic(format!("fs.remove '{}': {}", p, e));
+        }
+        MValue { tag: TAG_VOID, pad: 0, i: 0, f: 0.0, p: std::ptr::null_mut() }
+    });
+    return spawn_promise_io(work, vec![]);
+}
+
 // ---------------------------------------------------------------------------
 // std module: crypto (pure-Rust, no external crates)
 // ---------------------------------------------------------------------------
@@ -2313,6 +3002,12 @@ mod sqlite_ffi {
     pub const SQLITE_DONE: c_int = 101;
     pub const OPEN_READWRITE: c_int = 0x2;
     pub const OPEN_CREATE: c_int = 0x4;
+    /// SQLITE_OPEN_FULLMUTEX: serialize all access to the connection
+    /// internally. Required because async db calls may run the same
+    /// connection on several worker threads at once (system SQLite is
+    /// often built THREADSAFE=2, which forbids concurrent same-connection
+    /// use and fails with "disk I/O error").
+    pub const OPEN_FULLMUTEX: c_int = 0x1_0000;
     pub const INTEGER: c_int = 1;
     pub const FLOAT: c_int = 2;
     pub const TEXT: c_int = 3;
@@ -2417,8 +3112,9 @@ fn sql_conn_id(o: *mut c_void) -> i64 {
     obj.data[0].i
 }
 
-fn sql_conn_ptr(o: *mut c_void) -> *mut c_void {
-    let id = sql_conn_id(o);
+/// Look up a connection's db handle by its registered id (used by the async
+/// entry points, which capture the id instead of the connection object).
+fn sql_conn_ptr_by_id(id: i64) -> *mut c_void {
     let g = sql_conns().lock().unwrap();
     match g.0.get(&id) {
         Some(p) => *p as *mut c_void,
@@ -2449,7 +3145,7 @@ pub extern "C" fn marina_sql_open(
         if sq::sqlite3_open_v2(
             cpath.as_ptr(),
             &mut db,
-            sq::OPEN_READWRITE | sq::OPEN_CREATE,
+            sq::OPEN_READWRITE | sq::OPEN_CREATE | sq::OPEN_FULLMUTEX,
             std::ptr::null(),
         ) != sq::SQLITE_OK
         {
@@ -2482,7 +3178,21 @@ pub extern "C" fn marina_sql_execute(
     out: *mut MValue,
 ) {
     let sql_s = unsafe { mv_to_string(&*sql) };
-    let db = sql_conn_ptr(o);
+    let conn_id = sql_conn_id(o);
+    unsafe { sql_exec_on(conn_id, &sql_s, n_binds, binds, result_class, out) };
+}
+
+/// Shared execute body, parameterized by connection id so the async variant
+/// can run it on a worker thread.
+unsafe fn sql_exec_on(
+    conn_id: i64,
+    sql_s: &str,
+    n_binds: i64,
+    binds: *const MValue,
+    result_class: i32,
+    out: *mut MValue,
+) {
+    let db = sql_conn_ptr_by_id(conn_id);
     unsafe {
         let stmt = sql_prepare(db, &sql_s);
         for i in 0..n_binds {
@@ -2520,7 +3230,20 @@ pub extern "C" fn marina_sql_query(
     out: *mut MValue,
 ) {
     let sql_s = unsafe { mv_to_string(&*sql) };
-    let db = sql_conn_ptr(o);
+    let conn_id = sql_conn_id(o);
+    unsafe { sql_query_on(conn_id, &sql_s, n_binds, binds, out) };
+}
+
+/// Shared query body, parameterized by connection id so the async variant
+/// can run it on a worker thread.
+unsafe fn sql_query_on(
+    conn_id: i64,
+    sql_s: &str,
+    n_binds: i64,
+    binds: *const MValue,
+    out: *mut MValue,
+) {
+    let db = sql_conn_ptr_by_id(conn_id);
     unsafe {
         let stmt = sql_prepare(db, &sql_s);
         for i in 0..n_binds {
@@ -2611,6 +3334,73 @@ pub extern "C" fn marina_sql_query(
         }
         out_mv(out, MValue { tag: TAG_ARRAY, pad: 0, i: 0, f: 0.0, p: arr });
     }
+}
+
+/// `await db.execute(sql, binds, result_class)` — async variant of
+/// `marina_sql_execute`. Returns a promise resolving to the exec result.
+#[no_mangle]
+pub extern "C" fn marina_sql_execute_async(
+    o: *mut c_void,
+    sql: *const MValue,
+    n_binds: usize,
+    binds: *const MValue,
+    result_class: i32,
+) -> *mut c_void {
+let mut owns: Vec<(i32, *mut c_void)> = Vec::new();
+    let sv_val = unsafe { *sql };
+    unsafe { own_into(&mut owns, &sv_val) };
+    let sv = MvArg(sv_val);
+    let mut bv: Vec<MValue> = Vec::with_capacity(n_binds);
+    for i in 0..n_binds {
+        let b = unsafe { &*binds.add(i) };
+        unsafe { own_into(&mut owns, b) };
+        bv.push(MValue { tag: b.tag, pad: b.pad, i: b.i, f: b.f, p: b.p });
+    }
+    unsafe { retain_ptr(o as *mut u8) };
+    let conn_id = sql_conn_id(o);
+    let bv = Bindings(bv);
+    let work = Box::new(move || {
+        let MvArg(sv) = sv;
+        let Bindings(bv) = bv;
+        let sql_s = mv_to_string(&sv);
+        let mut r = MValue { tag: TAG_VOID, pad: 0, i: 0, f: 0.0, p: std::ptr::null_mut() };
+        unsafe { sql_exec_on(conn_id, &sql_s, bv.len() as i64, bv.as_ptr(), result_class, &mut r) };
+        r
+    });
+    return spawn_promise_io(work, owns);
+}
+
+/// `await db.query(sql, binds)` — async variant of `marina_sql_query`.
+/// Returns a promise resolving to the rows array.
+#[no_mangle]
+pub extern "C" fn marina_sql_query_async(
+    o: *mut c_void,
+    sql: *const MValue,
+    n_binds: usize,
+    binds: *const MValue,
+) -> *mut c_void {
+let mut owns: Vec<(i32, *mut c_void)> = Vec::new();
+    let sv_val = unsafe { *sql };
+    unsafe { own_into(&mut owns, &sv_val) };
+    let sv = MvArg(sv_val);
+    let mut bv: Vec<MValue> = Vec::with_capacity(n_binds);
+    for i in 0..n_binds {
+        let b = unsafe { &*binds.add(i) };
+        unsafe { own_into(&mut owns, b) };
+        bv.push(MValue { tag: b.tag, pad: b.pad, i: b.i, f: b.f, p: b.p });
+    }
+    unsafe { retain_ptr(o as *mut u8) };
+    let conn_id = sql_conn_id(o);
+    let bv = Bindings(bv);
+    let work = Box::new(move || {
+        let MvArg(sv) = sv;
+        let Bindings(bv) = bv;
+        let sql_s = mv_to_string(&sv);
+        let mut r = MValue { tag: TAG_VOID, pad: 0, i: 0, f: 0.0, p: std::ptr::null_mut() };
+        unsafe { sql_query_on(conn_id, &sql_s, bv.len() as i64, bv.as_ptr(), &mut r) };
+        r
+    });
+    return spawn_promise_io(work, owns);
 }
 
 /// `db.close()` — closes the database connection.

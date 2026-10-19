@@ -917,9 +917,17 @@ impl Parser {
                 self.bump();
                 Ok(Expr::Ident(n, span))
             }
+            Tok::Kw(Kw::Async) => {
+                // async lambda: `async (params) => { ... }`
+                self.bump();
+                if !self.is_lambda_ahead() {
+                    return self.error("expected (params) => { ... } after `async`");
+                }
+                self.lambda(true)
+            }
             Tok::P(P::LParen) => {
                 if self.is_lambda_ahead() {
-                    self.lambda()
+                    self.lambda(false)
                 } else {
                     self.bump();
                     let e = self.expr()?;
@@ -931,7 +939,7 @@ impl Parser {
         }
     }
 
-    fn lambda(&mut self) -> Result<Expr, ParseError> {
+    fn lambda(&mut self, is_async: bool) -> Result<Expr, ParseError> {
         let span = self.span();
         self.expect_punct(P::LParen, "(")?;
         let mut params = Vec::new();
@@ -957,6 +965,6 @@ impl Parser {
             return self.error("lambda bodies must be a { block } in marina");
         }
         let body = self.block()?;
-        Ok(Expr::Lambda(Lambda { params, body, span }, span))
+        Ok(Expr::Lambda(Lambda { params, body, is_async, span }, span))
     }
 }

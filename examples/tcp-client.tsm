@@ -3,9 +3,9 @@ use net
 // Raw TCP: connect, write, read the reply back, close.
 // Try it against anything that echoes: `nc -l 8080` in another terminal.
 async function main() {
-    let s = net.connect("localhost", 8080)
-    s.write("ping")
-    let reply = s.read_all()
+    let s = await net.connect("localhost", 8080)
+    await s.write("ping")
+    let reply = await s.read_all()
     console.log(reply)
-    s.close()
+    await s.close()
 }

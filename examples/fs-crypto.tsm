@@ -1,27 +1,30 @@
 // The fs and crypto standard libraries.
+// fs calls are async now: `await` them (main is async).
 use fs
 use crypto
 
-function main() {
+async function main() {
     // --- filesystem ---
     let path = "/tmp/marina-fs-demo.txt";
-    fs.writeFile(path, "hello from marina");
-    console.log(fs.exists(path));
+    await fs.writeFile(path, "hello from marina");
+    let exists = await fs.exists(path);
+    console.log(exists);
 
-    let data = fs.readFile(path);
+    let data = await fs.readFile(path);
     console.log(data);
 
-    fs.mkdir("/tmp/marina-fs-demo-dir");
-    fs.writeFile("/tmp/marina-fs-demo-dir/nested.txt", "nested");
-    let entries = fs.readDir("/tmp/marina-fs-demo-dir");
+    await fs.mkdir("/tmp/marina-fs-demo-dir");
+    await fs.writeFile("/tmp/marina-fs-demo-dir/nested.txt", "nested");
+    let entries = await fs.readDir("/tmp/marina-fs-demo-dir");
     console.log(entries.length);
     console.log(entries[0]);
 
-    fs.remove(path);
-    console.log(fs.exists(path));
-    fs.remove("/tmp/marina-fs-demo-dir");
+    await fs.remove(path);
+    let gone = await fs.exists(path);
+    console.log(gone);
+    await fs.remove("/tmp/marina-fs-demo-dir");
 
-    // --- crypto ---
+    // --- crypto (pure computation, still synchronous) ---
     console.log(crypto.sha256("hello"));
     console.log(crypto.base64Encode("marina"));
     console.log(crypto.base64Decode("bWFyaW5h"));
