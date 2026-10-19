@@ -120,6 +120,39 @@ enum Access {
     Global(String, CgTy),
 }
 
+/// Insertion-ordered id -> Access map. Release order must be deterministic
+/// (HashMap iteration order is randomized per-process, which would make the
+/// emitted .ll differ run-to-run).
+#[derive(Clone)]
+struct ScopeMap {
+    entries: Vec<(usize, Access)>,
+}
+
+impl ScopeMap {
+    fn new() -> Self {
+        ScopeMap { entries: Vec::new() }
+    }
+    fn insert(&mut self, id: usize, a: Access) {
+        for e in self.entries.iter_mut() {
+            if e.0 == id {
+                e.1 = a;
+                return;
+            }
+        }
+        self.entries.push((id, a));
+    }
+    fn get(&self, id: &usize) -> Option<&Access> {
+        self.entries.iter().find(|e| e.0 == *id).map(|e| &e.1)
+    }
+    fn values(&self) -> impl Iterator<Item = &Access> {
+        self.entries.iter().map(|e| &e.1)
+    }
+    #[allow(dead_code)]
+    fn keys(&self) -> impl Iterator<Item = &usize> {
+        self.entries.iter().map(|e| &e.0)
+    }
+}
+
 struct IrBlock {
     label: String,
     instrs: Vec<String>,
@@ -337,7 +370,7 @@ struct Gen<'a> {
     // current function state
     cur: usize,
     block: usize,
-    scopes: Vec<HashMap<usize, Access>>,
+    scopes: Vec<ScopeMap>,
     pending: Vec<String>, // owned temps to release at end of statement
     frame: Option<FrameInfo>,
     env: Option<EnvInfo>,
@@ -368,7 +401,7 @@ impl<'a> Gen<'a> {
             fns: Vec::new(),
             cur: 0,
             block: 0,
-            scopes: vec![HashMap::new()],
+            scopes: vec![ScopeMap::new()],
             pending: Vec::new(),
             frame: None,
             env: None,
@@ -403,7 +436,7 @@ impl<'a> Gen<'a> {
         self.fns.push(f);
         self.cur = self.fns.len() - 1;
         self.block = 0;
-        self.scopes = vec![HashMap::new()];
+        self.scopes = vec![ScopeMap::new()];
         self.pending.clear();
     }
 
@@ -943,12 +976,12 @@ fn store_from_mv(&mut self, src: &str, ct: CgTy, dst: &str) {
                 let (tl, el) = (self.label_of(then_b), self.label_of(else_b));
                 self.term(format!("br i1 {}, label %{}, label %{}", c.ir, tl, el));
                 self.switch_block(then_b);
-                self.scopes.push(HashMap::new());
+                self.scopes.push(ScopeMap::new());
                 self.cg_body(then_body);
                 self.pop_scope();
                 self.branch_to(end_b);
                 self.switch_block(else_b);
-                self.scopes.push(HashMap::new());
+                self.scopes.push(ScopeMap::new());
                 if let Some(eb) = else_body {
                     self.cg_body(eb);
                 }
@@ -966,7 +999,7 @@ fn store_from_mv(&mut self, src: &str, ct: CgTy, dst: &str) {
                 let (bl, el) = (self.label_of(body_b), self.label_of(end_b));
                 self.term(format!("br i1 {}, label %{}, label %{}", c.ir, bl, el));
                 self.switch_block(body_b);
-                self.scopes.push(HashMap::new());
+                self.scopes.push(ScopeMap::new());
                 self.cg_body(body);
                 self.pop_scope();
                 self.branch_to(cond_b);
@@ -974,7 +1007,7 @@ fn store_from_mv(&mut self, src: &str, ct: CgTy, dst: &str) {
             }
             CStmt::For { init, cond, update, body } => {
                 // scope holding the init variable(s)
-                self.scopes.push(HashMap::new());
+                self.scopes.push(ScopeMap::new());
                 if let Some(i) = init {
                     self.cg_body(std::slice::from_ref(&**i));
                 }
@@ -987,7 +1020,7 @@ fn store_from_mv(&mut self, src: &str, ct: CgTy, dst: &str) {
                 let (bl, el) = (self.label_of(body_b), self.label_of(end_b));
                 self.term(format!("br i1 {}, label %{}, label %{}", c.ir, bl, el));
                 self.switch_block(body_b);
-                self.scopes.push(HashMap::new());
+                self.scopes.push(ScopeMap::new());
                 self.cg_body(body);
                 self.pop_scope();
                 if let Some(u) = update {
@@ -2526,7 +2559,7 @@ fn builtin_class(&self, name: &str) -> i32 {
                 self.term(format!("br label %{}", sl));
             }
             self.switch_block(sblock[k]);
-            self.scopes.push(HashMap::new());
+            self.scopes.push(ScopeMap::new());
             self.cg_body(&seg.stmts);
             if !self.terminated() {
                 match &seg.end {
@@ -2780,7 +2813,7 @@ fn builtin_class(&self, name: &str) -> i32 {
                 self.term(format!("br label %{}", sl));
             }
             self.switch_block(sblock[k]);
-            self.scopes.push(HashMap::new());
+            self.scopes.push(ScopeMap::new());
             self.cg_body(&seg.stmts);
             if !self.terminated() {
                 match &seg.end {
