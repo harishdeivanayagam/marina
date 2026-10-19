@@ -67,6 +67,7 @@ fn cg_ty(t: &CTy) -> CgTy {
         CTy::Resolver(_) => CgTy::Resolver,
         CTy::Array(_) => CgTy::Array,
         CTy::Object(_) => CgTy::Object,
+        CTy::Interface(_) => CgTy::Object,
         CTy::Stream => CgTy::Stream,
     }
 }
@@ -235,6 +236,18 @@ declare void @marina_class_register(i32, ptr, i64)
 declare ptr @marina_object_new(i32, i64)
 declare void @marina_object_get(ptr, i64, ptr)
 declare void @marina_object_set(ptr, i64, ptr)
+declare void @marina_object_get_field(ptr, ptr, ptr)
+declare void @marina_object_set_field(ptr, ptr, ptr)
+declare void @marina_fs_read_file(ptr, ptr)
+declare void @marina_fs_write_file(ptr, ptr)
+declare void @marina_fs_exists(ptr, ptr)
+declare void @marina_fs_read_dir(ptr, ptr)
+declare void @marina_fs_mkdir(ptr, ptr)
+declare void @marina_fs_remove(ptr, ptr)
+declare void @marina_crypto_sha256(ptr, ptr)
+declare void @marina_crypto_base64(i1, ptr, ptr)
+declare void @marina_crypto_random_hex(i64, ptr)
+declare void @marina_crypto_uuid(ptr)
 declare void @marina_net_connect(ptr, ptr, ptr)
 declare void @marina_net_write(ptr, ptr)
 declare void @marina_net_read_all(ptr, ptr)
@@ -881,6 +894,23 @@ fn store_from_mv(&mut self, src: &str, ct: CgTy, dst: &str) {
                     obj, idx, mv
                 ));
                 self.discard(&vv);
+            }
+            CStmt::IfaceSet { id, field, value, elem } => {
+                // interface-typed values resolve fields by name at runtime
+                let a = self.access_for(*id).expect("unresolved variable in codegen");
+                let (obj, _) = self.load_access(&a);
+                let vv = self.cg_expr(value);
+                let vv = self.coerce_val(vv, cg_ty(elem));
+                let vv = self.to_owned(vv);
+                let sv = self.string_lit(field.as_str());
+                let nmv = self.build_mv(&sv);
+                let mv = self.build_mv(&vv);
+                self.emit(format!(
+                    "call void @marina_object_set_field(ptr {}, ptr {}, ptr {})",
+                    obj, nmv, mv
+                ));
+                self.discard(&vv);
+                self.discard(&sv);
             }
             CStmt::If { cond, then_body, else_body } => {
                 let c = self.cg_expr(cond);
@@ -1828,6 +1858,101 @@ fn pop_scope(&mut self) {
                 self.discard(&o);
                 v
             }
+            CExpr::IfaceGet { obj, field, ty } => {
+                // interface-typed values resolve fields by name at runtime
+                let o = self.cg_expr(obj);
+                let p = self.borrow(&o);
+                let sv = self.string_lit(field.as_str());
+                let nmv = self.build_mv(&sv);
+                let out = self.alloca("%mv");
+                self.emit(format!(
+                    "call void @marina_object_get_field(ptr {}, ptr {}, ptr {})",
+                    p, nmv, out
+                ));
+                let v = self.mv_load(&out, cg_ty(ty));
+                self.discard(&sv);
+                self.discard(&o);
+                v
+            }
+            // never generated (interface writes are statements); keeps the match exhaustive
+            CExpr::IfaceSet { .. } => CgVal { ty: CgTy::Void, ir: String::new(), owned: false },
+            CExpr::FsReadFile { path } => {
+                let p = self.cg_expr(path);
+                let pmv = self.build_mv(&p);
+                let out = self.alloca("%mv");
+                self.emit(format!("call void @marina_fs_read_file(ptr {}, ptr {})", pmv, out));
+                self.mv_load(&out, CgTy::Str)
+            }
+            CExpr::FsWriteFile { path, data } => {
+                let p = self.cg_expr(path);
+                let pmv = self.build_mv(&p);
+                let d = self.cg_expr(data);
+                let dmv = self.build_mv(&d);
+                self.emit(format!("call void @marina_fs_write_file(ptr {}, ptr {})", pmv, dmv));
+                self.discard(&d);
+                CgVal { ty: CgTy::Void, ir: String::new(), owned: false }
+            }
+            CExpr::FsExists { path } => {
+                let p = self.cg_expr(path);
+                let pmv = self.build_mv(&p);
+                let out = self.alloca("%mv");
+                self.emit(format!("call void @marina_fs_exists(ptr {}, ptr {})", pmv, out));
+                self.mv_load(&out, CgTy::Bool)
+            }
+            CExpr::FsReadDir { path } => {
+                let p = self.cg_expr(path);
+                let pmv = self.build_mv(&p);
+                let out = self.alloca("%mv");
+                self.emit(format!("call void @marina_fs_read_dir(ptr {}, ptr {})", pmv, out));
+                self.mv_load(&out, CgTy::Array)
+            }
+            CExpr::FsMkdir { path } => {
+                let p = self.cg_expr(path);
+                let pmv = self.build_mv(&p);
+                self.emit(format!("call void @marina_fs_mkdir(ptr {})", pmv));
+                CgVal { ty: CgTy::Void, ir: String::new(), owned: false }
+            }
+            CExpr::FsRemove { path } => {
+                let p = self.cg_expr(path);
+                let pmv = self.build_mv(&p);
+                self.emit(format!("call void @marina_fs_remove(ptr {})", pmv));
+                CgVal { ty: CgTy::Void, ir: String::new(), owned: false }
+            }
+            CExpr::CryptoSha256 { v } => {
+                let d = self.cg_expr(v);
+                let dmv = self.build_mv(&d);
+                let out = self.alloca("%mv");
+                self.emit(format!("call void @marina_crypto_sha256(ptr {}, ptr {})", dmv, out));
+                self.discard(&d);
+                self.mv_load(&out, CgTy::Str)
+            }
+            CExpr::CryptoBase64 { decode, v } => {
+                let d = self.cg_expr(v);
+                let dmv = self.build_mv(&d);
+                let out = self.alloca("%mv");
+                self.emit(format!(
+                    "call void @marina_crypto_base64(i1 {}, ptr {}, ptr {})",
+                    if *decode { "true" } else { "false" },
+                    dmv,
+                    out
+                ));
+                self.discard(&d);
+                self.mv_load(&out, CgTy::Str)
+            }
+            CExpr::CryptoRandomHex { bytes } => {
+                let b = self.cg_expr(bytes);
+                let n = self.fresh("nb");
+                self.emit(format!("{} = sext i32 {} to i64", n, b.ir));
+                let out = self.alloca("%mv");
+                self.emit(format!("call void @marina_crypto_random_hex(i64 {}, ptr {})", n, out));
+                self.discard(&b);
+                self.mv_load(&out, CgTy::Str)
+            }
+            CExpr::CryptoUuid => {
+                let out = self.alloca("%mv");
+                self.emit(format!("call void @marina_crypto_uuid(ptr {})", out));
+                self.mv_load(&out, CgTy::Str)
+            }
         }
     }
 
@@ -2409,7 +2534,7 @@ fn builtin_class(&self, name: &str) -> i32 {
         if c.toplevel.is_some() {
             self.emit("call void @fn.__toplevel()".to_string());
         }
-        if c.has_sync_main {
+        if c.has_sync_main && !c.explicit_main {
             let rty = self
                 .fn_sigs
                 .get("main")
@@ -2417,7 +2542,7 @@ fn builtin_class(&self, name: &str) -> i32 {
                 .unwrap_or(CgTy::Void);
             self.emit(format!("call {} @fn.main()", rty.ir()));
         }
-        if c.has_async_main {
+        if c.has_async_main && !c.explicit_main {
             let mp = self.fresh("mp");
             self.emit(format!("{} = call ptr @fn.main()", mp));
             self.emit(format!("call void @marina_release(ptr {})", mp));

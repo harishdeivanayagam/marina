@@ -285,7 +285,7 @@ fn cmd_add(rest: &[String]) -> i32 {
         }
     };
     // std modules are built into the compiler/runtime — nothing to install
-    if pkg == "net" || pkg == "http" {
+    if matches!(pkg.as_str(), "net" | "http" | "fs" | "crypto") {
         println!(
             "'{}' is a built-in std module — available with `use {}`",
             pkg, pkg
@@ -335,7 +335,7 @@ fn cmd_add(rest: &[String]) -> i32 {
     }
 
     eprintln!("error: unknown package '{}'", source);
-    eprintln!("  std modules net and http are built-in (`use net` / `use http`)");
+    eprintln!("  std modules net, http, fs and crypto are built-in (`use fs`, `use crypto`, ...)");
     eprintln!("  install source packages from a local path or a git URL:");
     eprintln!("    wave add ./my-pkg");
     eprintln!("    wave add https://github.com/user/my-pkg.git");

@@ -1,0 +1,50 @@
+// Generic functions and generic classes are monomorphized at compile time.
+use fs
+
+// Type parameters are inferred from the call site.
+function pick<T>(a: T, b: T, takeFirst: bool): T {
+    if takeFirst {
+        return a;
+    }
+    return b;
+}
+
+// Generic functions can use their parameters in annotations.
+function firstOf<T>(items: Array<T>): T {
+    return items[0];
+}
+
+// Generic classes: fields typed by the parameter.
+class Box<T> {
+    value: T,
+    label: string,
+}
+
+function main() {
+    let n = pick<Int32>(10, 20, true);
+    console.log(n);
+    let s = pick("hello", "world", false);
+    console.log(s);
+
+    let nums = [1, 2, 3];
+    console.log(firstOf(nums));
+    let words = ["a", "b", "c"];
+    console.log(firstOf(words));
+
+    let box = new Box<Int32>();
+    box.value = 42;
+    box.label = "answer";
+    console.log(box.label);
+    console.log(box.value);
+
+    let sbox = new Box<string>();
+    sbox.value = "boxed string";
+    console.log(sbox.value);
+
+    // a single instantiation works in arrays too
+    let nums2 = new Box<Int32>();
+    nums2.value = 7;
+    let boxes = [box, nums2];
+    console.log(boxes.length);
+    console.log(boxes[0].value);
+}

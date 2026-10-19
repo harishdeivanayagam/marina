@@ -24,6 +24,7 @@ pub enum Kw {
     Class,
     Use,
     Import,
+    Interface,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -180,6 +181,7 @@ impl Lexer {
                         "class" => Tok::Kw(Kw::Class),
                         "use" => Tok::Kw(Kw::Use),
                         "import" => Tok::Kw(Kw::Import),
+                        "interface" => Tok::Kw(Kw::Interface),
                         _ => Tok::Ident(name),
                     }
                 }

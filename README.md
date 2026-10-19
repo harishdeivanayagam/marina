@@ -24,7 +24,7 @@ marina/
 │   │       ├── checker.rs     # strict type checker, inference & naming rules
 │   │       └── codegen.rs     # LLVM IR (textual) generation
 │   └── marina-runtime/        # runtime staticlib linked into every binary
-│       └── src/lib.rs         # ARC, promises, event loop, objects, printing, net/http std modules
+│       └── src/lib.rs         # ARC, promises, event loop, objects, printing, net/http/fs/crypto std modules
 ├── editors/                   # "marina-lsp" VSIX extension for Cursor/VS Code
 └── Cargo.toml                 # cargo workspace
 ```
@@ -85,7 +85,7 @@ Projects are described by a **`package.json`** in the project root:
 }
 ```
 
-**The registry model** — like Rust's crates.io, not node_modules. Packages are installed *once* into a global registry (default `~/.wave/registry/<name>/<version>/main.tsm`, override with the `WAVE_REGISTRY` env var) and every project on the machine uses that copy. There is no per-project dependency folder to commit or vendor. A package is a directory (or git repo) with a `main.tsm` entry file and optional `package.json` metadata (`name`, `version`); `wave add` copies it into the registry and records the dependency. In code, `use my-pkg` merges the package's functions into your program behind a namespace: `my-pkg.fn(...)` calls the package's `fn`. Packages expose functions and classes only — no top-level statements, no `main`, and no dependencies on other packages yet (std modules `net`/`http` are allowed).
+**The registry model** — like Rust's crates.io, not node_modules. Packages are installed *once* into a global registry (default `~/.wave/registry/<name>/<version>/main.tsm`, override with the `WAVE_REGISTRY` env var) and every project on the machine uses that copy. There is no per-project dependency folder to commit or vendor. A package is a directory (or git repo) with a `main.tsm` entry file and optional `package.json` metadata (`name`, `version`); `wave add` copies it into the registry and records the dependency. In code, `use my-pkg` merges the package's functions into your program behind a namespace: `my-pkg.fn(...)` calls the package's `fn`. Packages expose functions and classes only — no top-level statements, no `main`, and no dependencies on other packages yet (std modules `net`/`http`/`fs`/`crypto` are allowed).
 
 ### The bare compiler
 
@@ -104,7 +104,7 @@ marina build examples/hello-world.tsm
 
 ## The language
 
-Marina is a **subset** of TypeScript: no interfaces, no generics (yet). What it does have:
+Marina is a **subset** of TypeScript, compiled ahead-of-time. What it does have:
 
 ### Types & inference
 
@@ -116,6 +116,8 @@ Marina is a **subset** of TypeScript: no interfaces, no generics (yet). What it 
 | `bool` | `let ok = true` |
 | `Promise<T>` | return value of an `async function` |
 | `Array<T>` | `let xs = [1, 2, 3]` (also `Array<Int32>` annotations) |
+| `interface` | user-defined structural data contracts (see below) |
+| generic `T` | type parameters on functions and classes (see below) |
 
 Type annotations are available (`let a: Int32 = 10`, `function f(x: Int32): void {}`) and **required for function parameters** (strict mode). There is no `any`. The only implicit conversion is `Int32 → Float64` in mixed arithmetic:
 
@@ -250,6 +252,65 @@ Field rules (all strict, compile-time):
 - Objects can be nested (`{ pos: { x: 1, y: 2 } }`), stored in arrays (`Array<Point>`), captured by lambdas, and printed by `console.log` (which shows the class name and every field)
 - Objects have **no methods** — they are pure data (fields only)
 
+### Generics
+
+Functions and classes can take type parameters, monomorphized at compile time: every distinct instantiation generates its own specialized copy of the code (the generated LLVM function is named `name__Int32`, `Box$string`, ...), so generics cost nothing at runtime.
+
+```ts
+function pick<T>(a: T, b: T, takeFirst: bool): T {
+    if takeFirst {
+        return a
+    }
+    return b
+}
+
+class Box<T> {
+    value: T
+    label: string
+}
+
+function main() {
+    let n = pick(10, 20, true)          // Int32 — inferred from the arguments
+    let s = pick<string>("a", "b", false)
+    let box = new Box<Int32>()          // explicit type arguments
+    box.value = 42
+}
+```
+
+Rules:
+- Type bindings are inferred from the call arguments when possible; explicit type arguments (`pick<Int32>(...)`) override inference
+- A generic function whose return type is annotated may call itself recursively; without an annotation, recursion needs an explicit type argument at the recursive call
+- Generic classes are instantiated with `new Name<T>()`; each `T` used produces a distinct static class with its own field layout
+
+### Interfaces
+
+`interface` declares a structural data contract: any object — a ghost class (object literal) or a declared class — that has the interface's fields with matching types conforms to it, and extra fields are allowed. Conformance is checked at compile time.
+
+```ts
+interface Point {
+    x: Int32
+    y: Int32
+    name: string
+}
+
+function describe(pt: Point): string {
+    return `${pt.name}: ${pt.x}, ${pt.y}`
+}
+
+let p = { x: 1, y: 2, name: "origin" }   // object literal conforms
+class Vehicle {
+    name: string
+    wheels: Int32
+}
+let car = new Vehicle()                  // declared classes conform too (extra fields ok)
+car.name = "bolt"
+
+describe(p)
+describe(car)                            // ok: has `name` (plus more)
+```
+
+Interfaces are **data-only** (no methods, no implementations) and are erased at runtime: a value of interface type is just its underlying object, and field access is resolved **by name** through the runtime (`marina_object_get_field`), so the same code works on any conforming shape. Interfaces can also be used as array element types (`Array<Named>` collects values of different concrete shapes).
+
 ### Naming conventions (strict)
 
 The checker enforces the naming rules and rejects the program otherwise:
@@ -312,9 +373,9 @@ Loop conditions must be `bool` (no truthiness), and the init variable of a `for`
 
 Define `main` (sync or `async`). If it is `async`, the runtime drives its promise to completion before exiting.
 
-## Standard libraries: `net` and `http`
+## Standard libraries: `net`, `http`, `fs` and `crypto`
 
-Two std modules ship with the compiler and runtime — bring them in with a top-level `use` statement (`use http`; the JS-style `import http from "http"` is **not** supported). **`http` is built on top of `net`**: its client literally composes `net.connect`/`write`/`read_all`/`close` in the runtime.
+Four std modules ship with the compiler and runtime — bring them in with a top-level `use` statement (`use http`; the JS-style `import http from "http"` is **not** supported). **`http` is built on top of `net`**: its client literally composes `net.connect`/`write`/`read_all`/`close` in the runtime.
 
 ### `net` — raw TCP
 
@@ -414,6 +475,38 @@ curl -X POST localhost:8080/todos -d '{"text":"write rust"}' # POST -> appended
 curl -X POST localhost:8080/todos -d '{"text":"hi"}'         # -> runtime panic (min 4 chars)
 ```
 
+### `fs` — the filesystem
+
+```ts
+use fs
+
+fs.writeFile("/tmp/demo.txt", "hello from marina")
+console.log(fs.exists("/tmp/demo.txt"))     // true
+let data = fs.readFile("/tmp/demo.txt")     // whole file as a string
+fs.mkdir("/tmp/demo-dir")                   // creates parents as needed
+let entries = fs.readDir("/tmp/demo-dir")   // Array<string>, sorted file names
+fs.remove("/tmp/demo.txt")                  // file or directory (recursive for dirs)
+```
+
+- `fs.readFile(path) -> string`, `fs.writeFile(path, data) -> void`, `fs.exists(path) -> bool`, `fs.readDir(path) -> Array<string>`, `fs.mkdir(path) -> void`, `fs.remove(path) -> void`
+- I/O errors (missing file, permission denied, ...) abort the program with a runtime panic naming the path and the OS error — there is no error value to handle (marina promises never fail either)
+
+### `crypto` — hashing, encoding, randomness
+
+Pure-Rust implementations in the runtime (no external crates): a from-scratch SHA-256, hand-rolled base64, and `/dev/urandom` for randomness.
+
+```ts
+use crypto
+
+console.log(crypto.sha256("hello"))          // 64-char lowercase hex digest
+console.log(crypto.base64Encode("marina"))   // bWFyaW5h
+console.log(crypto.base64Decode("bWFyaW5h")) // marina
+let key = crypto.randomHex(8)                // 16 hex chars from 8 random bytes
+let id = crypto.uuid()                       // random v4 UUID (8-4-4-4-12)
+```
+
+- `crypto.sha256(data) -> string`, `crypto.base64Encode(data) -> string`, `crypto.base64Decode(data) -> string`, `crypto.randomHex(numBytes) -> string`, `crypto.uuid() -> string`
+
 ## How a program is compiled
 
 1. **Lex & parse** → AST
@@ -463,15 +556,19 @@ Marina ships its own language server (`marina-lsp`, in `crates/marina/src/bin/ma
 | `examples/todo-http.tsm` | express-style server: `new http.Server`, `server.router`, `router.get/post`, `new http.JsonValidator`, `await server.listen`, top-level globals shared with handlers (try `curl localhost:8080/todos`) |
 | `examples/http-get.tsm` | `use http` client: `http.get`, reading `resp.status`/`resp.body` (start the todo server first) |
 | `examples/tcp-client.tsm` | `use net`: `net.connect`, `stream.write`/`read_all`/`close` (run against `nc -l 8080`) |
+| `examples/generics.tsm` | generic functions with inferred and explicit type arguments, generic `class Box<T>` |
+| `examples/interfaces.tsm` | structural interfaces: object literals and declared classes conforming, `Array<Named>`, field access resolved by name at runtime |
+| `examples/fs-crypto.tsm` | `use fs` (write/read/exists/mkdir/readDir/remove) and `use crypto` (sha256, base64, randomHex, uuid) |
 
 ## Current limitations (v0.2)
 
-- No generics (no user-defined type parameters; `Array<T>` and `Promise<T>` are the built-ins) — a monomorphization pass is the natural next step
-- Packages expose functions and classes only: no top-level statements, no `main`, and no package-on-package dependencies (std modules `net`/`http` are allowed)
+- Packages expose functions and classes only: no top-level statements, no `main`, and no package-on-package dependencies (std modules `net`/`http`/`fs`/`crypto` are allowed)
 - http: `http://` URLs only (no TLS/https), sequential request handling on the server (one connection at a time), no request headers, no streaming responses; one HTTP server per program; the express-style API supports `get`/`post` routes only
 - Schema validation (`JsonValidator.validate`) aborts the program with a runtime panic on an invalid body (no per-request error responses yet)
 - net reads time out after 30 seconds
 - Classes are data-only: no methods, constructors, inheritance, or access modifiers (`public` is accepted and ignored)
+- Interfaces are data-only structural contracts (no methods/default implementations); interfaces cannot appear as class fields through `Array<Interface>`/`Promise<Interface>` annotations yet
+- Generic recursion requires an annotated return type (or an explicit type argument at the recursive call); no generic constraints/bounds on type parameters
 - No `break`/`continue` inside loops
 - `await` is only allowed at the top level of an `async function` body (not inside `if`/`while`/`for`)
 - Promises never reject (`reject` is rejected by the checker); no promise-of-promise

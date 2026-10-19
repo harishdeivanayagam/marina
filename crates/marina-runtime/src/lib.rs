@@ -1979,3 +1979,304 @@ fn json_parse(s: &str) -> Option<JVal> {
     }
     Some(v)
 }
+// ---------------------------------------------------------------------------
+// Interface field access by name
+// ---------------------------------------------------------------------------
+
+/// Resolve a field index by name using the class metadata registered by the
+/// generated program. Interface-typed values may be any object, so field
+/// positions cannot be known statically.
+fn object_field_index(o: *mut c_void, name: &str) -> i64 {
+    let cid = unsafe { as_object(o).class_id };
+    let table = class_table().lock().unwrap();
+    match table.get(&cid) {
+        Some(info) => match info.fields.iter().position(|f| f == name) {
+            Some(i) => i as i64,
+            None => rt_panic(format!(
+                "class '{}': no field named '{}' (interface field access)",
+                info.name, name
+            )),
+        },
+        None => rt_panic(format!(
+            "object of unknown class id {} (interface field access)",
+            cid
+        )),
+    }
+}
+
+/// Object field read by field NAME (for interface-typed values).
+#[no_mangle]
+pub extern "C" fn marina_object_get_field(o: *mut c_void, name: *const MValue, out: *mut MValue) {
+    let n = unsafe { mv_to_string(&*name) };
+    let i = object_field_index(o, &n);
+    marina_object_get(o, i, out);
+}
+
+/// Object field write by field NAME (for interface-typed values).
+#[no_mangle]
+pub extern "C" fn marina_object_set_field(o: *mut c_void, name: *const MValue, v: *const MValue) {
+    let n = unsafe { mv_to_string(&*name) };
+    let i = object_field_index(o, &n);
+    marina_object_set(o, i, v);
+}
+
+// ---------------------------------------------------------------------------
+// std module: fs (filesystem)
+// ---------------------------------------------------------------------------
+
+#[no_mangle]
+pub extern "C" fn marina_fs_read_file(path: *const MValue, out: *mut MValue) {
+    let p = unsafe { mv_to_string(&*path) };
+    match std::fs::read(&p) {
+        Ok(bytes) => out_mv(out, mv_str_owned(String::from_utf8_lossy(&bytes).into_owned())),
+        Err(e) => rt_panic(format!("fs.readFile '{}': {}", p, e)),
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn marina_fs_write_file(path: *const MValue, data: *const MValue) {
+    let p = unsafe { mv_to_string(&*path) };
+    let d = unsafe { mv_to_string(&*data) };
+    if let Err(e) = std::fs::write(&p, d.as_bytes()) {
+        rt_panic(format!("fs.writeFile '{}': {}", p, e));
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn marina_fs_exists(path: *const MValue, out: *mut MValue) {
+    let p = unsafe { mv_to_string(&*path) };
+    out_mv(
+        out,
+        MValue { tag: TAG_BOOL, pad: 0, i: std::path::Path::new(&p).exists() as i64, f: 0.0, p: std::ptr::null_mut() },
+    );
+}
+
+#[no_mangle]
+pub extern "C" fn marina_fs_read_dir(path: *const MValue, out: *mut MValue) {
+    let p = unsafe { mv_to_string(&*path) };
+    let entries = match std::fs::read_dir(&p) {
+        Ok(rd) => rd,
+        Err(e) => rt_panic(format!("fs.readDir '{}': {}", p, e)),
+    };
+    let mut names: Vec<String> = Vec::new();
+    for e in entries {
+        match e {
+            Ok(en) => {
+                let file_name = en.file_name().to_string_lossy().into_owned();
+                names.push(file_name);
+            }
+            Err(err) => rt_panic(format!("fs.readDir '{}': {}", p, err)),
+        }
+    }
+    names.sort();
+    let arr = marina_array_new(TAG_STRING);
+    for n in names {
+        let mv = mv_str_owned(n);
+        marina_array_push(arr, &mv);
+        unsafe { drop_mv(&mv) };
+    }
+    out_mv(
+        out,
+        MValue { tag: TAG_ARRAY, pad: 0, i: 0, f: 0.0, p: arr },
+    );
+}
+
+#[no_mangle]
+pub extern "C" fn marina_fs_mkdir(path: *const MValue) {
+    let p = unsafe { mv_to_string(&*path) };
+    if let Err(e) = std::fs::create_dir_all(&p) {
+        rt_panic(format!("fs.mkdir '{}': {}", p, e));
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn marina_fs_remove(path: *const MValue) {
+    let p = unsafe { mv_to_string(&*path) };
+    let path = std::path::Path::new(&p);
+    let result = if path.is_dir() {
+        std::fs::remove_dir_all(path)
+    } else {
+        std::fs::remove_file(path)
+    };
+    if let Err(e) = result {
+        rt_panic(format!("fs.remove '{}': {}", p, e));
+    }
+}
+
+// ---------------------------------------------------------------------------
+// std module: crypto (pure-Rust, no external crates)
+// ---------------------------------------------------------------------------
+
+const SHA256_K: [u32; 64] = [
+    0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5,
+    0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3, 0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174,
+    0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc, 0x2de92c6f, 0x4a7484aa, 0x5cb0a9dc, 0x76f988da,
+    0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7, 0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967,
+    0x27b70a85, 0x2e1b2138, 0x4d2c6dfc, 0x53380d13, 0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85,
+    0xa2bfe8a1, 0xa81a664b, 0xc24b8b70, 0xc76c51a3, 0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070,
+    0x19a4c116, 0x1e376c08, 0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3,
+    0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208, 0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2,
+];
+
+fn sha256_hex(data: &[u8]) -> String {
+    let mut h: [u32; 8] = [
+        0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a,
+        0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19,
+    ];
+    let bitlen = (data.len() as u64).wrapping_mul(8);
+    let mut msg = data.to_vec();
+    msg.push(0x80);
+    while msg.len() % 64 != 56 {
+        msg.push(0);
+    }
+    msg.extend_from_slice(&bitlen.to_be_bytes());
+    for chunk in msg.chunks(64) {
+        let mut w = [0u32; 64];
+        for i in 0..16 {
+            w[i] = u32::from_be_bytes([chunk[4 * i], chunk[4 * i + 1], chunk[4 * i + 2], chunk[4 * i + 3]]);
+        }
+        for i in 16..64 {
+            let s0 = w[i - 15].rotate_right(7) ^ w[i - 15].rotate_right(18) ^ (w[i - 15] >> 3);
+            let s1 = w[i - 2].rotate_right(17) ^ w[i - 2].rotate_right(19) ^ (w[i - 2] >> 10);
+            w[i] = w[i - 16]
+                .wrapping_add(s0)
+                .wrapping_add(w[i - 7])
+                .wrapping_add(s1);
+        }
+        let (mut a, mut b, mut c, mut d, mut e, mut f, mut g, mut hh) =
+            (h[0], h[1], h[2], h[3], h[4], h[5], h[6], h[7]);
+        for i in 0..64 {
+            let s1 = e.rotate_right(6) ^ e.rotate_right(11) ^ e.rotate_right(25);
+            let ch = (e & f) ^ ((!e) & g);
+            let t1 = hh.wrapping_add(s1).wrapping_add(ch).wrapping_add(SHA256_K[i]).wrapping_add(w[i]);
+            let s0 = a.rotate_right(2) ^ a.rotate_right(13) ^ a.rotate_right(22);
+            let maj = (a & b) ^ (a & c) ^ (b & c);
+            let t2 = s0.wrapping_add(maj);
+            hh = g;
+            g = f;
+            f = e;
+            e = d.wrapping_add(t1);
+            d = c;
+            c = b;
+            b = a;
+            a = t1.wrapping_add(t2);
+        }
+        h[0] = h[0].wrapping_add(a);
+        h[1] = h[1].wrapping_add(b);
+        h[2] = h[2].wrapping_add(c);
+        h[3] = h[3].wrapping_add(d);
+        h[4] = h[4].wrapping_add(e);
+        h[5] = h[5].wrapping_add(f);
+        h[6] = h[6].wrapping_add(g);
+        h[7] = h[7].wrapping_add(hh);
+    }
+    h.iter().map(|x| format!("{:08x}", x)).collect()
+}
+
+const B64_CHARS: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+
+fn b64_encode(data: &[u8]) -> String {
+    let mut out = String::new();
+    for chunk in data.chunks(3) {
+        let b0 = chunk[0] as u32;
+        let b1 = *chunk.get(1).unwrap_or(&0) as u32;
+        let b2 = *chunk.get(2).unwrap_or(&0) as u32;
+        let n = (b0 << 16) | (b1 << 8) | b2;
+        out.push(B64_CHARS[((n >> 18) & 63) as usize] as char);
+        out.push(B64_CHARS[((n >> 12) & 63) as usize] as char);
+        out.push(if chunk.len() > 1 { B64_CHARS[((n >> 6) & 63) as usize] as char } else { '=' });
+        out.push(if chunk.len() > 2 { B64_CHARS[(n & 63) as usize] as char } else { '=' });
+    }
+    out
+}
+
+fn b64_decode(s: &str) -> String {
+    let mut vals: Vec<u32> = Vec::new();
+    for c in s.bytes() {
+        let v = match c {
+            b'A'..=b'Z' => (c - b'A') as u32,
+            b'a'..=b'z' => (c - b'a' + 26) as u32,
+            b'0'..=b'9' => (c - b'0' + 52) as u32,
+            b'+' => 62,
+            b'/' => 63,
+            _ => continue, // '=', whitespace
+        };
+        vals.push(v);
+    }
+    let mut out: Vec<u8> = Vec::new();
+    for chunk in vals.chunks(4) {
+        let mut n = chunk[0] << 18;
+        if chunk.len() > 1 {
+            n |= chunk[1] << 12;
+        }
+        if chunk.len() > 2 {
+            n |= chunk[2] << 6;
+        }
+        if chunk.len() > 3 {
+            n |= chunk[3];
+        }
+        out.push(((n >> 16) & 0xff) as u8);
+        if chunk.len() > 2 {
+            out.push(((n >> 8) & 0xff) as u8);
+        }
+        if chunk.len() > 3 {
+            out.push((n & 0xff) as u8);
+        }
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+fn random_bytes(n: usize) -> Vec<u8> {
+    use std::io::Read;
+    let mut f = match std::fs::File::open("/dev/urandom") {
+        Ok(f) => f,
+        Err(e) => rt_panic(format!("crypto: cannot open /dev/urandom ({})", e)),
+    };
+    let mut buf = vec![0u8; n];
+    if let Err(e) = f.read_exact(&mut buf) {
+        rt_panic(format!("crypto: cannot read /dev/urandom ({})", e));
+    }
+    buf
+}
+
+#[no_mangle]
+pub extern "C" fn marina_crypto_sha256(data: *const MValue, out: *mut MValue) {
+    let d = unsafe { mv_to_string(&*data) };
+    out_mv(out, mv_str_owned(sha256_hex(d.as_bytes())));
+}
+
+#[no_mangle]
+pub extern "C" fn marina_crypto_base64(decode: bool, data: *const MValue, out: *mut MValue) {
+    let d = unsafe { mv_to_string(&*data) };
+    let result = if decode {
+        b64_decode(&d)
+    } else {
+        b64_encode(d.as_bytes())
+    };
+    out_mv(out, mv_str_owned(result));
+}
+
+#[no_mangle]
+pub extern "C" fn marina_crypto_random_hex(num_bytes: i64, out: *mut MValue) {
+    let n = num_bytes.clamp(0, 4096) as usize;
+    let bytes = random_bytes(n);
+    let hex: String = bytes.iter().map(|b| format!("{:02x}", b)).collect();
+    out_mv(out, mv_str_owned(hex));
+}
+
+#[no_mangle]
+pub extern "C" fn marina_crypto_uuid(out: *mut MValue) {
+    let mut b = random_bytes(16);
+    b[6] = (b[6] & 0x0f) | 0x40; // version 4
+    b[8] = (b[8] & 0x3f) | 0x80; // variant 10xx
+    let hex: String = b.iter().map(|x| format!("{:02x}", x)).collect();
+    let uuid = format!(
+        "{}-{}-{}-{}-{}",
+        &hex[0..8],
+        &hex[8..12],
+        &hex[12..16],
+        &hex[16..20],
+        &hex[20..32]
+    );
+    out_mv(out, mv_str_owned(uuid));
+}

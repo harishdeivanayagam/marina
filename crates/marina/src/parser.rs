@@ -77,6 +77,7 @@ impl Parser {
         let mut stmts = Vec::new();
         let mut fns = Vec::new();
         let mut classes = Vec::new();
+        let mut interfaces = Vec::new();
         let mut uses = Vec::new();
         loop {
             match self.peek() {
@@ -87,6 +88,9 @@ impl Parser {
                 Tok::Kw(Kw::Class) => {
                     classes.push(self.class_decl()?);
                 }
+                Tok::Kw(Kw::Interface) => {
+                    interfaces.push(self.interface_decl()?);
+                }
                 Tok::Kw(Kw::Use) => {
                     uses.push(self.use_decl()?);
                 }
@@ -96,7 +100,7 @@ impl Parser {
                 _ => stmts.push(self.stmt()?),
             }
         }
-        Ok(Program { stmts, fns, classes, uses })
+        Ok(Program { stmts, fns, classes, interfaces, uses })
     }
 
     /// `use <module>` (optionally with a trailing `;`)
@@ -108,12 +112,40 @@ impl Parser {
         Ok((name, span))
     }
 
+    /// `interface Name { field: Type, ... }` — a structural object shape.
+    fn interface_decl(&mut self) -> Result<InterfaceDecl, ParseError> {
+        let span = self.span();
+        self.bump(); // interface
+        let (name, _) = self.expect_ident()?;
+        self.expect_punct(P::LBrace, "{")?;
+        let mut fields = Vec::new();
+        let mut seen = std::collections::HashSet::new();
+        while *self.peek() != Tok::P(P::RBrace) {
+            if *self.peek() == Tok::Eof {
+                return self.error("expected '}' before end of file");
+            }
+            let (fname, _) = self.expect_ident()?;
+            self.expect_punct(P::Colon, ":")?;
+            let ann = self.ty_ann()?;
+            if !seen.insert(fname.clone()) {
+                return self.error("duplicate field in interface");
+            }
+            fields.push((fname, ann));
+            if !self.eat_punct(P::Comma) && *self.peek() != Tok::P(P::RBrace) {
+                self.expect_punct(P::Semi, ";")?;
+            }
+        }
+        self.bump(); // }
+        Ok(InterfaceDecl { name, fields, span })
+    }
+
     /// `class Name { field: Type, ... }` — an optional `public` modifier is
     /// accepted before each field (all fields are public in marina).
     fn class_decl(&mut self) -> Result<ClassDecl, ParseError> {
         let span = self.span();
         self.bump(); // class
         let (name, _) = self.expect_ident()?;
+        let type_params = self.type_param_list()?;
         self.expect_punct(P::LBrace, "{")?;
         let mut fields = Vec::new();
         while *self.peek() != Tok::P(P::RBrace) {
@@ -134,7 +166,7 @@ impl Parser {
             self.eat_punct(P::Semi);
         }
         self.bump(); // }
-        Ok(ClassDecl { name, fields, span })
+        Ok(ClassDecl { name, type_params, fields, span })
     }
 
     fn fn_decl(&mut self) -> Result<FnDecl, ParseError> {
@@ -150,6 +182,8 @@ impl Parser {
         }
         self.bump();
         let (name, _) = self.expect_ident()?;
+        // generic type parameters: `function f<T, U>(...)`
+        let type_params = self.type_param_list()?;
         self.expect_punct(P::LParen, "(")?;
         let mut params = Vec::new();
         if !self.eat_punct(P::RParen) {
@@ -176,7 +210,51 @@ impl Parser {
             None
         };
         let body = self.block()?;
-        Ok(FnDecl { name, params, ret_ann, body, is_async, span })
+        Ok(FnDecl { name, type_params, params, ret_ann, body, is_async, span })
+    }
+
+    /// `<T, U>` after a function/class name — empty when absent.
+    /// Speculatively parse `<T, U>` in expression position. Returns Some(type
+    /// args) only if the full `<...>(` pattern is present; otherwise the
+    /// lexer position is restored so `<` can still be a comparison.
+    fn try_call_type_args(&mut self) -> Option<Vec<TyAnn>> {
+        let save = self.pos;
+        self.bump(); // <
+        let mut tas = Vec::new();
+        loop {
+            match self.ty_ann() {
+                Ok(a) => tas.push(a),
+                Err(_) => {
+                    self.pos = save;
+                    return None;
+                }
+            }
+            if !self.eat_punct(P::Comma) {
+                break;
+            }
+        }
+        if self.expect_punct(P::Gt, ">").is_err() || *self.peek() != Tok::P(P::LParen) {
+            self.pos = save;
+            return None;
+        }
+        Some(tas)
+    }
+
+    fn type_param_list(&mut self) -> Result<Vec<String>, ParseError> {
+        if *self.peek() != Tok::P(P::Lt) {
+            return Ok(Vec::new());
+        }
+        self.bump();
+        let mut ps = Vec::new();
+        loop {
+            let (p, _) = self.expect_ident()?;
+            ps.push(p);
+            if !self.eat_punct(P::Comma) {
+                break;
+            }
+        }
+        self.expect_punct(P::Gt, ">")?;
+        Ok(ps)
     }
 
     fn ty_ann(&mut self) -> Result<TyAnn, ParseError> {
@@ -189,15 +267,21 @@ impl Parser {
             let (seg, _) = self.expect_ident()?;
             full = format!("{}.{}", full, seg);
         }
-        let inner = if *self.peek() == Tok::P(P::Lt) {
+        let args = if *self.peek() == Tok::P(P::Lt) {
             self.bump();
-            let inner = Box::new(self.ty_ann()?);
+            let mut args = Vec::new();
+            loop {
+                args.push(self.ty_ann()?);
+                if !self.eat_punct(P::Comma) {
+                    break;
+                }
+            }
             self.expect_punct(P::Gt, ">")?;
-            Some(inner)
+            args
         } else {
-            None
+            Vec::new()
         };
-        Ok(TyAnn { name: full, inner, span })
+        Ok(TyAnn { name: full, args, span })
     }
 
     fn block(&mut self) -> Result<Vec<Stmt>, ParseError> {
@@ -592,6 +676,33 @@ impl Parser {
                     }
                     e = Expr::Call(Box::new(e), args, self.span());
                 }
+                Tok::P(P::Lt) => {
+                    // speculative parse of explicit type arguments followed
+                    // by a call: `pick<Int32>(...)`. Restored (treated as a
+                    // comparison) unless the pattern `<...>(` completes.
+                    let save = self.pos;
+                    let tas = self.try_call_type_args();
+                    match tas {
+                        Some(type_args) => {
+                            self.bump(); // (
+                            let mut args = Vec::new();
+                            if !self.eat_punct(P::RParen) {
+                                loop {
+                                    args.push(self.expr()?);
+                                    if !self.eat_punct(P::Comma) {
+                                        break;
+                                    }
+                                }
+                                self.expect_punct(P::RParen, ")")?;
+                            }
+                            e = Expr::CallGen(Box::new(e), type_args, args, self.span());
+                        }
+                        None => {
+                            self.pos = save;
+                            break;
+                        }
+                    }
+                }
                 Tok::P(P::LBracket) => {
                     self.bump();
                     let idx = self.expr()?;
@@ -687,6 +798,22 @@ impl Parser {
                         let (seg, _) = self.expect_ident()?;
                         path.push(seg);
                     }
+                    // optional explicit type arguments: `new Box<Int32>()`
+                    // (parsed before the argument parens)
+                    let type_args = if path.len() == 1 && *self.peek() == Tok::P(P::Lt) {
+                        self.bump();
+                        let mut tas = Vec::new();
+                        loop {
+                            tas.push(self.ty_ann()?);
+                            if !self.eat_punct(P::Comma) {
+                                break;
+                            }
+                        }
+                        self.expect_punct(P::Gt, ">")?;
+                        tas
+                    } else {
+                        Vec::new()
+                    };
                     // constructor arguments
                     let mut args = Vec::new();
                     if *self.peek() == Tok::P(P::LParen) {
@@ -701,12 +828,13 @@ impl Parser {
                             self.expect_punct(P::RParen, ")")?;
                         }
                     }
-                    if path.len() == 1 && args.is_empty() {
-                        // `new ClassName()` — no constructor args in marina
-                        return Ok(Expr::NewClass(path.remove(0), span));
-                    }
                     if path.len() == 1 {
-                        return self.error("classes take no constructor arguments (use `new ClassName()`)");
+                        if args.is_empty() {
+                            // `new ClassName()` — no constructor args in marina
+                            return Ok(Expr::NewClass { name: path.remove(0), type_args, span });
+                        }
+                        return self
+                            .error("classes take no constructor arguments (use `new ClassName()`)");
                     }
                     Ok(Expr::NewCtor { path, args, span })
                 }

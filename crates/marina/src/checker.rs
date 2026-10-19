@@ -27,6 +27,10 @@ pub enum CTy {
     Object(ObjectTy),
     /// An open TCP stream handle from the `net` std module.
     Stream,
+    /// An interface type (structural shape). Values are objects whose
+    /// fields include the interface's fields with matching types; field
+    /// access goes through the runtime by field *name*.
+    Interface(String),
 }
 
 /// Identity + display name of a class type. Equality is by id: every ghost
@@ -59,6 +63,7 @@ impl CTy {
             CTy::Array(t) => format!("Array<{}>", t.name()),
             CTy::Object(o) => o.name.clone(),
             CTy::Stream => "Stream".into(),
+            CTy::Interface(n) => n.clone(),
         }
     }
 }
@@ -128,6 +133,13 @@ pub enum CStmt {
     FieldSet {
         id: usize,
         idx: usize,
+        value: CExpr,
+        elem: CTy,
+    },
+    /// Interface-typed field assignment: field resolved by name at runtime.
+    IfaceSet {
+        id: usize,
+        field: String,
         value: CExpr,
         elem: CTy,
     },
@@ -318,6 +330,33 @@ pub enum CExpr {
         body: Box<CExpr>,
         out_class: usize,
     },
+    // ---- interfaces (structural field access by name) ----
+    /// `obj.field` where obj is interface-typed — resolved at runtime by
+    /// field name.
+    IfaceGet {
+        obj: Box<CExpr>,
+        field: String,
+        ty: CTy,
+    },
+    /// `obj.field = value` where obj is interface-typed.
+    IfaceSet {
+        id: usize,
+        field: String,
+        value: Box<CExpr>,
+        elem: CTy,
+    },
+    // ---- fs std module ----
+    FsReadFile { path: Box<CExpr> },
+    FsWriteFile { path: Box<CExpr>, data: Box<CExpr> },
+    FsExists { path: Box<CExpr> },
+    FsReadDir { path: Box<CExpr> },
+    FsMkdir { path: Box<CExpr> },
+    FsRemove { path: Box<CExpr> },
+    // ---- crypto std module ----
+    CryptoSha256 { v: Box<CExpr> },
+    CryptoBase64 { decode: bool, v: Box<CExpr> },
+    CryptoRandomHex { bytes: Box<CExpr> },
+    CryptoUuid,
 }
 
 /// What a JsonValidator field checks: string or number.
@@ -413,6 +452,9 @@ pub struct Checked {
     pub classes: Vec<ClassDef>,
     pub has_async_main: bool,
     pub has_sync_main: bool,
+    /// The program called `main()` explicitly at the top level — the runtime
+    /// entry point must not invoke it a second time.
+    pub explicit_main: bool,
 }
 
 #[derive(Clone)]
@@ -468,6 +510,16 @@ struct Checker {
     validator_fields: std::collections::HashMap<usize, Vec<(String, FieldKind)>>,
     // ids of top-level variables (globals: lambdas may assign to them)
     toplevel_var_ids: std::collections::HashSet<usize>,
+    // generic functions (declared with <T>): name -> declaration. They are
+    // never checked directly; each call site monomorphizes a copy.
+    generic_fns: std::collections::HashMap<String, crate::ast::FnDecl>,
+    // generic classes (declared with <T>): name -> declaration
+    generic_classes: std::collections::HashMap<String, crate::ast::ClassDecl>,
+    // interfaces: name -> ordered (field, type)
+    interfaces: std::collections::HashMap<String, Vec<(String, CTy)>>,
+    // monomorphized functions/classes generated during checking, appended to
+    // the output
+    mono_fns: Vec<CFn>,
 }
 
 pub fn check(program: &Program) -> Result<Checked, Vec<Diag>> {
@@ -509,10 +561,15 @@ pub fn check_with_diags(program: &Program) -> (Checked, Vec<Diag>) {
         uses: program.uses.iter().map(|(n, _)| n.clone()).collect(),
         validator_fields: Default::default(),
         toplevel_var_ids: Default::default(),
+        generic_fns: Default::default(),
+        generic_classes: Default::default(),
+        interfaces: Default::default(),
+        mono_fns: Vec::new(),
     };
 
-    // --- pass 0: register classes (hoisting) ---
+    // --- pass 0: register classes + interfaces (hoisting) ---
     c.register_classes(program);
+    c.register_interfaces(program);
     c.register_builtin_modules();
 
     // --- pass 0.5: unknown `use` targets (registry packages were already
@@ -531,6 +588,19 @@ pub fn check_with_diags(program: &Program) -> (Checked, Vec<Diag>) {
         }
         if !seen.insert(f.name.clone()) {
             c.diag(format!("duplicate function '{}'", f.name), f.span);
+            continue;
+        }
+        if !f.type_params.is_empty() {
+            // generic function: stashed and monomorphized per call site
+            for tp in &f.type_params {
+                if !is_pascal_case(tp) {
+                    c.diag(
+                        format!("type parameter '{}' must be PascalCase (e.g. T)", tp),
+                        f.span,
+                    );
+                }
+            }
+            c.generic_fns.insert(f.name.clone(), f.clone());
             continue;
         }
         let mut params = Vec::new();
@@ -604,6 +674,9 @@ pub fn check_with_diags(program: &Program) -> (Checked, Vec<Diag>) {
                 has_sync_main = true;
             }
         }
+        if !f.type_params.is_empty() {
+            continue; // generic: checked per monomorphized instantiation
+        }
         let cf = c.check_fn(f);
         // publish the (possibly inferred) return type for later functions
         if let Some(r) = c.last_fn_ret.clone() {
@@ -631,10 +704,19 @@ pub fn check_with_diags(program: &Program) -> (Checked, Vec<Diag>) {
         c.scopes.pop();
     }
 
+    let mut fns = fns;
+    fns.extend(c.mono_fns.drain(..));
+    // did the program call `main()` explicitly at the top level? If so, the
+    // runtime's automatic entry-point invocation must be suppressed or main
+    // would execute twice
+    let explicit_main = program.stmts.iter().any(|s| {
+        matches!(s, Stmt::Expr(Expr::Call(callee, _, _)) if matches!(callee.as_ref(), Expr::Ident(n, _) if n == "main"))
+    });
     let checked = Checked {
         fns,
         lambdas: c.lambdas,
         toplevel,
+        explicit_main,
         var_types: c.var_types,
         var_names: c.var_names,
         classes: c.classes,
@@ -688,7 +770,8 @@ impl Checker {
     }
 
     /// pass 0: hoist all declared classes into the class table so types can
-    /// reference classes defined anywhere in the file
+    /// reference classes defined anywhere in the file. Generic classes
+    /// (`class Box<T>`) are stashed for monomorphization instead.
     fn register_classes(&mut self, program: &Program) {
         for cl in &program.classes {
             if !is_pascal_case(&cl.name) {
@@ -696,6 +779,10 @@ impl Checker {
             }
             if self.class_by_name.contains_key(&cl.name) {
                 self.diag(format!("duplicate class '{}'", cl.name), cl.span);
+                continue;
+            }
+            if !cl.type_params.is_empty() {
+                self.generic_classes.insert(cl.name.clone(), cl.clone());
                 continue;
             }
             let mut fields: Vec<(String, CTy)> = Vec::new();
@@ -718,6 +805,53 @@ impl Checker {
         }
     }
 
+    /// pass 0: hoist interface declarations (name -> ordered field types).
+    /// Two passes so interfaces may reference each other in any order.
+    fn register_interfaces(&mut self, program: &Program) {
+        for it in &program.interfaces {
+            if !is_pascal_case(&it.name) {
+                self.diag(format!("interface '{}' must be PascalCase", it.name), it.span);
+            }
+            if self.interfaces.contains_key(&it.name) || self.class_by_name.contains_key(&it.name) {
+                self.diag(format!("duplicate interface '{}'", it.name), it.span);
+                continue;
+            }
+            self.interfaces.insert(it.name.clone(), Vec::new());
+        }
+        for it in &program.interfaces {
+            if !self.interfaces.contains_key(&it.name) {
+                continue; // duplicate, already diagnosed
+            }
+            if self
+                .interfaces
+                .get(&it.name)
+                .map(|e| !e.is_empty())
+                .unwrap_or(false)
+            {
+                continue; // already filled
+            }
+            let mut fields: Vec<(String, CTy)> = Vec::new();
+            let mut seen_fields = std::collections::HashSet::new();
+            for (fname, ann) in &it.fields {
+                if !seen_fields.insert(fname.clone()) {
+                    continue; // parser already diagnosed duplicates
+                }
+                let t = self.ty_of(ann);
+                if matches!(t, CTy::Array(_) | CTy::Promise(_)) {
+                    self.diag(
+                        format!(
+                            "interface field '{}.{}': Array/Promise of interfaces is not supported yet",
+                            it.name, fname
+                        ),
+                        it.span,
+                    );
+                }
+                fields.push((fname.clone(), t));
+            }
+            self.interfaces.insert(it.name.clone(), fields);
+        }
+    }
+
     fn diag(&mut self, msg: impl Into<String>, span: Span) {
         self.diags.push(Diag { msg: msg.into(), span });
     }
@@ -735,7 +869,7 @@ impl Checker {
     // ------------------------------------------------------------------
 
     fn ty_of(&mut self, ann: &TyAnn) -> CTy {
-        let t = match (ann.name.as_str(), &ann.inner) {
+        let t = match (ann.name.as_str(), ann.args.first()) {
             ("int", _) | ("Int32", _) | ("i32", _) => CTy::Int,
             ("float", _) | ("Float64", _) | ("f64", _) | ("double", _) | ("number", _) => CTy::Float,
             ("string", _) | ("String", _) => CTy::Str,
@@ -752,26 +886,57 @@ impl Checker {
                 self.diag("Array requires a type parameter, e.g. Array<Int32>", ann.span);
                 CTy::Array(Box::new(CTy::Int))
             }
-            (name, None) if self.class_by_name.contains_key(name) => {
+            (name, _)
+                if self.class_by_name.contains_key(name) || self.generic_classes.contains_key(name) =>
+            {
+                if self.generic_classes.contains_key(name) {
+                    // generic class instantiation: `Box<Int32>` (or an
+                    // erroring placeholder when type args are missing)
+                    if ann.args.is_empty() {
+                        self.diag(
+                            format!(
+                                "generic class '{}' needs type parameters, e.g. {}<Int32>",
+                                name, name
+                            ),
+                            ann.span,
+                        );
+                        return CTy::Void;
+                    }
+                    return self.mono_class(name, &ann.args, ann.span);
+                }
+                if !ann.args.is_empty() {
+                    self.diag(
+                        format!("class '{}' does not take type parameters", name),
+                        ann.span,
+                    );
+                }
                 let id = self.class_by_name[name];
                 // canonical name (covers dotted aliases like http.Request)
                 let display = self.classes[id].name.clone();
                 CTy::Object(ObjectTy { id, name: display })
+            }
+            (name, None) if self.interfaces.contains_key(name) => {
+                if !ann.args.is_empty() {
+                    self.diag(
+                        format!("interface '{}' does not take type parameters", name),
+                        ann.span,
+                    );
+                }
+                CTy::Interface(name.to_string())
             }
             (other, _) => {
                 self.diag(format!("unknown type '{}'", other), ann.span);
                 CTy::Void
             }
         };
-        if !matches!(ann.name.as_str(), "Promise" | "Array") {
-            if ann.inner.is_some() {
-                self.diag(format!("type '{}' does not take type parameters", ann.name), ann.span);
-            }
+        if !matches!(ann.name.as_str(), "Promise" | "Array") && !ann.args.is_empty() {
+            self.diag(format!("type '{}' does not take type parameters", ann.name), ann.span);
         }
         t
     }
 
-    /// The only implicit conversion: Int32 widens to Float64.
+    /// The only implicit conversion: Int32 widens to Float64. Interface
+    /// conformance is checked structurally.
     fn coerce(&mut self, from: &CTy, to: &CTy, span: Span) -> bool {
         if from == to {
             return true;
@@ -779,11 +944,120 @@ impl Checker {
         if matches!(from, CTy::Int) && matches!(to, CTy::Float) {
             return true;
         }
+        // element-wise coercion: Array<T> accepts Array<U> when U coerces to T
+        if let (CTy::Array(f), CTy::Array(t)) = (from, to) {
+            let inner_ok = {
+                // no diagnostics for the element check
+                let f2 = f.clone();
+                let t2 = t.clone();
+                self.coerce_quiet(&f2, &t2)
+            };
+            if inner_ok {
+                return true;
+            }
+        }
+        // interface conformance (both directions: an interface accepts any
+        // conforming object, and a concrete value may flow where its
+        // interface is expected)
+        if let CTy::Interface(iname) = to {
+            if let CTy::Object(o) = from {
+                return self.iface_conform(o, iname, span);
+            }
+        }
+        if let CTy::Interface(iname) = from {
+            if let CTy::Object(o) = to {
+                return self.iface_conform(o, iname, span);
+            }
+        }
         self.diag(
             format!("type mismatch: expected {}, found {}", to.name(), from.name()),
             span,
         );
         false
+    }
+
+    /// Quiet coercion check (no diagnostics): used for element types.
+    fn coerce_quiet(&self, from: &CTy, to: &CTy) -> bool {
+        if from == to {
+            return true;
+        }
+        if matches!(from, CTy::Int) && matches!(to, CTy::Float) {
+            return true;
+        }
+        if let CTy::Interface(iname) = to {
+            if let CTy::Object(o) = from {
+                return self.iface_conform_quiet(o, iname);
+            }
+        }
+        if let CTy::Interface(iname) = from {
+            if let CTy::Object(o) = to {
+                return self.iface_conform_quiet(o, iname);
+            }
+        }
+        false
+    }
+
+    /// Does class `o` satisfy interface `iname`? Every interface field must
+    /// exist on the class with a matching type (Int32 widens to Float64).
+    fn iface_conform(&mut self, o: &ObjectTy, iname: &str, span: Span) -> bool {
+        let Some(ifields) = self.interfaces.get(iname).cloned() else {
+            return false;
+        };
+        let cfields = self.classes[o.id].fields.clone();
+        let mut ok = true;
+        for (fname, fty) in &ifields {
+            match cfields.iter().find(|(n, _)| n == fname) {
+                Some((_, t)) => {
+                    if t != fty && !(matches!(t, CTy::Int) && matches!(fty, CTy::Float)) {
+                        self.diag(
+                            format!(
+                                "interface '{}': field '{}' has type {}, expected {}",
+                                iname,
+                                fname,
+                                t.name(),
+                                fty.name()
+                            ),
+                            span,
+                        );
+                        ok = false;
+                    }
+                }
+                None => {
+                    self.diag(
+                        format!(
+                            "interface '{}': missing field '{}' (required: {})",
+                            iname,
+                            fname,
+                            ifields.iter().map(|(n, _)| n.clone()).collect::<Vec<_>>().join(", ")
+                        ),
+                        span,
+                    );
+                    ok = false;
+                }
+            }
+        }
+        ok
+    }
+
+    /// Diagnostics-free conformance check (for element-type coercion).
+    fn iface_conform_quiet(&self, o: &ObjectTy, iname: &str) -> bool {
+        let Some(ifields) = self.interfaces.get(iname) else {
+            return false;
+        };
+        let Some(cdef) = self.classes.get(o.id) else {
+            return false;
+        };
+        for (fname, fty) in ifields {
+            match cdef.fields.iter().find(|(n, _)| n == fname) {
+                Some((_, t)) => {
+                    if t != fty && !(matches!(t, CTy::Int) && matches!(fty, CTy::Float)) {
+                        return false;
+                    }
+                }
+                None => return false,
+            }
+        }
+        true
     }
 
     fn is_numeric(t: &CTy) -> bool {
@@ -918,7 +1192,7 @@ impl Checker {
 
     fn expr_calls_unresolved(&self, e: &Expr) -> bool {
         match e {
-            Expr::Call(callee, args, _) => {
+            Expr::Call(callee, args, _) | Expr::CallGen(callee, _, args, _) => {
                 let direct = match callee.as_ref() {
                     Expr::Ident(n, _) => self
                         .sigs
@@ -952,7 +1226,7 @@ impl Checker {
                 }),
             // lambda bodies are checked later on their own
             Expr::Lambda(..) | Expr::Ident(..) | Expr::Str(..) | Expr::Int(..)
-            | Expr::Float(..) | Expr::Bool(..) | Expr::NewClass(..) => false,
+            | Expr::Float(..) | Expr::Bool(..) | Expr::NewClass { .. } => false,
         }
     }
 
@@ -970,10 +1244,10 @@ impl Checker {
                 } else if !is_camel_case(name) {
                     self.diag(format!("let variable '{}' must be camelCase", name), *span);
                 }
-                // an annotated empty array literal takes its element type
-                // from the annotation: `let a: Array<Int32> = []`
+                // an annotated array literal takes its element type from the annotation:
+                // `let a: Array<Int32> = []` or `let xs: Array<Named> = [p, q]`
                 let expected_elem = match (ann, init) {
-                    (Some(a), Expr::ArrayLit(elems, _)) if elems.is_empty() => {
+                    (Some(a), Expr::ArrayLit(..)) => {
                         match self.ty_of(a) {
                             CTy::Array(elem) => Some(*elem),
                             _ => None,
@@ -1115,6 +1389,27 @@ impl Checker {
                 }
                 // const freezes the binding, not the object contents
                 match ty {
+                    CTy::Interface(iname) => {
+                        let fields = self.interfaces.get(&iname).cloned().unwrap_or_default();
+                        let Some((_, elem)) = fields.iter().find(|(n, _)| n == field) else {
+                            let names: Vec<String> =
+                                fields.iter().map(|(n, _)| n.clone()).collect();
+                            self.diag(
+                                format!(
+                                    "interface '{}' has no field '{}' (fields: {})",
+                                    iname,
+                                    field,
+                                    if names.is_empty() { "none".to_string() } else { names.join(", ") }
+                                ),
+                                *span,
+                            );
+                            return CStmt::Expr(CExpr::Bool(false));
+                        };
+                        let elem = elem.clone();
+                        let vc = self.check_expr(value, false);
+                        self.coerce(&self.expr_ty(&vc), &elem, *span);
+                        CStmt::IfaceSet { id, field: field.clone(), value: vc, elem }
+                    }
                     CTy::Object(o) => {
                         let def = &self.classes[o.id];
                         let idx = match def.fields.iter().position(|(n, _)| n == field) {
@@ -1441,6 +1736,16 @@ impl Checker {
                 let name = self.classes.get(*out_class).map(|d| d.name.clone()).unwrap_or_default();
                 CTy::Object(ObjectTy { id: *out_class, name })
             }
+            CExpr::IfaceGet { ty, .. } => ty.clone(),
+            CExpr::IfaceSet { .. } => CTy::Void,
+            CExpr::FsReadFile { .. } => CTy::Str,
+            CExpr::FsWriteFile { .. } | CExpr::FsMkdir { .. } | CExpr::FsRemove { .. } => CTy::Void,
+            CExpr::FsExists { .. } => CTy::Bool,
+            CExpr::FsReadDir { .. } => CTy::Array(Box::new(CTy::Str)),
+            CExpr::CryptoSha256 { .. } => CTy::Str,
+            CExpr::CryptoBase64 { .. } => CTy::Str,
+            CExpr::CryptoRandomHex { .. } => CTy::Str,
+            CExpr::CryptoUuid => CTy::Str,
         }
     }
 
@@ -1517,9 +1822,35 @@ impl Checker {
                 }
             }
             Expr::Call(callee, args, span) => self.check_call(callee, args, *span),
+            Expr::CallGen(callee, type_args, args, span) => {
+                self.check_call_gen(callee, type_args, args, *span)
+            }
             Expr::ArrayLit(elems, span) => self.check_array_lit(elems, *span, None),
             Expr::ObjectLit(fields, span) => self.check_object_lit(fields, *span, None, None),
-            Expr::NewClass(name, span) => {
+            Expr::NewClass { name, type_args, span } => {
+                if self.generic_classes.contains_key(name) {
+                    if type_args.is_empty() {
+                        self.diag(
+                            format!(
+                                "generic class '{}' needs type parameters, e.g. new {}<Int32>()",
+                                name, name
+                            ),
+                            *span,
+                        );
+                        return CExpr::Bool(false);
+                    }
+                    let t = self.mono_class(name, type_args, *span);
+                    if let CTy::Object(o) = t {
+                        return CExpr::NewClass { class_id: o.id };
+                    }
+                    return CExpr::Bool(false);
+                }
+                if !type_args.is_empty() {
+                    self.diag(
+                        format!("class '{}' does not take type parameters", name),
+                        *span,
+                    );
+                }
                 match self.class_by_name.get(name) {
                     Some(&id) => CExpr::NewClass { class_id: id },
                     None => {
@@ -1631,6 +1962,27 @@ impl Checker {
                             CTy::Str => return CExpr::StrLen(Box::new(oc)),
                             _ => {}
                         }
+                    }
+                    if let CTy::Interface(iname) = &ot {
+                        let fields = self.interfaces.get(iname).cloned().unwrap_or_default();
+                        if let Some((_, ty)) = fields.iter().find(|(n, _)| n == name) {
+                            return CExpr::IfaceGet {
+                                obj: Box::new(oc),
+                                field: name.clone(),
+                                ty: ty.clone(),
+                            };
+                        }
+                        let names: Vec<String> = fields.iter().map(|(n, _)| n.clone()).collect();
+                        self.diag(
+                            format!(
+                                "interface '{}' has no field '{}' (fields: {})",
+                                iname,
+                                name,
+                                if names.is_empty() { "none".to_string() } else { names.join(", ") }
+                            ),
+                            e.span(),
+                        );
+                        return CExpr::Bool(false);
                     }
                     if let CTy::Object(o) = &ot {
                         let def = &self.classes[o.id];
@@ -2159,6 +2511,563 @@ fn check_http_object_method(
         }
     }
 
+    // ------------------------------------------------------------------
+// Generics: monomorphization
+// ------------------------------------------------------------------
+
+/// Mangle-safe token for a concrete type (used in mono'd fn/class names).
+fn mangle_ty(t: &CTy) -> String {
+    match t {
+        CTy::Void => "Void".into(),
+        CTy::Int => "Int32".into(),
+        CTy::Float => "Float64".into(),
+        CTy::Bool => "Bool".into(),
+        CTy::Str => "string".into(),
+        CTy::Stream => "Stream".into(),
+        CTy::Promise(t) => format!("Promise${}", Self::mangle_ty(t)),
+        CTy::Array(t) => format!("Array${}", Self::mangle_ty(t)),
+        CTy::Object(o) => o.name.replace('.', "$"),
+        CTy::Interface(n) => format!("Iface${}", n),
+        CTy::Resolver(_) => "Resolver".into(),
+    }
+}
+
+/// Build a source annotation for a concrete type (for substituting type
+/// parameters in generic declarations).
+fn to_ann(&self, t: &CTy, span: Span) -> TyAnn {
+    let (name, args) = match t {
+        CTy::Void => ("void".to_string(), Vec::new()),
+        CTy::Int => ("Int32".to_string(), Vec::new()),
+        CTy::Float => ("Float64".to_string(), Vec::new()),
+        CTy::Bool => ("bool".to_string(), Vec::new()),
+        CTy::Str => ("string".to_string(), Vec::new()),
+        CTy::Stream => ("Stream".to_string(), Vec::new()),
+        CTy::Promise(i) => ("Promise".to_string(), vec![self.to_ann(i, span)]),
+        CTy::Array(i) => ("Array".to_string(), vec![self.to_ann(i, span)]),
+        CTy::Object(o) => (o.name.clone(), Vec::new()),
+        CTy::Interface(n) => (n.clone(), Vec::new()),
+        CTy::Resolver(_) => ("void".to_string(), Vec::new()),
+    };
+    TyAnn { name, args, span }
+}
+
+/// Replace type-parameter annotations with their concrete bindings,
+/// recursively through a declaration.
+fn subst_ann(&self, ann: &mut TyAnn, bindings: &[(String, CTy)]) {
+    if ann.args.is_empty() {
+        if let Some((_, t)) = bindings.iter().find(|(n, _)| *n == ann.name) {
+            *ann = self.to_ann(t, ann.span);
+        }
+        return;
+    }
+    for a in &mut ann.args {
+        self.subst_ann(a, bindings);
+    }
+}
+
+fn subst_stmt(&self, s: &mut Stmt, bindings: &[(String, CTy)]) {
+    match s {
+        Stmt::Let { ann, .. } => {
+            if let Some(a) = ann {
+                self.subst_ann(a, bindings);
+            }
+        }
+        Stmt::If { cond, then_body, else_body, .. } => {
+            self.subst_expr(cond, bindings);
+            for s in then_body {
+                self.subst_stmt(s, bindings);
+            }
+            if let Some(else_body) = else_body {
+                for s in else_body {
+                    self.subst_stmt(s, bindings);
+                }
+            }
+        }
+        Stmt::While { cond, body, .. } => {
+            self.subst_expr(cond, bindings);
+            for s in body {
+                self.subst_stmt(s, bindings);
+            }
+        }
+        Stmt::For { init, cond, update, body, .. } => {
+            if let Some(init) = init {
+                self.subst_stmt(init, bindings);
+            }
+            if let Some(cond) = cond {
+                self.subst_expr(cond, bindings);
+            }
+            if let Some(update) = update {
+                self.subst_stmt(update, bindings);
+            }
+            for s in body {
+                self.subst_stmt(s, bindings);
+            }
+        }
+        Stmt::Return { value, .. } => {
+            if let Some(v) = value {
+                self.subst_expr(v, bindings);
+            }
+        }
+        Stmt::Expr(e) => self.subst_expr(e, bindings),
+        Stmt::Assign { value, .. } => self.subst_expr(value, bindings),
+        Stmt::MemberAssign { value, .. } => self.subst_expr(value, bindings),
+        Stmt::IndexAssign { index, value, .. } => {
+            self.subst_expr(index, bindings);
+            self.subst_expr(value, bindings);
+        }
+    }
+}
+
+fn subst_expr(&self, e: &mut Expr, bindings: &[(String, CTy)]) {
+    match e {
+        Expr::Int(..) | Expr::Float(..) | Expr::Bool(..) | Expr::Str(..) | Expr::Ident(..) => {}
+        Expr::Template(parts, _) => {
+            for p in parts {
+                if let TPart::Expr(inner) = p {
+                    self.subst_expr(inner, bindings);
+                }
+            }
+        }
+        Expr::Unary(_, inner, _) => self.subst_expr(inner, bindings),
+        Expr::Binary(_, l, r, _) => {
+            self.subst_expr(l, bindings);
+            self.subst_expr(r, bindings);
+        }
+        Expr::Call(callee, args, _) => {
+            self.subst_expr(callee, bindings);
+            for a in args {
+                self.subst_expr(a, bindings);
+            }
+        }
+        Expr::CallGen(callee, type_args, args, _) => {
+            self.subst_expr(callee, bindings);
+            for t in type_args {
+                self.subst_ann(t, bindings);
+            }
+            for a in args {
+                self.subst_expr(a, bindings);
+            }
+        }
+        Expr::Member(inner, _, _) => self.subst_expr(inner, bindings),
+        Expr::Index(o, i, _) => {
+            self.subst_expr(o, bindings);
+            self.subst_expr(i, bindings);
+        }
+        Expr::ArrayLit(elems, _) => {
+            for x in elems {
+                self.subst_expr(x, bindings);
+            }
+        }
+        Expr::ObjectLit(fields, _) => {
+            for (_, v) in fields {
+                self.subst_expr(v, bindings);
+            }
+        }
+        Expr::NewClass { type_args, .. } => {
+            for a in type_args {
+                self.subst_ann(a, bindings);
+            }
+        }
+        Expr::NewCtor { args, .. } => {
+            for a in args {
+                self.subst_expr(a, bindings);
+            }
+        }
+        Expr::Await(inner, _) | Expr::NewPromise(inner, _) => self.subst_expr(inner, bindings),
+        Expr::Lambda(l, _) => {
+            for p in &mut l.params {
+                if let Some(ann) = &mut p.ann {
+                    self.subst_ann(ann, bindings);
+                }
+            }
+        }
+    }
+}
+
+/// Monomorphize a generic class instantiation (`Box<Int32>`) and return the
+/// concrete object type.
+fn mono_class(&mut self, name: &str, args: &[TyAnn], span: Span) -> CTy {
+    let decl = self.generic_classes.get(name).cloned().unwrap();
+    if args.len() != decl.type_params.len() {
+        self.diag(
+            format!(
+                "generic class '{}' takes {} type parameter(s), got {}",
+                name,
+                decl.type_params.len(),
+                args.len()
+            ),
+            span,
+        );
+        return CTy::Void;
+    }
+    let bindings: Vec<(String, CTy)> =
+        decl.type_params.iter().cloned().zip(args.iter().map(|a| self.ty_of(a))).collect();
+    let mangled =
+        format!("{}${}", decl.name, bindings.iter().map(|(_, t)| Self::mangle_ty(t)).collect::<Vec<_>>().join("$"));
+    if let Some(&id) = self.class_by_name.get(&mangled) {
+        return CTy::Object(ObjectTy { id, name: mangled });
+    }
+    let mut fields = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    for (fname, ann) in &decl.fields {
+        if !seen.insert(fname.clone()) {
+            continue;
+        }
+        let mut a2 = ann.clone();
+        self.subst_ann(&mut a2, &bindings);
+        let t = self.ty_of(&a2);
+        fields.push((fname.clone(), t));
+    }
+    let id = self.classes.len();
+    self.classes.push(ClassDef { name: mangled.clone(), fields, is_ghost: false });
+    self.class_by_name.insert(mangled.clone(), id);
+    CTy::Object(ObjectTy { id, name: mangled })
+}
+
+/// Check a call with explicit type arguments: `pick<Int32>(1, 2, true)`.
+fn check_call_gen(
+    &mut self,
+    callee: &Expr,
+    type_args: &[TyAnn],
+    args: &[Expr],
+    span: Span,
+) -> CExpr {
+    let Expr::Ident(name, _) = callee else {
+        self.diag("type arguments are only supported on direct function calls", span);
+        return CExpr::Bool(false);
+    };
+    if self.generic_fns.contains_key(name) {
+        return self.check_generic_call(name, Some(type_args), args, span);
+    }
+    if self.sigs.contains_key(name) {
+        self.diag(
+            format!("function '{}' does not take type parameters", name),
+            span,
+        );
+        return CExpr::Bool(false);
+    }
+    self.diag(format!("unknown function '{}'", name), span);
+    CExpr::Bool(false)
+}
+
+/// Check a call to a generic function: infer type bindings from the
+/// arguments, monomorphize the body, and lower to a call of the mono'd name.
+fn check_generic_call(&mut self, name: &str, type_args: Option<&[TyAnn]>, args: &[Expr], span: Span) -> CExpr {
+        let decl = self.generic_fns.get(name).cloned().unwrap();
+        if args.len() != decl.params.len() {
+            self.diag(
+                format!("function '{}' takes {} argument(s), got {}", name, decl.params.len(), args.len()),
+                span,
+            );
+            return CExpr::Bool(false);
+        }
+        if let Some(tas) = type_args {
+            if tas.len() != decl.type_params.len() {
+                self.diag(
+                    format!(
+                        "function '{}' takes {} type parameter(s), got {} type argument(s)",
+                        name,
+                        decl.type_params.len(),
+                        tas.len()
+                    ),
+                    span,
+                );
+                return CExpr::Bool(false);
+            }
+        }
+        let mut cargs = Vec::new();
+        let mut arg_tys = Vec::new();
+        for a in args {
+            let c = self.check_expr(a, false);
+            arg_tys.push(self.expr_ty(&c));
+            cargs.push(c);
+        }
+        // infer type bindings from the arguments
+        let mut bindings: Vec<(String, Option<CTy>)> =
+            decl.type_params.iter().map(|t| (t.clone(), None)).collect();
+        for (p, aty) in decl.params.iter().zip(arg_tys.iter()) {
+            let Some(ann) = &p.ann else {
+                self.diag(
+                    format!(
+                        "parameter '{}' of generic function '{}' needs a type annotation",
+                        p.name, name
+                    ),
+                    p.span,
+                );
+                continue;
+            };
+            self.unify_ann(ann, aty, &mut bindings, p.span);
+        }
+        // explicit type arguments win over inference
+        if let Some(tas) = type_args {
+            for (i, ta) in tas.iter().enumerate() {
+                bindings[i] = (bindings[i].0.clone(), Some(self.ty_of(ta)));
+            }
+        }
+    let unbound: Vec<&String> = bindings.iter().filter(|(_, b)| b.is_none()).map(|(n, _)| n).collect();
+    if !unbound.is_empty() {
+        self.diag(
+            format!(
+                "cannot infer type parameter(s) {} of generic function '{}' from the call arguments",
+                unbound.iter().map(|n| format!("'{}'", n)).collect::<Vec<_>>().join(", "),
+                name
+            ),
+            span,
+        );
+        return CExpr::Bool(false);
+    }
+    let bindings: Vec<(String, CTy)> =
+        bindings.into_iter().map(|(n, b)| (n, b.unwrap())).collect();
+    let mangled = format!(
+        "{}__{}",
+        decl.name,
+        bindings.iter().map(|(_, t)| Self::mangle_ty(t)).collect::<Vec<_>>().join("__")
+    );
+    // re-check arguments against the substituted parameter types
+    if self.sigs.contains_key(&mangled) {
+        let (sig_params, sig_ret, sig_async) = {
+            let s = self.sigs.get(&mangled).unwrap();
+            (s.params.clone(), s.ret.clone(), s.is_async)
+        };
+        for (i, (_c, aty)) in cargs.iter_mut().zip(arg_tys.iter()).enumerate() {
+            if let Some(pt) = sig_params.get(i) {
+                self.coerce(aty, pt, args[i].span());
+            }
+        }
+        return CExpr::CallFn {
+            name: mangled,
+            args: cargs,
+            ret: sig_ret.unwrap_or(CTy::Void),
+            is_async: sig_async,
+        };
+    }
+    let mut subst = decl.clone();
+    subst.name = mangled.clone();
+    for p in &mut subst.params {
+        if let Some(ann) = &mut p.ann {
+            self.subst_ann(ann, &bindings);
+        }
+    }
+    if let Some(r) = &mut subst.ret_ann {
+        self.subst_ann(r, &bindings);
+    }
+    for s in &mut subst.body {
+        self.subst_stmt(s, &bindings);
+    }
+    // register the signature first when the return is annotated, so
+    // recursive generic calls resolve
+    let mut params = Vec::new();
+    for p in &subst.params {
+        match &p.ann {
+            Some(ann) => params.push(self.ty_of(ann)),
+            None => {
+                self.diag(
+                    format!(
+                        "parameter '{}' of generic function '{}' needs a type annotation (strict mode)",
+                        p.name, subst.name
+                    ),
+                    p.span,
+                );
+                params.push(CTy::Void);
+            }
+        }
+    }
+    let pre_ret = subst.ret_ann.as_ref().map(|a| self.ty_of(a));
+    self.sigs.insert(
+        mangled.clone(),
+        FnSig { params: params.clone(), ret: pre_ret.clone(), is_async: subst.is_async },
+    );
+    // check_fn is invoked mid-function here, so save and restore the
+    // in-progress function context (the mono'd body's `return` statements
+    // must not influence the caller's inferred return type)
+    let saved_ret_ty = std::mem::replace(&mut self.ret_ty, None);
+    let saved_float = self.saw_float_ret;
+    let saved_async = self.is_async;
+    let saved_toplevel = self.in_toplevel;
+    let saved_promise_infer = self.promise_infer.take();
+    let cf = self.check_fn(&subst);
+    self.ret_ty = saved_ret_ty;
+    self.saw_float_ret = saved_float;
+    self.is_async = saved_async;
+    self.in_toplevel = saved_toplevel;
+    self.promise_infer = saved_promise_infer;
+    let ret = cf.ret.clone();
+    self.mono_fns.push(cf);
+    if pre_ret.is_none() {
+        self.sigs.insert(
+            mangled.clone(),
+            FnSig { params, ret: Some(ret.clone()), is_async: subst.is_async },
+        );
+    }
+    CExpr::CallFn { name: mangled, args: cargs, ret, is_async: subst.is_async }
+}
+
+/// Unify a parameter annotation against an argument type, binding type
+/// parameters. Unbound params stay `None`.
+fn unify_ann(
+    &mut self,
+    ann: &TyAnn,
+    actual: &CTy,
+    bindings: &mut Vec<(String, Option<CTy>)>,
+    span: Span,
+) {
+    let param_names: Vec<&String> = bindings.iter().map(|(n, _)| n).collect();
+    if ann.args.is_empty() && param_names.contains(&&ann.name) {
+        for (n, b) in bindings.iter_mut() {
+            if *n == ann.name {
+                match b {
+                    None => *b = Some(actual.clone()),
+                    Some(prev) => {
+                        if prev != actual
+                            && !(matches!(prev, CTy::Int) && matches!(actual, CTy::Float))
+                        {
+                            self.diag(
+                                format!(
+                                    "type parameter '{}' is bound to {} here but {} elsewhere",
+                                    n,
+                                    actual.name(),
+                                    prev.name()
+                                ),
+                                span,
+                            );
+                        }
+                    }
+                }
+            }
+        }
+        return;
+    }
+    match (ann.name.as_str(), ann.args.first(), actual) {
+        ("Array", Some(a), CTy::Array(e)) => self.unify_ann(a, e, bindings, span),
+        ("Promise", Some(a), CTy::Promise(e)) => self.unify_ann(a, e, bindings, span),
+        _ => {
+            let expected = self.ty_of(ann);
+            self.coerce(actual, &expected, span);
+        }
+    }
+}
+
+fn check_fs_module(&mut self, name: &str, args: &[Expr], span: Span) -> CExpr {
+        if !args.is_empty() {
+            let path = self.check_expr(&args[0], false);
+            self.coerce(&self.expr_ty(&path), &CTy::Str, args[0].span());
+            let p = Box::new(path);
+            match name {
+                "readFile" => {
+                    if args.len() != 1 {
+                        self.diag("fs.readFile takes (path)", span);
+                        return CExpr::Bool(false);
+                    }
+                    return CExpr::FsReadFile { path: p };
+                }
+                "writeFile" => {
+                    if args.len() != 2 {
+                        self.diag("fs.writeFile takes (path, data)", span);
+                        return CExpr::Bool(false);
+                    }
+                    let data = self.check_expr(&args[1], false);
+                    self.coerce(&self.expr_ty(&data), &CTy::Str, args[1].span());
+                    return CExpr::FsWriteFile { path: p, data: Box::new(data) };
+                }
+                "exists" => {
+                    if args.len() != 1 {
+                        self.diag("fs.exists takes (path)", span);
+                        return CExpr::Bool(false);
+                    }
+                    return CExpr::FsExists { path: p };
+                }
+                "readDir" => {
+                    if args.len() != 1 {
+                        self.diag("fs.readDir takes (path)", span);
+                        return CExpr::Bool(false);
+                    }
+                    return CExpr::FsReadDir { path: p };
+                }
+                "mkdir" => {
+                    if args.len() != 1 {
+                        self.diag("fs.mkdir takes (path)", span);
+                        return CExpr::Bool(false);
+                    }
+                    return CExpr::FsMkdir { path: p };
+                }
+                "remove" => {
+                    if args.len() != 1 {
+                        self.diag("fs.remove takes (path)", span);
+                        return CExpr::Bool(false);
+                    }
+                    return CExpr::FsRemove { path: p };
+                }
+                _ => {}
+            }
+        }
+        self.diag(
+            format!(
+                "fs.{} is not supported (fs has readFile, writeFile, exists, readDir, mkdir, remove)",
+                name
+            ),
+            span,
+        );
+        CExpr::Bool(false)
+    }
+
+    fn check_crypto_module(&mut self, name: &str, args: &[Expr], span: Span) -> CExpr {
+        match name {
+            "sha256" => {
+                if args.len() != 1 {
+                    self.diag("crypto.sha256 takes (data)", span);
+                    return CExpr::Bool(false);
+                }
+                let v = self.check_expr(&args[0], false);
+                self.coerce(&self.expr_ty(&v), &CTy::Str, args[0].span());
+                CExpr::CryptoSha256 { v: Box::new(v) }
+            }
+            "base64Encode" => {
+                if args.len() != 1 {
+                    self.diag("crypto.base64Encode takes (data)", span);
+                    return CExpr::Bool(false);
+                }
+                let v = self.check_expr(&args[0], false);
+                self.coerce(&self.expr_ty(&v), &CTy::Str, args[0].span());
+                CExpr::CryptoBase64 { decode: false, v: Box::new(v) }
+            }
+            "base64Decode" => {
+                if args.len() != 1 {
+                    self.diag("crypto.base64Decode takes (data)", span);
+                    return CExpr::Bool(false);
+                }
+                let v = self.check_expr(&args[0], false);
+                self.coerce(&self.expr_ty(&v), &CTy::Str, args[0].span());
+                CExpr::CryptoBase64 { decode: true, v: Box::new(v) }
+            }
+            "randomHex" => {
+                if args.len() != 1 {
+                    self.diag("crypto.randomHex takes (numBytes)", span);
+                    return CExpr::Bool(false);
+                }
+                let v = self.check_expr(&args[0], false);
+                self.coerce(&self.expr_ty(&v), &CTy::Int, args[0].span());
+                CExpr::CryptoRandomHex { bytes: Box::new(v) }
+            }
+            "uuid" => {
+                if !args.is_empty() {
+                    self.diag("crypto.uuid takes no arguments", span);
+                    return CExpr::Bool(false);
+                }
+                CExpr::CryptoUuid
+            }
+            other => {
+                self.diag(
+                    format!(
+                        "crypto.{} is not supported (crypto has sha256, base64Encode, base64Decode, randomHex, uuid)",
+                        other
+                    ),
+                    span,
+                );
+                CExpr::Bool(false)
+            }
+        }
+    }
+
     fn check_call(&mut self, callee: &Expr, args: &[Expr], span: Span) -> CExpr {
         // std-module and package functions: `net.connect(...)`, `http.get(...)`,
         // `mypkg.fn(...)` (registry packages are exposed as `pkg__fn`)
@@ -2168,6 +3077,8 @@ fn check_http_object_method(
                     match m.as_str() {
                         "net" => return self.check_net_module(name, args, span),
                         "http" => return self.check_http_module(name, args, span),
+                        "fs" => return self.check_fs_module(name, args, span),
+                        "crypto" => return self.check_crypto_module(name, args, span),
                         _ => {
                             let full = format!("{}__{}", m, name);
                             if self.sigs.contains_key(&full) {
@@ -2301,6 +3212,9 @@ fn check_http_object_method(
                 return CExpr::SetTimeout { lambda: idx, ms: Box::new(ms) };
             }
             // user function
+            if self.generic_fns.contains_key(name) {
+                return self.check_generic_call(name, None, args, span);
+            }
             if let Some(sig) = self.sigs.get(name).map(|s| (s.params.clone(), s.ret.clone(), s.is_async)) {
                 let (params, ret, is_async) = sig;
                 if args.len() != params.len() {
@@ -2673,8 +3587,22 @@ fn check_object_lit(
 }
 
 /// `[e1, e2, ...]`: infer the element type, or use `expected` (from a
-/// variable annotation) for empty literals.
+/// variable annotation) for empty literals and as a coercion target.
 fn check_array_lit(&mut self, elems: &[Expr], span: Span, expected: Option<CTy>) -> CExpr {
+        // when an element type is declared, elements are coerced to it
+        // (e.g. ghost/declared objects flowing into an Array<Interface>)
+        if let Some(exp) = expected {
+            let mut cs = Vec::new();
+            for el in elems {
+                let c = self.check_expr(el, false);
+                let t = self.expr_ty(&c);
+                if !matches!(t, CTy::Void) {
+                    self.coerce(&t, &exp, el.span());
+                }
+                cs.push(c);
+            }
+            return CExpr::ArrayLit { elems: cs, elem_ty: exp };
+        }
         let mut cs = Vec::new();
         for el in elems {
             cs.push(self.check_expr(el, false));

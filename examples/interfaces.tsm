@@ -1,0 +1,49 @@
+// Interfaces: structural data contracts, checked at compile time.
+// Field access is resolved by name at runtime so any conforming object works.
+
+interface Point {
+    x: Int32,
+    y: Int32,
+    name: string,
+}
+
+interface Named {
+    name: string,
+}
+
+// Ghost classes (object literals) conform structurally.
+let p = { x: 1, y: 2, name: "origin" };
+
+// Declared classes conform too: extra fields are allowed.
+class Vehicle {
+    name: string,
+    wheels: Int32,
+}
+
+function describe(pt: Point): string {
+    return `${pt.name}: ${pt.x}, ${pt.y}`;
+}
+
+function label(n: Named): string {
+    return `called ${n.name}`;
+}
+
+function main() {
+    console.log(describe(p));
+
+    let car = new Vehicle();
+    car.name = "bolt";
+    car.wheels = 4;
+    console.log(label(car));
+
+    // write through an interface
+    let q = { x: 5, y: 6, name: "q" };
+    q.name = "point-q";
+    console.log(describe(q));
+
+    // interface values can be collected in arrays of a shared interface type
+    let shapes: Array<Named> = [p, q, car];
+    for (let i = 0; i < shapes.length; i++) {
+        console.log(label(shapes[i]));
+    }
+}

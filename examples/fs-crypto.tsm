@@ -1,0 +1,34 @@
+// The fs and crypto standard libraries.
+use fs
+use crypto
+
+function main() {
+    // --- filesystem ---
+    let path = "/tmp/marina-fs-demo.txt";
+    fs.writeFile(path, "hello from marina");
+    console.log(fs.exists(path));
+
+    let data = fs.readFile(path);
+    console.log(data);
+
+    fs.mkdir("/tmp/marina-fs-demo-dir");
+    fs.writeFile("/tmp/marina-fs-demo-dir/nested.txt", "nested");
+    let entries = fs.readDir("/tmp/marina-fs-demo-dir");
+    console.log(entries.length);
+    console.log(entries[0]);
+
+    fs.remove(path);
+    console.log(fs.exists(path));
+    fs.remove("/tmp/marina-fs-demo-dir");
+
+    // --- crypto ---
+    console.log(crypto.sha256("hello"));
+    console.log(crypto.base64Encode("marina"));
+    console.log(crypto.base64Decode("bWFyaW5h"));
+
+    let key = crypto.randomHex(8);
+    console.log(key.length);
+
+    let id = crypto.uuid();
+    console.log(id.length);
+}

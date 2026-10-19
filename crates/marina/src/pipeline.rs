@@ -203,7 +203,7 @@ pub fn resolve_uses(program: &mut crate::ast::Program) -> Result<(), Vec<SrcDiag
     let mut extra_classes = Vec::new();
 
     for (name, span) in program.uses.drain(..) {
-        if name == "net" || name == "http" {
+        if matches!(name.as_str(), "net" | "http" | "fs" | "crypto") {
             kept.push((name, span));
             continue;
         }
@@ -245,14 +245,14 @@ pub fn resolve_uses(program: &mut crate::ast::Program) -> Result<(), Vec<SrcDiag
                     ));
                 }
                 for (u, s) in pkg.uses.drain(..) {
-                    if u == "net" || u == "http" {
+                    if matches!(u.as_str(), "net" | "http" | "fs" | "crypto") {
                         // make the std module visible to the merged functions
                         if !kept.iter().any(|(n, _)| *n == u) {
                             kept.push((u, s));
                         }
                     } else {
                         diags.push(SrcDiag::from(
-                            "packages cannot depend on other packages yet (v0.2: std modules net/http only)",
+                            "packages cannot depend on other packages yet (v0.2: std modules net/http/fs/crypto only)",
                             s,
                         ));
                     }
