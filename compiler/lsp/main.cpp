@@ -7,6 +7,10 @@
 //   * textDocument/didOpen + didChange (full sync) → publishDiagnostics
 //     (lex, parse and type-check errors, plus the strict naming rules)
 //   * textDocument/hover → class shape info (fields + types, ghost classes)
+//   * textDocument/completion → std-module members after a dot (console,
+//     net, http, fs, crypto, sql, streams), array/string methods, class
+//     fields; keywords, types, std modules, builtins and program-declared
+//     functions/classes/variables at the top level
 //
 // Port of crates/marina/src/bin/marina-lsp.rs.
 #include <charconv>
@@ -21,6 +25,8 @@
 #include <string>
 #include <variant>
 #include <vector>
+
+#include <unistd.h> // ::read for the interactive stdin reader
 
 #include <marina/ast.hpp>
 #include <marina/checker.hpp>
@@ -458,7 +464,11 @@ struct JsonParser {
 // LSP plumbing
 // ---------------------------------------------------------------------------
 
-// Buffered stdin reader (mirrors Rust's locked stdin, which buffers reads).
+// Buffered stdin reader. Uses POSIX read() rather than fread(): fread()
+// blocks until the full 8192-byte buffer is filled or EOF, which stalls an
+// interactive LSP session until many messages accumulate. read() returns
+// whatever is currently available, so each framed message is processed
+// as soon as it arrives.
 struct StdinReader {
     unsigned char buf[8192];
     size_t len = 0;
@@ -468,12 +478,13 @@ struct StdinReader {
     int get() {
         if (pos >= len) {
             if (eof) return -1;
-            len = std::fread(buf, 1, sizeof(buf), stdin);
+            ssize_t n = ::read(STDIN_FILENO, buf, sizeof(buf));
             pos = 0;
-            if (len == 0) {
+            if (n <= 0) {
                 eof = true;
                 return -1;
             }
+            len = static_cast<size_t>(n);
         }
         return buf[pos++];
     }
@@ -973,6 +984,304 @@ Json hover(const std::string& text, int64_t line, int64_t col) {
 }
 
 // ---------------------------------------------------------------------------
+// Completion
+// ---------------------------------------------------------------------------
+
+Json completion_contents(std::string markdown) {
+    JsonObj contents;
+    contents.set("kind", Json::str("markdown"));
+    contents.set("value", Json::str(std::move(markdown)));
+    return Json::object(std::move(contents));
+}
+
+// LSP CompletionItemKind: 2 Method, 3 Function, 5 Field, 6 Variable,
+// 7 Class, 8 Interface, 9 Module, 10 Property, 14 Keyword.
+Json completion_item(std::string label, double kind, std::string detail,
+                     std::string doc) {
+    JsonObj item;
+    item.set("label", Json::str(std::move(label)));
+    item.set("kind", Json::num(kind));
+    if (!detail.empty()) item.set("detail", Json::str(std::move(detail)));
+    if (!doc.empty()) item.set("documentation", completion_contents(std::move(doc)));
+    return Json::object(std::move(item));
+}
+
+bool ascii_word_char(unsigned char c) {
+    return (c >= '0' && c <= '9') || (c >= 'A' && c <= 'Z') ||
+           (c >= 'a' && c <= 'z') || c == '_';
+}
+
+// `fn(a: Int32, b: String): Bool` — signature text for completion details.
+std::string fn_detail(const std::string& name, const ir::CFn& f) {
+    std::string d = "fn " + name + "(";
+    for (size_t i = 0; i < f.params.size(); i++) {
+        if (i > 0) d += ", ";
+        d += f.params[i].second.name();
+    }
+    d += "): " + f.ret.name();
+    return d;
+}
+
+// Completion after a `.`: members of std modules, arrays, strings, streams
+// and class instances (by variable type).
+Json member_completions(const std::string& receiver, const ir::Checked& checked) {
+    JsonArr items;
+    auto add = [&](const char* label, double kind, const char* detail, const char* doc) {
+        items.push_back(completion_item(label, kind, detail, doc));
+    };
+
+    // std modules
+    if (receiver == "console") {
+        add("log", 2, "console.log(value): Void",
+            "Print a value (string form) to stdout with a trailing newline.");
+    } else if (receiver == "net") {
+        add("connect", 3, "net.connect(host: String, port: Int32): Stream",
+            "Open a TCP connection and return a `Stream` with `write`, `read_all` and `close`.");
+    } else if (receiver == "http") {
+        add("get", 3, "http.get(url: String): http.Response",
+            "HTTP GET; resolves to a response object `{ status, body }`.");
+        add("post", 3, "http.post(url: String, body: String): http.Response",
+            "HTTP POST with a string body; response `{ status, body }`.");
+        add("listen", 3, "http.listen(port: Int32, handler: (req, res) => Void): Void",
+            "Blocking HTTP server on 0.0.0.0:port — the handler runs once per request.");
+        add("Server", 7, "class http.Server",
+            "Express-style server: `new http.Server()`, `server.router({ path: \"/x\" })`, `await server.listen(host, port)`.");
+        add("JsonValidator", 7, "class http.JsonValidator",
+            "Request-body validator: `new http.JsonValidator({ field: http.JsonValidator.string().required() })`, `validator.validate(body)`.");
+        add("Response", 7, "class http.Response",
+            "Client response object `{ status, body }` returned by `http.get`/`http.post`.");
+    } else if (receiver == "fs") {
+        add("args", 3, "fs.args(): Array<String>", "Process arguments (argv[1..]).");
+        add("readFile", 3, "fs.readFile(path: String): String", "Read a whole file. Async: `await fs.readFile(path)`.");
+        add("writeFile", 3, "fs.writeFile(path: String, data: String): Void", "Write a file. Async: `await fs.writeFile(path, data)`.");
+        add("exists", 3, "fs.exists(path: String): bool", "Does the path exist? Async: `await fs.exists(path)`.");
+        add("readDir", 3, "fs.readDir(path: String): Array<String>", "Sorted directory entry names. Async: `await fs.readDir(path)`.");
+        add("mkdir", 3, "fs.mkdir(path: String): Void", "Create a directory (recursive). Async: `await fs.mkdir(path)`.");
+        add("remove", 3, "fs.remove(path: String): Void", "Remove a file or directory (recursive for dirs). Async: `await fs.remove(path)`.");
+    } else if (receiver == "crypto") {
+        add("sha256", 3, "crypto.sha256(data: String): String", "Lowercase hex SHA-256 digest.");
+        add("base64Encode", 3, "crypto.base64Encode(data: String): String", "Base64-encode a string.");
+        add("base64Decode", 3, "crypto.base64Decode(data: String): String", "Base64-decode (lossy UTF-8).");
+        add("randomHex", 3, "crypto.randomHex(numBytes: Int32): String", "Cryptographically random hex from /dev/urandom.");
+        add("uuid", 3, "crypto.uuid(): String", "Random UUID v4.");
+    } else if (receiver == "sql") {
+        add("Connection", 7, "class sql.Connection",
+            "`new sql.Connection(\"sqlite\", \"path.db\")` with `execute`, `query` and `close`.");
+        add("stmt", 3, "sql.stmt`SELECT ...`", "Tagged template for prepared statements; `${expr}` binds a parameter.");
+    } else {
+        // receiver is a variable: arrays, strings, streams, class instances
+        std::optional<size_t> var_id;
+        for (size_t i = checked.var_names.size(); i-- > 0;) {
+            if (checked.var_names[i] == receiver) {
+                var_id = i;
+                break;
+            }
+        }
+        if (var_id && *var_id < checked.var_types.size()) {
+            const ir::CTy& vt = checked.var_types[*var_id];
+            if (vt.tag == ir::CTy::Tag::Array) {
+                add("length", 10, "arr.length: Int32", "Number of elements.");
+                add("push", 2, "arr.push(value): Int32", "Append a value; returns the new length.");
+                add("pop", 2, "arr.pop()", "Remove and return the last element.");
+                add("shift", 2, "arr.shift()", "Remove and return the first element.");
+                add("unshift", 2, "arr.unshift(value): Int32", "Insert a value at the front; returns the new length.");
+                add("splice", 2, "arr.splice(start: Int32, count: Int32): Array", "Remove `count` elements at `start`; returns them.");
+                add("slice", 2, "arr.slice(start: Int32, end: Int32): Array", "Copy elements [start, end) into a new array.");
+                add("concat", 2, "arr.concat(other: Array): Array", "New array with the elements of both.");
+                add("join", 2, "arr.join(sep: String): String", "Join element string forms with a separator.");
+                add("reverse", 2, "arr.reverse(): Array", "Reverse in place; returns the same array.");
+                add("sort", 2, "arr.sort(): Array", "Stable sort in place (numbers numerically, strings bytewise).");
+                add("forEach", 2, "arr.forEach(item => Void): Void", "Run a callback for each element.");
+                add("map", 2, "arr.map(item => T): Array", "New array of callback results.");
+                add("filter", 2, "arr.filter(item => bool): Array", "New array with elements whose callback returned true.");
+                add("reduce", 2, "arr.reduce((acc, item) => T, init: T): T", "Fold the array into a single value.");
+            } else if (vt.tag == ir::CTy::Tag::Str) {
+                add("length", 10, "s.length: Int32", "Length of the string in bytes.");
+                add("charAt", 2, "s.charAt(index: Int32): Int32", "Byte (code unit) at `index`, 0 when out of bounds.");
+                add("substring", 2, "s.substring(start: Int32, end: Int32): String", "Substring over byte indices [start, end), clamped.");
+            } else if (vt.tag == ir::CTy::Tag::Stream) {
+                add("write", 2, "stream.write(data: String): Void", "Send bytes over the TCP stream.");
+                add("read_all", 2, "stream.read_all(): String", "Read until EOF into a string.");
+                add("close", 2, "stream.close(): Void", "Close the stream.");
+            } else if (vt.tag == ir::CTy::Tag::Object && vt.object.id < checked.classes.size()) {
+                // class instance: fields (walking the inheritance chain)
+                std::optional<size_t> cid = vt.object.id;
+                while (cid && *cid < checked.classes.size()) {
+                    const ir::ClassDef& def = checked.classes[*cid];
+                    for (const auto& [name, ty] : def.fields) {
+                        items.push_back(completion_item(
+                            name, 5, name + ": " + ty.name(), ""));
+                    }
+                    cid = def.base;
+                }
+            }
+        }
+    }
+
+    return Json::array(std::move(items));
+}
+
+// Completion at the top level (not after a dot): keywords, types, std module
+// names, builtins, plus everything declared in the program.
+Json global_completions(const ast::Program& program, const ir::Checked& checked) {
+    JsonArr items;
+    auto add = [&](const std::string& label, double kind, const std::string& detail,
+                   const std::string& doc) {
+        items.push_back(completion_item(label, kind, detail, doc));
+    };
+
+    static const char* keywords[] = {"let",     "const",    "function", "async",
+                                     "await",   "return",   "if",       "else",
+                                     "while",   "for",      "true",     "false",
+                                     "new",     "class",    "use",      "import",
+                                     "interface", "export"};
+    for (const char* kw : keywords) add(kw, 14, "keyword", "");
+
+    static const char* types[] = {"Int8",    "Int16",   "Int32",  "Int64",
+                                  "UInt8",   "UInt16",  "UInt32", "UInt64",
+                                  "Float32", "Float64", "bool",   "String"};
+    for (const char* ty : types) add(ty, 7, "type", "");
+
+    static const char* modules[] = {"net", "http", "fs", "crypto", "sql"};
+    for (const char* m : modules)
+        add(m, 9, "std module", "Import with `use " + std::string(m) + "`.");
+    add("console", 9, "builtin", "Console output: `console.log(value)`.");
+    add("setTimeout", 3, "setTimeout(fn, ms)", "Run `fn` after `ms` milliseconds on the event loop.");
+    add("Promise", 7, "class Promise<T>",
+        "`new Promise((resolve, reject) => { ... })` — `await` it to resume.");
+
+    for (const auto& iface : program.interfaces) {
+        add(iface.name, 8, "interface", "");
+    }
+    for (const auto& cl : checked.classes) {
+        add(cl.name, 7, cl.is_ghost ? "ghost class" : "class", "");
+    }
+    for (const auto& f : checked.fns) {
+        items.push_back(completion_item(f.name, 3, fn_detail(f.name, f), ""));
+    }
+    // variables: dedupe, keep the innermost (last) declaration's type
+    for (size_t i = checked.var_names.size(); i-- > 0;) {
+        bool seen = false;
+        for (size_t j = i + 1; j < checked.var_names.size(); j++) {
+            if (checked.var_names[j] == checked.var_names[i]) {
+                seen = true;
+                break;
+            }
+        }
+        if (!seen && !checked.var_names[i].empty() && i < checked.var_types.size()) {
+            std::string ty = checked.var_types[i].name();
+            items.push_back(completion_item(checked.var_names[i], 6,
+                                            "let " + checked.var_names[i] + ": " + ty,
+                                            ""));
+        }
+    }
+
+    return Json::array(std::move(items));
+}
+
+// Parse + check `text` and return member completions for `receiver`;
+// nullopt when the document cannot be lexed/parsed.
+std::optional<Json> try_members(const std::string& text, const std::string& receiver) {
+    try {
+        auto tokens = lex::lex(text);
+        auto program = ast::parse(std::move(tokens));
+        std::vector<ir::Diag> diags;
+        ir::Checked checked = ir::check_with_diags(program, diags);
+        return member_completions(receiver, checked);
+    } catch (...) {
+        return std::nullopt;
+    }
+}
+
+// `textDocument/completion` — dot context → member completions, otherwise
+// global completions. The client does the fuzzy filtering.
+Json completion(const std::string& text, int64_t line, int64_t col) {
+    std::vector<std::string> lines = rust_lines(text);
+    std::string line_text;
+    {
+        int64_t idx = line > 0 ? line : 0;
+        line_text = static_cast<size_t>(idx) < lines.size() ? lines[static_cast<size_t>(idx)]
+                                                            : std::string();
+    }
+    size_t byte = byte_col_of(line_text, col > 0 ? col : 0);
+    std::string before = line_text.substr(0, byte);
+
+    // identifier word immediately before the cursor
+    size_t p_end = before.size();
+    size_t p_start = p_end;
+    while (p_start > 0 && ascii_word_char(static_cast<unsigned char>(before[p_start - 1])))
+        p_start -= 1;
+    std::string prefix = before.substr(p_start, p_end - p_start);
+    (void)prefix; // the client does the fuzzy filtering
+
+    // dotted receiver before the prefix: `console.`, `sample_mod.sub.`, ...
+    std::string receiver;
+    bool dotted = false;
+    if (p_start > 0 && before[p_start - 1] == '.') {
+        dotted = true;
+        size_t r_end = p_start - 1; // the dot
+        size_t s = r_end;
+        while (s > 0) {
+            size_t t = s;
+            while (t > 0 && ascii_word_char(static_cast<unsigned char>(before[t - 1])))
+                t -= 1;
+            if (t == s) break; // no word chars
+            if (t > 0 && before[t - 1] == '.') s = t - 1;
+            else { s = t; break; }
+        }
+        receiver = before.substr(s, r_end - s);
+    }
+
+    if (dotted) {
+        // attempt 1: parse + check the document as-is
+        if (auto r = try_members(text, receiver)) return std::move(*r);
+        // attempt 2: a dangling `foo.` (the moment the user typed the dot)
+        // does not parse — insert a placeholder identifier at the cursor
+        // (`foo.` → `foo.m0`) and retry
+        std::vector<std::string> ls = rust_lines(text);
+        size_t li = line > 0 ? static_cast<size_t>(line) : 0;
+        if (li < ls.size()) {
+            size_t bc = byte_col_of(ls[li], col > 0 ? col : 0);
+            ls[li].insert(bc, "m0");
+            std::string patched;
+            for (size_t i = 0; i < ls.size(); i++) {
+                if (i) patched += '\n';
+                patched += ls[i];
+            }
+            if (auto r = try_members(patched, receiver)) return std::move(*r);
+        }
+        return Json::array(JsonArr{});
+    }
+
+    // global completion: works even for lex/parse failures (keywords + types)
+    JsonArr fallback_items;
+    try {
+        auto tokens = lex::lex(text);
+        auto program = ast::parse(std::move(tokens));
+        std::vector<ir::Diag> diags;
+        ir::Checked checked = ir::check_with_diags(program, diags);
+        return global_completions(program, checked);
+    } catch (...) {
+        // static-only fallback
+        static const char* keywords[] = {"let",   "const",  "function", "async",  "await",
+                                         "return", "if",     "else",     "while",  "for",
+                                         "true",   "false",  "new",      "class",  "use",
+                                         "import", "interface", "export"};
+        for (const char* kw : keywords)
+            fallback_items.push_back(completion_item(kw, 14, "keyword", ""));
+        static const char* types[] = {"Int8",    "Int16",   "Int32",  "Int64",  "UInt8",
+                                      "UInt16",  "UInt32",  "UInt64", "Float32", "Float64",
+                                      "bool",    "String"};
+        for (const char* ty : types)
+            fallback_items.push_back(completion_item(ty, 7, "type", ""));
+        static const char* modules[] = {"net", "http", "fs", "crypto", "sql"};
+        for (const char* m : modules)
+            fallback_items.push_back(completion_item(m, 9, "std module", ""));
+        return Json::array(std::move(fallback_items));
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Main loop
 // ---------------------------------------------------------------------------
 
@@ -1004,6 +1313,10 @@ int main() {
             JsonObj caps;
             caps.set("textDocumentSync", Json::num(1.0));
             caps.set("hoverProvider", Json::boolean(true));
+            JsonObj completion_provider;
+            completion_provider.set("triggerCharacters", Json::array({Json::str(".")}));
+            completion_provider.set("resolveProvider", Json::boolean(false));
+            caps.set("completionProvider", Json::object(std::move(completion_provider)));
             JsonObj server_info;
             server_info.set("name", Json::str("marina-lsp"));
             server_info.set("version", Json::str("0.2.0"));
@@ -1099,6 +1412,35 @@ int main() {
             }
             if (id) {
                 write_message(response(*id, std::move(result)));
+            }
+        } else if (method == "textDocument/completion") {
+            const Json* params = msg->get("params");
+            const Json* td = params ? params->get("textDocument") : nullptr;
+            const Json* u = td ? td->get("uri") : nullptr;
+            const Json* pos = params ? params->get("position") : nullptr;
+            Json result = Json::null();
+            if (u && u->as_str() && pos) {
+                auto it = docs.find(*u->as_str());
+                std::string text = it != docs.end() ? it->second : std::string();
+                int64_t line = 0;
+                int64_t character = 0;
+                if (const Json* l = pos->get("line")) {
+                    if (auto v = l->as_i64()) line = *v;
+                }
+                if (const Json* c = pos->get("character")) {
+                    if (auto v = c->as_i64()) character = *v;
+                }
+                result = completion(text, line, character);
+            }
+            if (id) {
+                if (std::get_if<JsonArr>(&result.v)) {
+                    JsonObj wrapped;
+                    wrapped.set("isIncomplete", Json::boolean(false));
+                    wrapped.set("items", std::move(result));
+                    write_message(response(*id, Json::object(std::move(wrapped))));
+                } else {
+                    write_message(response(*id, Json::null()));
+                }
             }
         } else {
             // unknown request: answer null so the client never hangs

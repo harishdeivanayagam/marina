@@ -13,6 +13,15 @@ Language support for **marina** (`.tsm`) programs in Cursor / VS Code.
 - **Live diagnostics** — the full marina type checker runs on every save/keystroke:
   strict mode errors, naming conventions (`camelCase` functions/`let`s,
   `UPPER_SNAKE_CASE` consts, `PascalCase` classes), and object/class checks.
+- **Autocomplete** — completion from the language server, triggered as you type
+  and after `.`:
+  - std modules (`net`, `http`, `fs`, `crypto`, `sql`) and their members with
+    signature + docs, e.g. `crypto.sha256(data: String): String`
+  - `console.log`, array methods (`push`, `map`, `filter`, `reduce`, …),
+    string methods (`length`, `charAt`, `substring`) and stream methods
+  - fields of class instances and ghost-class object literals
+  - keywords, builtin types (`Int32`, `Float64`, …), `setTimeout` / `Promise`,
+    and every function, class, interface and variable declared in the file
 - **Hover** — hover a class name (`new Point()`), an object variable (`abc`), or
   a ghost class to see its field shape:
   - declared class: `**class Point** - x: Int32 - y: Int32`
@@ -21,24 +30,25 @@ Language support for **marina** (`.tsm`) programs in Cursor / VS Code.
 
 ## Install
 
-1. Build the tooling binaries (installs `wave`, `marina` and `marina-lsp`):
+1. Build the tooling binaries from the repo root (installs `wave`, `marina`
+   and `marina-lsp`):
 
    ```
-   cargo install --path crates/wave
-   cargo install --path crates/marina
+   cmake -B build
+   cmake --build build
    ```
 
 2. Install the extension: Extensions panel → `…` menu →
-   **Install from VSIX…** → select `marina-lsp-0.2.2.vsix`
+   **Install from VSIX…** → select `marina-lsp-0.3.0.vsix`
    (build it with `editors/marina-lsp/build-vsix.sh`).
 
 3. Open any `.tsm` file. If the server is not on your `PATH`, point
-   `marina.serverPath` at the binary. To get the wave icons, pick the
-   *Marina Wave* file icon theme.
+   `marina.serverPath` at the binary (e.g. `build/marina-lsp`). To get the
+   wave icons, pick the *Marina Wave* file icon theme.
 
 ## Building the VSIX
 
 ```
 cd editors/marina-lsp
-./build-vsix.sh   # produces marina-lsp-0.2.2.vsix (uses zip only)
+./build-vsix.sh   # produces marina-lsp-0.3.0.vsix (uses zip only)
 ```

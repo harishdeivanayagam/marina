@@ -90,7 +90,7 @@
         },
         {
           "name": "keyword.declaration.marina",
-          "match": "\\b(let|const|function|async|class|new|public)\\b"
+          "match": "\\b(let|const|function|async|class|interface|new|public|private|protected|static|abstract|override|export|use|extends|implements|get|set|super)\\b"
         },
         {
           "name": "constant.language.boolean.marina",
