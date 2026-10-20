@@ -220,6 +220,9 @@ Span stmt_span(const Stmt& s);
 
 // --- declarations --------------------------------------------------------------
 
+// Kind of a class member that looks like a function.
+enum class MemberKind { Method, Getter, Setter };
+
 struct FnDecl {
     std::string name;
     // Generic type parameters: `function f<T>(...)` declares `["T"]`.
@@ -228,36 +231,66 @@ struct FnDecl {
     std::optional<TyAnn> ret_ann;
     std::vector<Stmt> body;
     bool is_async = false;
+    // `export function` — visible to other modules through `use`.
+    bool exported = false;
+    // Access modifiers on class members.
+    bool is_private = false;
+    bool is_protected = false;
+    bool is_static = false;
+    // `abstract method()` — signature only, no body; a subclass must
+    // provide the implementation.
+    bool is_abstract = false;
+    // `override` modifier: accepted and ignored (overriding is always allowed).
+    bool is_override = false;
+    MemberKind kind = MemberKind::Method;
     Span span;
 };
 
-// `class Name<T> { field: T, ... }` — fields are public by default; `private`
-// restricts access to the class's own methods/constructor.
 struct ClassField {
     std::string name;
     TyAnn ty;
     bool is_private = false;
+    bool is_protected = false;
+    bool is_static = false;
     Span span;
 };
 
-// `class Name { ... }` — fields plus (optionally) a constructor and methods.
-// Methods and the constructor are lowered to top-level functions
-// (`Name__method` with a leading `this` parameter) before checking.
+// `class Name [type_params] [extends Base] [implements I1, I2] { ... }`.
+// `abstract` classes cannot be instantiated and may declare abstract
+// methods. Fields, methods, accessors (get/set) and statics are supported;
+// everything is lowered to top-level functions before checking.
 struct ClassDecl {
     std::string name;
     std::vector<std::string> type_params;
+    std::optional<std::string> base;
+    std::vector<std::string> interfaces;
+    bool is_abstract = false;
     std::vector<ClassField> fields;
     std::optional<FnDecl> ctor;
     std::vector<FnDecl> methods;
+    // `export class` — constructible from other modules as `mod.Name`.
+    bool exported = false;
     Span span;
 };
 
-// `interface Name { field: Type, ... }` — a structural object shape.
-// Values of interface type are any object (ghost or declared class) whose
-// fields include the interface fields with matching types.
+// `name(params): Type` on an interface — a method the conforming class
+// must provide. No body; checked structurally, dispatched by class id.
+struct IfaceMethod {
+    std::string name;
+    std::vector<Param> params;
+    TyAnn ret;
+    Span span;
+};
+
+// `interface Name { field: Type, ..., method(args): Type }` — a structural
+// object shape. Values of interface type are any object (ghost or declared
+// class) whose fields and public methods include the interface's, with
+// matching types.
 struct InterfaceDecl {
     std::string name;
     std::vector<std::pair<std::string, TyAnn>> fields;
+    std::vector<IfaceMethod> methods;
+    bool exported = false;
     Span span;
 };
 
@@ -273,6 +306,12 @@ struct Program {
     // (`sample_mod/sub` → alias `sub`, prefix `sample_mod__sub`). Aliases
     // without an entry mangle to themselves (std modules, registry packages).
     std::vector<std::pair<std::string, std::string>> use_prefixes;
+    // Filled by `resolve_uses` for members that came from another module.
+    // A qualified use (`mod.fn`, `new mod.Class`) of a name that is not in
+    // the exported set is an error.
+    std::vector<std::string> exported_fns;
+    std::vector<std::string> module_classes;
+    std::vector<std::string> exported_classes;
 };
 
 } // namespace marina::ast

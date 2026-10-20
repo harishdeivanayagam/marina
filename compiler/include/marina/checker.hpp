@@ -22,6 +22,7 @@
 #include <optional>
 #include <stdexcept>
 #include <string>
+#include <unordered_map>
 #include <utility>
 #include <variant>
 #include <vector>
@@ -64,8 +65,9 @@ struct CTy {
         // An open TCP stream handle from the `net` std module.
         Stream,
         // An interface type (structural shape). Values are objects whose
-        // fields include the interface's fields with matching types; field
-        // access goes through the runtime by field *name*.
+        // fields and public methods include the interface's, with matching
+        // types. Field access goes through the runtime by field *name*;
+        // method calls dispatch on the object's class id.
         Interface,
     };
 
@@ -103,17 +105,39 @@ CTy cty_interface(std::string name);
 
 // A class (declared or ghost). Fields are ordered; codegen addresses them
 // by index and registers `name\0field1\0field2\0` metadata with the runtime.
+// Declared classes may extend a base class: `fields` is the flattened
+// layout (base fields first), `base` is the base class id.
 struct ClassDef {
     std::string name;
     std::vector<std::pair<std::string, CTy>> fields;
     bool is_ghost = false;
-    // Names of `private` fields (accessible only inside the class's own
-    // methods/constructor).
+    // Declared-class extras.
+    bool is_abstract = false;
+    std::optional<size_t> base;
+    // Own (non-inherited) fields with their access flags.
+    struct OwnField {
+        std::string name;
+        bool priv = false;
+        bool prot = false;
+    };
+    std::vector<OwnField> own_fields;
+    // Names of `private` fields/methods (accessible only inside the
+    // defining class's own methods/constructor).
     std::vector<std::string> private_fields;
+    std::vector<std::string> protected_fields;
+    std::vector<std::string> private_methods;
+    std::vector<std::string> protected_methods;
+    // `static` fields (not inherited into the instance layout).
+    std::vector<std::pair<std::string, CTy>> static_fields;
 
     bool field_is_private(const std::string& n) const {
         for (const auto& f : private_fields)
             if (f == n) return true;
+        return false;
+    }
+    bool method_is_private(const std::string& n) const {
+        for (const auto& m : private_methods)
+            if (m == n) return true;
         return false;
     }
 };
@@ -195,10 +219,16 @@ struct CReturn {
 struct CExprStmt {
     std::shared_ptr<struct CExpr> expr;
 };
+// `Name.staticField = value` — static field write through a global.
+struct CStaticSet {
+    std::string gname;
+    std::shared_ptr<struct CExpr> value;
+    CTy elem;
+};
 
 struct CStmt {
     std::variant<CLet, CAssign, CIf, CWhile, CIndexSet, CFieldSet, CIfaceSet,
-                 CFor, CReturn, CExprStmt>
+                 CStaticSet, CFor, CReturn, CExprStmt>
         v;
     CStmt() : v(CLet{}) {}
 };
@@ -486,6 +516,24 @@ struct CIfaceSetExpr {
     CExprPtr value;
     CTy elem;
 };
+// Static field on a class: `Name.count` (read through a global).
+struct CStaticRef {
+    std::string gname;
+    CTy ty;
+};
+// `Name.staticField = value` — static field write through a global.
+// struct CStaticSet — defined above with the statement node types.
+// `obj.method(args)` where the receiver is interface-typed or the method is
+// virtually dispatched (declared type is a base class / abstract class).
+// Codegen switches on the object's runtime class id and calls the matching
+// implementation.
+struct CIfaceCall {
+    CExprPtr obj;
+    std::string iface;
+    std::string method;
+    std::vector<CExpr> args;
+    CTy ret;
+};
 
 // ---- fs std module ----
 struct CFsReadFile {
@@ -552,11 +600,12 @@ struct CExpr {
                  CBinary, CCallFn, CCallResolver, CAwait, CNewPromise,
                  CConsoleLog, CSetTimeout, CArrayLit, CIndex, CArrayOp,
                  CArrayHof, CLambdaVal, CStrLen, CStrMethod, CFsArgs,
-                 CObjectLit, CNewClass, CNewClassCtor, CFieldGet, CNetConnect,
+                 CObjectLit, CNewClass, CNewClassCtor, CFieldGet, CStaticRef,
+                 CNetConnect,
                  CNetWrite, CNetReadAll, CNetClose, CHttpCall, CHttpListen,
                  CResSend, CHttpNewServer, CHttpRouter, CHttpRouteAdd,
                  CHttpServerListen, CHttpValidatorNew, CHttpFieldNew,
-                 CHttpFieldOp, CHttpValidate, CIfaceGet, CIfaceSetExpr,
+                 CHttpFieldOp, CHttpValidate, CIfaceGet, CIfaceSetExpr, CIfaceCall,
                  CFsReadFile, CFsWriteFile, CFsExists, CFsReadDir, CFsMkdir,
                  CFsRemove, CCryptoSha256, CCryptoBase64, CCryptoRandomHex,
                  CCryptoUuid, CSqlOpen, CSqlExec, CSqlQuery, CSqlClose>
@@ -607,6 +656,9 @@ struct Checked {
     // All classes: declared ones first (in declaration order), then ghost
     // classes in the order their object literals were checked.
     std::vector<ClassDef> classes;
+    // `iface + "\n" + method` → (class id, mangled `Class__method`) for every
+    // public method whose signature matches the interface method.
+    std::unordered_map<std::string, std::vector<std::pair<size_t, std::string>>> iface_impls;
     bool has_async_main = false;
     bool has_sync_main = false;
     // The program called `main()` explicitly at the top level — the runtime

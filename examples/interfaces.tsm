@@ -14,10 +14,32 @@ interface Named {
 // Ghost classes (object literals) conform structurally.
 let p = { x: 1, y: 2, name: "origin" };
 
+// A method on the interface: any conforming class must have a public method
+// with the same name and signature. Calls dispatch on the runtime class.
+interface Titled {
+    title(): string,
+}
+
 // Declared classes conform too: extra fields are allowed.
 class Vehicle {
     name: string,
     wheels: Int32,
+
+    private secret(): string {
+        return "hidden"
+    }
+
+    title(): string {
+        return `${this.secret()}:${this.name}`
+    }
+}
+
+class Place {
+    name: string,
+
+    title(): string {
+        return `place ${this.name}`
+    }
 }
 
 function describe(pt: Point): string {
@@ -26,6 +48,10 @@ function describe(pt: Point): string {
 
 function label(n: Named): string {
     return `called ${n.name}`;
+}
+
+function show(t: Titled): string {
+    return t.title();
 }
 
 function main() {
@@ -45,5 +71,14 @@ function main() {
     let shapes: Array<Named> = [p, q, car];
     for (let i = 0; i < shapes.length; i++) {
         console.log(label(shapes[i]));
+    }
+
+    console.log(show(car));
+    let dock = new Place();
+    dock.name = "harbor";
+    console.log(show(dock));
+    let titled: Array<Titled> = [car, dock];
+    for (let i = 0; i < titled.length; i++) {
+        console.log(show(titled[i]));
     }
 }

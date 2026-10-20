@@ -213,9 +213,11 @@ int32_t cg_tag(CgTy t) {
 // type of an array expression).
 std::optional<CTy> cexpr_cty(const CExpr& e) {
     if (auto* x = std::get_if<CIdent>(&e.v)) return x->ty;
+    if (auto* x = std::get_if<CStaticRef>(&e.v)) return x->ty;
     if (auto* x = std::get_if<CUnary>(&e.v)) return x->ty;
     if (auto* x = std::get_if<CBinary>(&e.v)) return x->ty;
     if (auto* x = std::get_if<CCallFn>(&e.v)) return x->ret;
+    if (auto* x = std::get_if<CIfaceCall>(&e.v)) return x->ret;
     if (auto* x = std::get_if<CCallResolver>(&e.v)) return x->inner;
     if (auto* x = std::get_if<CAwait>(&e.v)) return x->ty;
     if (auto* x = std::get_if<CArrayLit>(&e.v)) return cty_array(x->elem_ty);
@@ -437,6 +439,8 @@ const char* DECLARES =
     "declare void @marina_object_set(ptr, i64, ptr)\n"
     "declare void @marina_object_get_field(ptr, ptr, ptr)\n"
     "declare void @marina_object_set_field(ptr, ptr, ptr)\n"
+    "declare i32 @marina_object_class_id(ptr)\n"
+    "declare void @marina_panic(ptr)\n"
     "declare void @marina_fs_read_file(ptr, ptr)\n"
     "declare void @marina_fs_write_file(ptr, ptr)\n"
     "declare void @marina_fs_exists(ptr, ptr)\n"
@@ -517,6 +521,8 @@ struct Gen {
     bool toplevel_gen = false;
     // var id -> global access (top-level variables)
     std::unordered_map<size_t, Access> toplevel_globals;
+    // Class static fields: gname (`@static.Class__field`) → global access.
+    std::unordered_map<std::string, Access> static_globals;
 
     explicit Gen(const Checked* checked) : c(checked) {
         scopes.emplace_back();
@@ -644,8 +650,22 @@ struct Gen {
         return a;
     }
 
-    std::optional<Access> access_for(size_t id) const {
-        // top-level variables live in globals: lambdas reading or assigning
+    /// Module global backing a class static field; created on first use.
+    /// Safe to call while emitting function bodies: globals are rendered
+    /// after all functions.
+    Access access_for_static(const std::string& gname, CgTy ty) {
+        auto it = static_globals.find(gname);
+        if (it != static_globals.end()) return it->second;
+        globals.push_back(gname + " = global " + cg_mem(ty) + " zeroinitializer");
+        Access a;
+        a.kind = Access::Kind::Global;
+        a.name = gname;
+        a.ty = ty;
+        static_globals.emplace(gname, a);
+        return a;
+    }
+
+    std::optional<Access> access_for(size_t id) const {        // top-level variables live in globals: lambdas reading or assigning
         // them share program state instead of a by-value capture
         {
             auto it = toplevel_globals.find(id);
@@ -1069,6 +1089,18 @@ struct Gen {
                 emit("call void @marina_release(ptr " + old.first + ")");
             }
             store_access(a, v.ir, ty);
+        } else if (auto* st = std::get_if<CStaticSet>(&s.v)) {
+            // class static field write: store into the module global
+            Access a = access_for_static(st->gname, cg_of(st->elem));
+            CgTy ty = a.ty;
+            CgVal v = cg_expr(*st->value);
+            v = coerce_val(v, ty);
+            v = to_owned(v);
+            if (cg_is_ptr(ty)) {
+                auto old = load_access(a);
+                emit("call void @marina_release(ptr " + old.first + ")");
+            }
+            store_access(a, v.ir, ty);
         } else if (auto* st = std::get_if<CIndexSet>(&s.v)) {
             std::optional<Access> aa = access_for(st->id);
             if (!aa) cg_unreachable("unresolved variable in codegen");
@@ -1388,6 +1420,111 @@ struct Gen {
     // ------------------------------------------------------------------
     // Expressions
     // ------------------------------------------------------------------
+
+    // `obj.method(args)` on an interface value: switch on the runtime class
+    // id and call the matching `Class__method`. The receiver and arguments
+    // are evaluated once; each arm retains pointer arguments for the call.
+    CgVal cg_iface_call(const CIfaceCall& x) {
+        CgVal obj = cg_expr(*x.obj);
+        std::vector<CgVal> args;
+        args.reserve(x.args.size());
+        for (const auto& a : x.args) args.push_back(cg_expr(a));
+
+        CgTy rty = cg_of(x.ret);
+        std::string slot;
+        if (rty != CgTy::Void) slot = alloca(std::string(cg_mem(rty)));
+
+        std::string cid = fresh("cid");
+        emit(cid + " = call i32 @marina_object_class_id(ptr " + obj.ir + ")");
+
+        auto iit = c->iface_impls.find(x.iface + "\n" + x.method);
+        const std::vector<std::pair<size_t, std::string>> empty;
+        const auto& impls = iit != c->iface_impls.end() ? iit->second : empty;
+
+        size_t miss = new_block("iface.miss");
+        size_t join = new_block("iface.join");
+        std::vector<size_t> arms;
+        arms.reserve(impls.size());
+        for (size_t i = 0; i < impls.size(); ++i) arms.push_back(new_block("iface.arm"));
+
+        if (impls.empty()) {
+            term("br label %" + label_of(miss));
+        } else {
+            std::string sw = "switch i32 " + cid + ", label %" + label_of(miss) + " [";
+            for (size_t i = 0; i < impls.size(); ++i) {
+                sw += " i32 " + num(impls[i].first) + ", label %" + label_of(arms[i]);
+            }
+            sw += " ]";
+            term(sw);
+        }
+
+        for (size_t i = 0; i < impls.size(); ++i) {
+            switch_block(arms[i]);
+            auto sit = fn_sigs.find(impls[i].second);
+            if (sit == fn_sigs.end()) cg_unreachable("missing iface method " + impls[i].second);
+            const Sig& sig = sit->second;
+            auto pass = [&](CgVal v, CgTy pt) {
+                v.owned = false;
+                v = coerce_val(v, pt);
+                v = to_owned(v);
+                return std::string(cg_ir(pt)) + " " + v.ir;
+            };
+            std::vector<std::string> call_args;
+            CgTy self_ty = sig.params.empty() ? CgTy::Object : sig.params[0];
+            call_args.push_back(pass(obj, self_ty));
+            for (size_t ai = 0; ai < args.size(); ++ai) {
+                CgTy pt = ai + 1 < sig.params.size() ? sig.params[ai + 1] : rty;
+                call_args.push_back(pass(args[ai], pt));
+            }
+            std::string joined = call_args.empty() ? std::string() : call_args[0];
+            for (size_t ai = 1; ai < call_args.size(); ++ai) joined += ", " + call_args[ai];
+            if (rty == CgTy::Void) {
+                emit("call void @fn." + impls[i].second + "(" + joined + ")");
+            } else {
+                std::string r = fresh("im");
+                emit(r + " = call " + std::string(cg_ir(rty)) + " @fn." + impls[i].second + "(" +
+                     joined + ")");
+                if (rty == CgTy::Bool) {
+                    std::string z = fresh("iz");
+                    emit(z + " = zext i1 " + r + " to i8");
+                    emit("store i8 " + z + ", ptr " + slot);
+                } else {
+                    emit("store " + std::string(cg_ir(rty)) + " " + r + ", ptr " + slot);
+                }
+            }
+            branch_to(join);
+        }
+
+        switch_block(miss);
+        std::string msg = "interface '" + x.iface + "' method '" + x.method +
+                          "' has no implementation for this object";
+        msg.push_back('\0');
+        ++tmp;
+        std::string gname = "@.ifacepanic." + num(tmp);
+        globals.push_back(gname + " = private unnamed_addr constant [" + num(msg.size()) +
+                          " x i8] c\"" + escape_ir_string(msg) + "\", align 1");
+        emit("call void @marina_panic(ptr " + gname + ")");
+        term("unreachable");
+
+        switch_block(join);
+        auto release_now = [&](const CgVal& v) {
+            if (v.owned && cg_is_ptr(v.ty))
+                emit("call void @marina_release(ptr " + v.ir + ")");
+        };
+        release_now(obj);
+        for (const auto& a : args) release_now(a);
+
+        if (rty == CgTy::Void) return CgVal{CgTy::Void, std::string(), false};
+        std::string ld = fresh("il");
+        if (rty == CgTy::Bool) {
+            emit(ld + " = load i8, ptr " + slot);
+            std::string t = fresh("ib");
+            emit(t + " = trunc i8 " + ld + " to i1");
+            return CgVal{CgTy::Bool, t, false};
+        }
+        emit(ld + " = load " + std::string(cg_ir(rty)) + ", ptr " + slot);
+        return CgVal{rty, ld, cg_is_ptr(rty)};
+    }
 
     CgVal cg_expr(const CExpr& e) {
         if (auto* x = std::get_if<CInt>(&e.v)) {
@@ -2112,6 +2249,12 @@ struct Gen {
             discard(o);
             return v;
         }
+        if (auto* x = std::get_if<CStaticRef>(&e.v)) {
+            // class static field: a module global created on first use
+            Access a = access_for_static(x->gname, cg_of(x->ty));
+            auto v = load_access(a);
+            return CgVal{cg_of(x->ty), v.first, false};
+        }
         if (auto* x = std::get_if<CIfaceGet>(&e.v)) {
             // interface-typed values resolve fields by name at runtime
             CgVal o = cg_expr(*x->obj);
@@ -2129,6 +2272,9 @@ struct Gen {
         if (std::get_if<CIfaceSetExpr>(&e.v)) {
             // never generated (interface writes are statements); keeps the match exhaustive
             return CgVal{CgTy::Void, std::string(), false};
+        }
+        if (auto* x = std::get_if<CIfaceCall>(&e.v)) {
+            return cg_iface_call(*x);
         }
         if (auto* x = std::get_if<CFsReadFile>(&e.v)) {
             CgVal p = cg_expr(*x->path);

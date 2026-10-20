@@ -1,9 +1,5 @@
 <p align="center">
-  <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="assets/logo-dark.svg">
-    <source media="(prefers-color-scheme: light)" srcset="assets/logo-light.svg">
-    <img src="assets/logo-light.svg" alt="Marina" width="280">
-  </picture>
+  <img src="assets/logo.svg" alt="Marina" width="160">
 </p>
 <p align="center"><em>a strictly-typed, AOT-compiled TypeScript subset</em></p>
 
@@ -29,6 +25,41 @@ marina/
 ├── editors/                   # "marina-lsp" VSIX extension for Cursor/VS Code
 └── CMakeLists.txt             # CMake build (C++20)
 ```
+
+## Install
+
+The installer clones [marina-lang-hq/marina](https://github.com/marina-lang-hq/marina), builds `wave` and `marina-lsp`, and links them into `~/.local/bin`. The source tree stays at `~/.marina/src` because `wave` links its runtime from that checkout.
+
+You need git, CMake ≥ 3.20, a C++20 compiler, `clang`, and `libsqlite3`.
+
+macOS:
+
+```sh
+xcode-select --install
+brew install cmake
+```
+
+Linux (Debian / Ubuntu):
+
+```sh
+sudo apt install build-essential cmake clang libsqlite3-dev git curl
+```
+
+### macOS and Linux
+
+```sh
+curl -fsSL https://marina-lang.org/install.sh | sh
+```
+
+### Windows
+
+Native Windows is not supported (the compiler and runtime use POSIX). The PowerShell installer builds Marina inside WSL. Install WSL once (`wsl --install`), then:
+
+```powershell
+irm https://marina-lang.org/install.ps1 | iex
+```
+
+After that, `wave` lives in the Linux distro. Run it with `wsl wave`.
 
 ## Requirements
 
@@ -87,7 +118,7 @@ Projects are described by a **`package.json`** in the project root:
 }
 ```
 
-**The registry model** — like Rust's crates.io, not node_modules. Packages are installed *once* into a global registry (default `~/.wave/registry/<name>/<version>/main.tsm`, override with the `WAVE_REGISTRY` env var) and every project on the machine uses that copy. There is no per-project dependency folder to commit or vendor. A package is a directory (or git repo) with a `main.tsm` entry file and optional `package.json` metadata (`name`, `version`); `wave add` copies it into the registry and records the dependency. In code, `use my-pkg` merges the package's functions into your program behind a namespace: `my-pkg.fn(...)` calls the package's `fn`. Packages expose functions and classes only — no top-level statements, no `main`, and no dependencies on other packages yet (std modules `net`/`http`/`fs`/`crypto`/`sql` are allowed).
+**The registry model** — like Rust's crates.io, not node_modules. Packages are installed *once* into a global registry (default `~/.wave/registry/<name>/<version>/main.tsm`, override with the `WAVE_REGISTRY` env var) and every project on the machine uses that copy. There is no per-project dependency folder to commit or vendor. A package is a directory (or git repo) with a `main.tsm` entry file and optional `package.json` metadata (`name`, `version`); `wave add` copies it into the registry and records the dependency. In code, `use my-pkg` merges the package behind a namespace: `my-pkg.fn(...)` calls an `export`ed function. A function or class without `export` is not visible to other modules (`no exported member 'fn' from module 'my-pkg'`). Packages expose functions and classes only — no top-level statements, no `main`, and no dependencies on other packages yet (std modules `net`/`http`/`fs`/`crypto`/`sql` are allowed).
 
 ### One-off files
 
@@ -236,7 +267,7 @@ console.log(abc)     // Class_abc_0001 { a: 5, b: 10, c: Test }
 
 This is "JSON objects are automatic objects": no class definition is needed, and the shape is still fully static — accessing `abc.d` is a compile-time error, and every field has one concrete type.
 
-**Declared classes** — `class` defines a named shape (fields are public by default; the `public` modifier is accepted and optional). Instantiate with `new Name()`:
+**Declared classes** — `class` defines a named shape. Fields and methods are public by default; `public` is optional and `private` restricts a field or method to the class's own methods and constructor. Instantiate with `new Name()`:
 
 ```ts
 class Point {
@@ -262,7 +293,63 @@ Field rules (all strict, compile-time):
 - Reading or writing an unknown field is an error that lists the available fields
 - Fields are addressed by index in the generated code; the runtime bounds-checks anyway
 - Objects can be nested (`{ pos: { x: 1, y: 2 } }`), stored in arrays (`Array<Point>`), captured by lambdas, and printed by `console.log` (which shows the class name and every field)
-- Objects have **no methods** — they are pure data (fields only)
+- Declared classes may have methods (`name(params) { ... }`), lowered to `Class__method(this, ...)`. `private` methods can only be called from inside the class
+
+### Inheritance & TypeScript-style OOP
+
+Classes support the full TypeScript OOP surface: single inheritance, abstract classes, access modifiers, statics, accessors and `super`.
+
+```ts
+interface Describable {
+    describe(): string,
+}
+
+abstract class Shape {
+    protected originX: Float64      // visible here and in subclasses
+    static created: Int32           // static field (shared, not per-object)
+
+    constructor(originX: Float64) {
+        this.originX = originX
+        Shape.created = Shape.created + 1
+    }
+
+    abstract area(): Float64;       // subclasses must implement
+
+    describe(): string {            // virtual — overridden methods dispatch
+        return `area ${this.area()}`
+    }
+
+    get origin(): string {          // getter: `s.origin`
+        return `(${this.originX}, 0)`
+    }
+}
+
+class Circle extends Shape implements Describable {
+    radius: Float64
+
+    constructor(x: Float64, radius: Float64) {
+        super(x)                    // base constructor call
+        this.radius = radius
+    }
+
+    area(): Float64 { return 3.14 * this.radius * this.radius }
+
+    override describe(): string {
+        return `circle: ${super.describe()}`
+    }
+}
+```
+
+Semantics:
+- **Inheritance** — `class Sub extends Base`: flattened field layout (base fields first), inherited fields/methods/statics are callable on the subclass, and a subclass value is accepted wherever the base is expected (assignment, parameters, `Array<Base>`)
+- **Virtual dispatch** — calls on an abstract receiver or an overridden method dispatch on the runtime class id, so `Array<Shape>` polymorphism works with zero runtime overhead for non-virtual calls
+- **Abstract classes** — `abstract class` cannot be instantiated (`new Shape()` is an error); `abstract` methods have a signature only and must be implemented by concrete subclasses
+- **Visibility** — `private` members are usable only inside the defining class; `protected` also inside subclasses; anything else is a compile-time error
+- **Statics** — `static` fields/methods/getters belong to the class (`Shape.created`, `Shape.total`), are inherited, and are stored as module globals
+- **Getters/setters** — `get x()` / `set x(v)` read and write like fields: `obj.x = v` calls the setter, `obj.x` the getter
+- **`super`** — `super(args)` calls the base constructor (required in a subclass constructor when the base declares one); `super.method(args)` calls the base implementation directly
+- **`implements`** — `class Sub implements I1, I2` verifies the interfaces' fields and methods (inherited implementations count) at compile time
+
 
 ### Generics
 
@@ -321,7 +408,7 @@ describe(p)
 describe(car)                            // ok: has `name` (plus more)
 ```
 
-Interfaces are **data-only** (no methods, no implementations) and are erased at runtime: a value of interface type is just its underlying object, and field access is resolved **by name** through the runtime (`marina_object_get_field`), so the same code works on any conforming shape. Interfaces can also be used as array element types (`Array<Named>` collects values of different concrete shapes).
+An interface may also declare methods, TypeScript-style (`title(): string` — a signature, no body). A class conforms only when it has a public method with the same name and the same parameter and return types. Calling a method on an interface value dispatches to that class's method. Field access is still resolved **by name** through the runtime (`marina_object_get_field`). Interfaces can also be used as array element types (`Array<Named>` collects values of different concrete shapes).
 
 ### Naming conventions (strict)
 
@@ -597,7 +684,9 @@ Marina ships its own language server (`marina-lsp`, in `compiler/lsp/main.cpp`) 
 | `examples/http-get.tsm` | `use http` client: `http.get`, reading `resp.status`/`resp.body` (start the todo server first) |
 | `examples/tcp-client.tsm` | `use net`: `net.connect`, `stream.write`/`read_all`/`close` (run against `nc -l 8080`) |
 | `examples/generics.tsm` | generic functions with inferred and explicit type arguments, generic `class Box<T>` |
-| `examples/interfaces.tsm` | structural interfaces: object literals and declared classes conforming, `Array<Named>`, field access resolved by name at runtime |
+| `examples/interfaces.tsm` | structural interfaces: fields, methods dispatched by class, `Array<Named>`, private methods |
+| `examples/inheritance.tsm` | TypeScript-style OOP: `extends`, `implements`, abstract classes/methods, virtual dispatch through `Array<Shape>`, `protected`, statics, getters, `super` |
+| `examples/oop-all.tsm` | full OOP sweep: two-level inheritance with `super.method()`, abstract members implemented (and inherited), `get`/`set` pairs, statics + static getters, interfaces satisfied by inheritance, polymorphic factory functions |
 | `examples/fs-crypto.tsm` | `use fs` (write/read/exists/mkdir/readDir/remove) and `use crypto` (sha256, base64, randomHex, uuid) |
 | `examples/todos-http-sqlite.tsm` | `use sql`: `new sql.Connection`, `sql.stmt\`...\`` prepared statements, `db.execute`/`db.query`, typed rows via interfaces — a persistent todo REST API on SQLite (try `curl localhost:8080/todos`) |
 
@@ -608,8 +697,8 @@ Marina ships its own language server (`marina-lsp`, in `compiler/lsp/main.cpp`) 
 - http: `http://` URLs only (no TLS/https), sequential request handling on the server (one connection at a time), no request headers, no streaming responses; one HTTP server per program; the express-style API supports `get`/`post` routes only
 - Schema validation (`JsonValidator.validate`) aborts the program with a runtime panic on an invalid body (no per-request error responses yet)
 - net reads time out after 30 seconds
-- Classes are data-only: no methods, constructors, inheritance, or access modifiers (`public` is accepted and ignored)
-- Interfaces are data-only structural contracts (no methods/default implementations); interfaces cannot appear as class fields through `Array<Interface>`/`Promise<Interface>` annotations yet
+- Classes have no multiple inheritance and no method overloading (interface methods must match exactly; no default implementations); an interface field cannot be an `Array` or `Promise`
+- Interfaces cannot appear as class fields through `Array<Interface>`/`Promise<Interface>` annotations yet
 - Generic recursion requires an annotated return type (or an explicit type argument at the recursive call); no generic constraints/bounds on type parameters
 - No `break`/`continue` inside loops
 - `await` is only allowed at the top level of an `async function` body (not inside `if`/`while`/`for`)

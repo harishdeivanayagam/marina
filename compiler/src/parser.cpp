@@ -88,24 +88,50 @@ private:
         Program prog;
         for (;;) {
             if (is_eof(peek())) break;
+            bool exported = false;
+            if (auto* w = std::get_if<TIdent>(&peek()); w && w->name == "export") {
+                bool decl = is_kw(peek_at(1), Kw::Function) || is_kw(peek_at(1), Kw::Async) ||
+                            is_kw(peek_at(1), Kw::Class) || is_kw(peek_at(1), Kw::Interface) ||
+                            (std::get_if<TIdent>(&peek_at(1)) &&
+                             std::get<TIdent>(peek_at(1)).name == "abstract");
+                if (!decl) {
+                    return error<Program>(
+                        "export must precede a function, class, or interface");
+                }
+                bump();
+                exported = true;
+            }
+            bool abstract_class = false;
+            if (auto* w = std::get_if<TIdent>(&peek()); w && w->name == "abstract" &&
+                                                       is_kw(peek_at(1), Kw::Class)) {
+                bump();
+                abstract_class = true;
+            }
             if (is_kw(peek(), Kw::Function) || is_kw(peek(), Kw::Async)) {
-                prog.fns.push_back(fn_decl());
+                FnDecl f = fn_decl();
+                f.exported = exported;
+                prog.fns.push_back(std::move(f));
             } else if (is_kw(peek(), Kw::Class)) {
-                prog.classes.push_back(class_decl());
+                ClassDecl c = class_decl();
+                c.exported = exported;
+                c.is_abstract = c.is_abstract || abstract_class;
+                prog.classes.push_back(std::move(c));
             } else if (is_kw(peek(), Kw::Interface)) {
-                prog.interfaces.push_back(interface_decl());
+                InterfaceDecl it = interface_decl();
+                it.exported = exported;
+                prog.interfaces.push_back(std::move(it));
             } else if (is_kw(peek(), Kw::Use)) {
+                if (exported) {
+                    return error<Program>("export must precede a function, class, or interface");
+                }
                 prog.uses.push_back(use_decl());
             } else if (is_kw(peek(), Kw::Import)) {
                 return error<Program>(
                     "`import` statements are not supported — declare modules with `use <module>`");
-            } else if (auto* w = std::get_if<TIdent>(&peek());
-                       w && w->name == "export" &&
-                       (is_kw(peek_at(1), Kw::Class) || is_kw(peek_at(1), Kw::Function) ||
-                        is_kw(peek_at(1), Kw::Async))) {
-                bump(); // `export` before a declaration is accepted and ignored
-                        // (module publishing comes later)
             } else {
+                if (exported) {
+                    return error<Program>("export must precede a function, class, or interface");
+                }
                 prog.stmts.push_back(stmt());
             }
         }
@@ -130,23 +156,35 @@ private:
         return {full, sp};
     }
 
-    // `interface Name { field: Type, ... }` — a structural object shape.
+    // `interface Name { field: Type, ..., method(params): Type }` — a
+    // structural object shape. Methods are signatures only (no body).
     InterfaceDecl interface_decl() {
         Span sp = span();
         bump(); // interface
         auto name = expect_ident();
         expect_punct(P::LBrace, "{");
         std::vector<std::pair<std::string, TyAnn>> fields;
+        std::vector<IfaceMethod> methods;
         std::set<std::string> seen;
         while (!is_p(peek(), P::RBrace)) {
             if (is_eof(peek()))
                 error<int>("expected '}' before end of file");
             auto fname = expect_ident();
-            expect_punct(P::Colon, ":");
-            TyAnn ann = ty_ann();
             if (!seen.insert(fname.first).second)
-                error<int>("duplicate field in interface");
-            fields.emplace_back(fname.first, std::move(ann));
+                error<int>("duplicate member '" + fname.first + "' in interface");
+            if (is_p(peek(), P::LParen)) {
+                IfaceMethod m;
+                m.span = fname.second;
+                m.name = fname.first;
+                m.params = param_list();
+                expect_punct(P::Colon, ":");
+                m.ret = ty_ann();
+                methods.push_back(std::move(m));
+            } else {
+                expect_punct(P::Colon, ":");
+                TyAnn ann = ty_ann();
+                fields.emplace_back(fname.first, std::move(ann));
+            }
             if (!eat_punct(P::Comma) && !is_p(peek(), P::RBrace)) {
                 expect_punct(P::Semi, ";");
             }
@@ -155,69 +193,155 @@ private:
         InterfaceDecl d;
         d.name = name.first;
         d.fields = std::move(fields);
+        d.methods = std::move(methods);
         d.span = sp;
         return d;
     }
 
-    // `class Name { field: Type, ... }` — an optional `public` modifier is
-    // accepted before each field (all fields are public in marina).
+    // `class Name [extends Base] [implements I1, I2] { members }`. Members:
+    // fields (`[modifiers] name: Type`), methods, `get`/`set` accessors and
+    // `static` members, with `public` (default) / `private` / `protected`
+    // access. `abstract` classes and methods are supported.
     ClassDecl class_decl() {
         Span sp = span();
         bump(); // class
         auto name = expect_ident();
         auto type_params = type_param_list();
+        std::optional<std::string> base;
+        std::vector<std::string> interfaces;
+        auto modifier_word = [&]() -> const std::string* {
+            if (auto* w = std::get_if<TIdent>(&peek())) return &w->name;
+            return nullptr;
+        };
+        if (auto* w = modifier_word(); w && *w == "extends") {
+            bump();
+            base = expect_ident().first;
+        }
+        if (auto* w = modifier_word(); w && *w == "implements") {
+            bump();
+            for (;;) {
+                interfaces.push_back(expect_ident().first);
+                if (!eat_punct(P::Comma)) break;
+            }
+        }
         expect_punct(P::LBrace, "{");
         std::vector<ClassField> fields;
         std::optional<FnDecl> ctor;
         std::vector<FnDecl> methods;
+        std::set<std::string> seen;
         while (!is_p(peek(), P::RBrace)) {
             if (is_eof(peek()))
                 error<int>("expected '}' before end of file");
-            // access modifiers: `public` (accepted and ignored) / `private`
-            bool is_private = false;
-            if (auto* w = std::get_if<TIdent>(&peek())) {
-                if (w->name == "public") {
-                    bump();
-                } else if (w->name == "private") {
-                    is_private = true;
-                    bump();
-                }
+            // modifiers: `public` (default) / `private` / `protected` /
+            // `static` / `abstract` / `override` (accepted and ignored)
+            bool is_private = false, is_protected = false, is_static = false,
+                 is_abstract_m = false;
+            for (;;) {
+                auto* w = modifier_word();
+                if (!w) break;
+                if (*w == "public") bump();
+                else if (*w == "private") { is_private = true; bump(); }
+                else if (*w == "protected") { is_protected = true; bump(); }
+                else if (*w == "static") { is_static = true; bump(); }
+                else if (*w == "abstract") { is_abstract_m = true; bump(); }
+                else if (*w == "override") bump(); // accepted and ignored
+                else break;
+            }
+            if (is_private && is_protected)
+                error<int>("a member cannot be both private and protected");
+            // accessors: `get name()` / `set name(v)`
+            bool is_getter = false, is_setter = false;
+            if (auto* w = std::get_if<TIdent>(&peek());
+                w && (w->name == "get" || w->name == "set") &&
+                std::get_if<TIdent>(&peek_at(1)) && is_p(peek_at(2), P::LParen)) {
+                is_getter = w->name == "get";
+                is_setter = w->name == "set";
+                bump();
             }
             auto fname = expect_ident();
+            // a `get x` / `set x` pair may share a name (TypeScript
+            // accessors); anything else with a name already taken is a
+            // duplicate. Accessors are keyed so the opposite accessor is
+            // allowed but plain members still clash.
+            bool dup;
+            if (is_getter) {
+                dup = seen.count("\x01get:" + fname.first) != 0 ||
+                      seen.count(fname.first) != 0;
+            } else if (is_setter) {
+                dup = seen.count("\x01set:" + fname.first) != 0 ||
+                      seen.count(fname.first) != 0;
+            } else {
+                dup = seen.count(fname.first) != 0 ||
+                      seen.count("\x01get:" + fname.first) != 0 ||
+                      seen.count("\x01set:" + fname.first) != 0;
+            }
+            if (dup)
+                error<int>("duplicate member '" + fname.first + "' in class '" + name.first + "'");
+            if (is_getter) seen.insert("\x01get:" + fname.first);
+            else if (is_setter) seen.insert("\x01set:" + fname.first);
+            else seen.insert(fname.first);
+            if ((is_getter || is_setter) && is_abstract_m)
+                error<int>("abstract accessors are not supported");
             // method / constructor: `name(params) { ... }` (no `async`)
             if (is_p(peek(), P::LParen)) {
+                if ((is_private || is_protected || is_static) && fname.first == "constructor")
+                    error<int>("constructors cannot be private, protected, or static");
                 FnDecl m;
                 m.span = span();
                 m.name = fname.first;
-                m.params = param_list();
-                if (is_p(peek(), P::Colon)) {
-                    bump();
-                    m.ret_ann = ty_ann();
-                }
-                m.body = block();
+                m.is_private = is_private;
+                m.is_protected = is_protected;
+                m.is_static = is_static;
+                m.is_abstract = is_abstract_m;
+                m.kind = is_getter ? MemberKind::Getter
+                         : is_setter ? MemberKind::Setter
+                                     : MemberKind::Method;
                 if (fname.first == "constructor") {
+                    if (is_abstract_m) error<int>("constructors cannot be abstract");
+                    m.params = param_list();
+                    if (is_p(peek(), P::Colon)) {
+                        bump();
+                        m.ret_ann = ty_ann();
+                    }
+                    m.body = block();
                     if (ctor) {
                         // merge nothing: a second ctor body is an error
                         error<int>("class '" + name.first +
                                    "' has more than one constructor");
                     }
                     ctor = std::move(m);
-                } else {
-                    for (const auto& ex : methods) {
-                        if (ex.name == fname.first) {
-                            error<int>("duplicate method '" + fname.first +
-                                       "' in class '" + name.first + "'");
-                        }
-                    }
-                    methods.push_back(std::move(m));
+                    continue;
                 }
+                m.params = param_list();
+                if (is_getter || is_p(peek(), P::Colon)) {
+                    if (is_setter)
+                        error<int>("a setter takes a parameter and has no return type");
+                    bump();
+                    m.ret_ann = ty_ann();
+                } else if (!is_abstract_m && !is_setter) {
+                    error<int>("method '" + fname.first + "' needs a return type annotation " +
+                               "(strict mode)");
+                }
+                if (is_abstract_m) {
+                    // signature only; a subclass must implement it
+                    if (!eat_punct(P::Comma) && !is_p(peek(), P::RBrace)) {
+                        expect_punct(P::Semi, ";");
+                    }
+                } else {
+                    m.body = block();
+                }
+                methods.push_back(std::move(m));
                 continue;
             }
-            // field: `name: Type` (optional `,`/`;`)
+            // field: `[modifiers] name: Type` (optional `,`/`;`)
+            if (is_abstract_m)
+                error<int>("fields cannot be abstract (use an abstract method)");
             expect_punct(P::Colon, ":");
             ClassField f;
             f.name = fname.first;
             f.is_private = is_private;
+            f.is_protected = is_protected;
+            f.is_static = is_static;
             f.ty = ty_ann();
             f.span = fname.second;
             fields.push_back(std::move(f));
@@ -228,6 +352,8 @@ private:
         ClassDecl d;
         d.name = name.first;
         d.type_params = std::move(type_params);
+        d.base = std::move(base);
+        d.interfaces = std::move(interfaces);
         d.fields = std::move(fields);
         d.ctor = std::move(ctor);
         d.methods = std::move(methods);
