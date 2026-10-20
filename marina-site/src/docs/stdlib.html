@@ -26,10 +26,10 @@ description: Marina's built-in globals (console, setTimeout, Promise) and the st
     <p>Two kinds of library ship with the language:</p>
     <ul>
       <li><strong>Built-in globals</strong> — <code>console</code>, <code>setTimeout</code> and <code>Promise</code> are always available, no import needed.</li>
-      <li><strong>Std modules</strong> — <code>net</code>, <code>http</code>, <code>fs</code>, <code>crypto</code> and <code>sql</code> are brought in with a top-level <code>use</code> statement (the JS-style <code>import</code> is not supported):</li>
+      <li><strong>Std modules</strong> — <code>net</code>, <code>http</code>, <code>fs</code>, <code>crypto</code> and <code>sql</code> are brought in with a top-level <code>import</code> statement:</li>
     </ul>
-<pre><code><span class="k">use</span> http
-<span class="k">use</span> crypto</code></pre>
+<pre><code><span class="k">import</span> http
+<span class="k">import</span> crypto</code></pre>
     <p>Every std function has a synchronous form and an <code>async</code> form that returns a promise — <code>fs.readFile(path)</code> blocks, <code>await fs.readFile(path)</code> runs on the event loop's worker pool. Blocking I/O errors panic with the operation and OS error text.</p>
 
     <h2 id="globals">Built-in globals</h2>
@@ -59,7 +59,7 @@ description: Marina's built-in globals (console, setTimeout, Promise) and the st
       <tr><td><code>stream.close()</code></td><td>Close the stream. Unclosed streams are closed when the process exits.</td></tr>
     </table>
     <p>All four operations (<code>connect</code> included) have async variants. I/O errors panic.</p>
-<pre><code><span class="k">use</span> net
+<pre><code><span class="k">import</span> net
 
 <span class="k">async function</span> <span class="f">main</span>() {
     <span class="k">let</span> stream = <span class="k">await</span> <span class="f">net</span>.connect(<span class="s">"example.com"</span>, <span class="n">80</span>)
@@ -106,7 +106,7 @@ description: Marina's built-in globals (console, setTimeout, Promise) and the st
       <tr><td><code>fs.remove(path)</code></td><td>Remove a file or directory (recursive for dirs).</td></tr>
     </table>
     <p>Every function except <code>args</code> also has an async variant. Errors panic with <code>fs.&lt;op&gt; '&lt;path&gt;': &lt;os error&gt;</code>.</p>
-<pre><code><span class="k">use</span> fs
+<pre><code><span class="k">import</span> fs
 
 <span class="k">async function</span> <span class="f">main</span>() {
     <span class="k">await</span> <span class="f">fs</span>.writeFile(<span class="s">"notes.txt"</span>, <span class="s">"hello"</span>)
@@ -126,7 +126,7 @@ description: Marina's built-in globals (console, setTimeout, Promise) and the st
       <tr><td><code>crypto.randomHex(numBytes)</code></td><td>Cryptographically random bytes from <code>/dev/urandom</code> as lowercase hex (clamped to 0–4096 bytes).</td></tr>
       <tr><td><code>crypto.uuid()</code></td><td>Random UUID v4.</td></tr>
     </table>
-<pre><code><span class="k">use</span> crypto
+<pre><code><span class="k">import</span> crypto
 
 <span class="f">console</span>.log(<span class="f">crypto</span>.sha256(<span class="s">"marina"</span>))
 <span class="f">console</span>.log(<span class="f">crypto</span>.base64Encode(<span class="s">"marina"</span>))
@@ -141,7 +141,7 @@ description: Marina's built-in globals (console, setTimeout, Promise) and the st
       <tr><td><code>db.query(stmt)</code></td><td>Collect rows as objects whose fields are the column names (<code>Array&lt;Row&gt;</code>).</td></tr>
       <tr><td><code>db.close()</code></td><td>Close the connection.</td></tr>
     </table>
-<pre><code><span class="k">use</span> sql
+<pre><code><span class="k">import</span> sql
 
 <span class="k">async function</span> <span class="f">main</span>() {
     <span class="k">let</span> db = <span class="k">new</span> <span class="t">sql</span>.Connection(<span class="s">"sqlite"</span>, <span class="s">"app.db"</span>)

@@ -55,8 +55,8 @@ $ wave remove p
 <span class="c"># verify the manifest + type check the entry point</span>
 $ wave check</code></pre>
     <p>Example: a project using two packages — one from disk, one from git:</p>
-<pre><code><span class="k">use</span> sample_mod
-<span class="k">use</span> sample_mod_another
+<pre><code><span class="k">import</span> sample_mod
+<span class="k">import</span> sample_mod_another
 
 <span class="k">async function</span> <span class="f">main</span>() {
     <span class="k">let</span> calc = <span class="k">new</span> sample_mod.<span class="t">Calc</span>(<span class="n">10</span>, <span class="n">20</span>)
@@ -67,7 +67,7 @@ $ wave check</code></pre>
 }</code></pre>
 
     <h2 id="using">Using packages in code</h2>
-    <p>In code, <code>use my-pkg</code> merges the package behind a <strong>namespace</strong>: <code>my-pkg.fn(...)</code> calls the package's <code>fn</code>. Only declarations marked <code>export</code> are visible. Using anything else is a compile error: <code>no exported member 'fn' from module 'my-pkg'</code>. Module-qualified constructors work too — <code>new sample_mod.Calc(10, 20)</code> — including nested namespaces like <code>sample_mod.sub.sub(10, 20)</code>.</p>
+    <p>In code, <code>import my-pkg</code> merges the package behind a <strong>namespace</strong>: <code>my-pkg.fn(...)</code> calls the package's <code>fn</code>. Only declarations marked <code>export</code> are visible. Using anything else is a compile error: <code>no exported member 'fn' from module 'my-pkg'</code>. Module-qualified constructors work too — <code>new sample_mod.Calc(10, 20)</code> — including nested namespaces like <code>sample_mod.sub.sub(10, 20)</code>.</p>
 
     <h2 id="authoring">Authoring a package</h2>
     <p>A package is a directory with a <code>main.tsm</code> entry file:</p>
