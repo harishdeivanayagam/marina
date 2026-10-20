@@ -1,0 +1,58 @@
+// try / catch / throw — exceptions are caught by message (a `string`).
+// Runtime panics (array index out of bounds, fs errors, ...) are catchable
+// too; an uncaught exception still exits with code 101.
+
+// 1. throwing and catching
+try {
+    console.log("before the throw")
+    throw "something went wrong"
+    console.log("never printed")
+} catch (err) {
+    console.log(`caught: ${err}`)
+}
+
+// 2. runtime panics are catchable
+let numbers = [1, 2, 3]
+try {
+    console.log(numbers[10])
+} catch (err) {
+    console.log(`caught: ${err}`)
+}
+
+// 3. the catch binding is a normal string variable
+try {
+    throw "boom"
+} catch (err) {
+    let upper = `${err}!`
+    console.log(upper)
+}
+
+// 4. exceptions propagate across function calls to the nearest catch
+function risky() {
+    throw "from risky"
+}
+function caller() {
+    risky()
+}
+try {
+    caller()
+} catch (err) {
+    console.log(`caught: ${err}`)
+}
+
+// 5. `return` inside a try unwinds the handler correctly
+function earlyExit(): Int32 {
+    try {
+        return 42
+    } catch (err) {
+        console.log("not reached")
+    }
+    return 0
+}
+console.log(earlyExit())
+
+// 6. a throw with no enclosing catch exits the program (commented out —
+// uncomment to see `uncaught exception: kaboom`)
+// throw "kaboom"
+
+console.log("done")

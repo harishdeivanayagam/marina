@@ -1,5 +1,5 @@
-use sample_mod
-use sample_mod_another/sub_another
+import sample_mod
+import sample_mod_another/sub_another
 
 async function main() {
     let calc = new sample_mod.Calc(10, 20)

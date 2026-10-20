@@ -1,5 +1,5 @@
-use http
-use sql
+import http
+import sql
 
 const DB_PATH = "/tmp/todos-http-sqlite.db"
 const PORT = 8080

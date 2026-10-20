@@ -1,0 +1,112 @@
+// map — the Marina std key/value store, implemented in Marina itself.
+//
+//     import map
+//
+//     let m = map.newMap<string>()
+//     m.set("a", "hello")
+//     console.log(m.get("a"))
+//
+// A Map<V> is a string-keyed dictionary: `keys` and `vals` are parallel
+// arrays kept in sync, so lookup is a linear scan (fine for the small
+// collections this targets). Values are any one type V; keys are strings.
+// Every distinct V produces its own specialized copy of the code, exactly
+// like generic functions — zero runtime overhead.
+//
+// Missing-key behavior follows the language philosophy (no error values):
+// `get` on a missing key aborts with the array bounds panic; use `has` or
+// `getOr` when a key may be absent.
+
+export class Map<V> {
+    private keyList: Array<string>
+    private valList: Array<V>
+
+    constructor() {
+        // fields start uninitialized (a bare `this.keyList = []` does not
+        // infer yet, so build the empty arrays through annotated locals)
+        let emptyKeys: Array<string> = []
+        this.keyList = emptyKeys
+        let emptyVals: Array<V> = []
+        this.valList = emptyVals
+    }
+
+    set(key: string, value: V): void {
+        let i = this.indexOf(key)
+        if (i >= 0) {
+            let vals = this.valList
+            vals[i] = value
+        } else {
+            this.keyList.push(key)
+            this.valList.push(value)
+        }
+    }
+
+    get(key: string): V {
+        let i = this.indexOf(key)
+        if (i < 0) {
+            console.log(`map: no key '${key}'`)
+        }
+        let vals = this.valList
+        return vals[i]
+    }
+
+    // `get` without the panic: returns `fallback` when the key is absent
+    getOr(key: string, fallback: V): V {
+        let i = this.indexOf(key)
+        if (i < 0) {
+            return fallback
+        }
+        let vals = this.valList
+        return vals[i]
+    }
+
+    has(key: string): bool {
+        return this.indexOf(key) >= 0
+    }
+
+    delete(key: string): void {
+        let i = this.indexOf(key)
+        if (i >= 0) {
+            this.keyList.splice(i, 1)
+            this.valList.splice(i, 1)
+        }
+    }
+
+    clear(): void {
+        this.keyList.splice(0, this.keyList.length)
+        this.valList.splice(0, this.valList.length)
+    }
+
+    // number of entries
+    get size(): Int32 {
+        return this.keyList.length
+    }
+
+    // the keys, in insertion order
+    get keys(): Array<string> {
+        return this.keyList
+    }
+
+    // the values, in key insertion order
+    get values(): Array<V> {
+        return this.valList
+    }
+
+    private indexOf(key: string): Int32 {
+        for (let i = 0; i < this.keyList.length; i++) {
+            if (this.keyList[i] == key) {
+                return i
+            }
+        }
+        return -1
+    }
+}
+
+// Create an empty map. `new map.Map<V>()` is not supported yet (generic
+// `new` needs a direct class name), so the factory is the public way in:
+//
+//     let m = map.newMap<Int32>()
+//
+export function newMap<V>(): Map<V> {
+    let m = new Map<V>()
+    return m
+}

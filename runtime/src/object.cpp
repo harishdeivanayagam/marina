@@ -99,9 +99,8 @@ extern "C" void* marina_object_new(int32_t class_id, int64_t n_fields) {
 }
 
 static void object_bounds_panic(int64_t i, int64_t len) {
-    std::cerr << "marina runtime panic: field index " << i
-              << " out of bounds (class has " << len << " fields)\n";
-    std::exit(101);
+    marina_rt::rt_panic("field index " + std::to_string(i) +
+                        " out of bounds (class has " + std::to_string(len) + " fields)");
 }
 
 extern "C" void marina_object_get(void* o, int64_t i, MValue* out) {

@@ -23,6 +23,7 @@
 
 #include <algorithm>
 #include <cstdio>
+#include <string>
 #include <set>
 #include <tuple>
 #include <unordered_map>
@@ -363,6 +364,9 @@ std::vector<ast::TyAnn> clone_tyanns(const std::vector<ast::TyAnn>& v) { return 
 ast::Lambda clone_lambda(const ast::Lambda& l);
 
 ast::ExprPtr clone_expr(const ast::ExprPtr& e) {
+    if (!e) {
+        return e;
+    }
     auto out = std::make_shared<ast::Expr>();
     out->span = e->span;
     if (auto* x = std::get_if<ast::EInt>(&e->v)) out->v = *x;
@@ -478,8 +482,10 @@ ast::Stmt clone_stmt(const ast::Stmt& s) {
         i.span = x->span;
         i.cond = clone_expr(x->cond);
         for (const auto& st : x->then_body) i.then_body.push_back(clone_stmt(st));
-        if (x->else_body)
+        if (x->else_body) {
+            i.else_body.emplace();
             for (const auto& st : *x->else_body) i.else_body->push_back(clone_stmt(st));
+        }
         out.v = std::move(i);
     } else if (auto* x = std::get_if<ast::SWhile>(&s.v)) {
         ast::SWhile w;
@@ -499,6 +505,18 @@ ast::Stmt clone_stmt(const ast::Stmt& s) {
         ast::SExpr sx;
         sx.expr = clone_expr(x->expr);
         out.v = std::move(sx);
+    } else if (auto* x = std::get_if<ast::SThrow>(&s.v)) {
+        ast::SThrow t;
+        t.span = x->span;
+        t.value = clone_expr(x->value);
+        out.v = std::move(t);
+    } else if (auto* x = std::get_if<ast::STryCatch>(&s.v)) {
+        ast::STryCatch t;
+        t.span = x->span;
+        t.catch_name = x->catch_name;
+        for (const auto& st : x->try_body) t.try_body.push_back(clone_stmt(st));
+        for (const auto& st : x->catch_body) t.catch_body.push_back(clone_stmt(st));
+        out.v = std::move(t);
     }
     return out;
 }
@@ -1860,7 +1878,7 @@ public:
             if (is_async_ctx) {
                 if (t.tag == CTy::Tag::Promise) {
                     if (block_depth > 0) {
-                        diag("returning a promise from inside if/while is not supported in marina v0.1",
+                        diag("returning a promise from inside if/while/try is not supported in marina v0.1",
                              span);
                         return ret_stmt(std::nullopt, ReturnKindKind::Plain);
                     }
@@ -1969,6 +1987,47 @@ public:
             cf.body = std::move(cb);
             return cst(std::move(cf));
         }
+        // throw -------------------------------------------------------------------
+        if (auto* x = std::get_if<ast::SThrow>(&s.v)) {
+            Span span = x->span;
+            CExpr v = check_expr(*x->value, false);
+            CTy t = expr_ty(v);
+            if (t.tag != CTy::Tag::Str) {
+                diag("throw requires a string value, found " + t.name() +
+                         " (convert it first, e.g. with a template literal)",
+                     span);
+            }
+            CThrow th;
+            th.value = exptr(std::move(v));
+            return cst(std::move(th));
+        }
+        // try / catch -------------------------------------------------------------
+        if (auto* x = std::get_if<ast::STryCatch>(&s.v)) {
+            Span span = x->span;
+            scopes.emplace_back();
+            block_depth += 1;
+            auto t = check_stmts(x->try_body);
+            block_depth -= 1;
+            scopes.pop_back();
+            std::optional<std::pair<size_t, CTy>> cvar;
+            scopes.emplace_back();
+            block_depth += 1;
+            if (x->catch_name.has_value()) {
+                if (!is_camel_case(*x->catch_name)) {
+                    diag("catch variable '" + *x->catch_name + "' must be camelCase", span);
+                }
+                size_t id = declare(*x->catch_name, cty_str(), false, span);
+                cvar = {id, cty_str()};
+            }
+            auto c = check_stmts(x->catch_body);
+            block_depth -= 1;
+            scopes.pop_back();
+            CTry ct;
+            ct.try_body = std::move(t);
+            ct.catch_var = std::move(cvar);
+            ct.catch_body = std::move(c);
+            return cst(std::move(ct));
+        }
         // expr --------------------------------------------------------------------------
         if (auto* x = std::get_if<ast::SExpr>(&s.v)) {
             if (auto* aw = std::get_if<ast::EAwait>(&x->expr->v)) {
@@ -1982,7 +2041,7 @@ public:
 
     std::pair<CExpr, CTy> check_await_top(const ast::Expr& inner, Span span) {
         if (block_depth > 0) {
-            diag("await inside if/while is not supported in marina v0.1 (keep awaits at the top "
+            diag("await inside if/while/try is not supported in marina v0.1 (keep awaits at the top "
                  "level of the async function)",
                  span);
             return {cbool(false), cty_void()};
@@ -2258,8 +2317,30 @@ public:
                     return cbool(false);
                 }
                 CTy t = mono_class(x->name, x->type_args, e.span);
-                if (t.tag == CTy::Tag::Object) return ce(CNewClass{t.object.id});
-                return cbool(false);
+                if (t.tag != CTy::Tag::Object) return cbool(false);
+                // `new Map<V>()` still runs a zero-argument constructor (own
+                // or inherited) like the non-generic path does
+                for (size_t c = t.object.id;;) {
+                    std::string cand = classes[c].name + "__new";
+                    auto sit = sigs.find(cand);
+                    if (sit != sigs.end() && sit->second.params.size() == 1) {
+                        CNewClassCtor nc;
+                        nc.class_id = t.object.id;
+                        nc.fn = cand;
+                        return ce(std::move(nc));
+                    }
+                    if (sit != sigs.end()) {
+                        diag("constructor of class '" + x->name +
+                                 "' takes " + numstr(sit->second.params.size() - 1) +
+                                 " argument(s) (generic classes do not support constructor "
+                                 "arguments yet)",
+                             e.span);
+                        return cbool(false);
+                    }
+                    if (!classes[c].base.has_value()) break;
+                    c = *classes[c].base;
+                }
+                return ce(CNewClass{t.object.id});
             }
             if (!x->type_args.empty()) {
                 diag("class '" + x->name + "' does not take type parameters", e.span);
@@ -3205,6 +3286,7 @@ public:
     void subst_stmt(ast::Stmt& s, const std::vector<std::pair<std::string, CTy>>& bindings) const {
         if (auto* x = std::get_if<ast::SLet>(&s.v)) {
             if (x->ann) subst_ann(*x->ann, bindings);
+            if (x->init) subst_expr(*x->init, bindings);
         } else if (auto* x = std::get_if<ast::SIf>(&s.v)) {
             subst_expr(*x->cond, bindings);
             for (auto& st : x->then_body) subst_stmt(st, bindings);
@@ -3271,6 +3353,7 @@ public:
         } else if (auto* x = std::get_if<ast::ELambda>(&e.v)) {
             for (auto& p : x->lambda->params)
                 if (p.ann) subst_ann(*p.ann, bindings);
+            for (auto& st : x->lambda->body) subst_stmt(st, bindings);
         }
     }
 
@@ -3312,18 +3395,149 @@ public:
         d.is_ghost = false;
         classes.push_back(std::move(d));
         class_by_name[mangled] = id;
+
+        // Monomorphize the methods: each gets its annotations substituted,
+        // a `this` parameter of the concrete class, and the mangled name
+        // `Map$T__method` so instance calls resolve through `find_member`.
+        // Signatures are all registered before any body is checked, so a
+        // method can call its siblings regardless of declaration order.
+        struct PrepMethod {
+            ast::FnDecl f;
+            std::vector<CTy> params;
+            std::optional<CTy> pre_ret;
+        };
+        std::vector<PrepMethod> prepped;
+        // the constructor first: `Map$T__new(this, params)`, no return
+        if (decl.ctor) {
+            PrepMethod pm;
+            pm.f = clone_fn_decl(*decl.ctor);
+            pm.f.name = mangled + "__new";
+            ast::TyAnn self_ann;
+            self_ann.name = mangled;
+            self_ann.span = span;
+            ast::Param this_p;
+            this_p.name = "this";
+            this_p.ann = self_ann;
+            this_p.span = span;
+            pm.f.params.insert(pm.f.params.begin(), std::move(this_p));
+            for (auto& p : pm.f.params)
+                if (p.ann) subst_ann(*p.ann, bindings);
+            pm.f.ret_ann.reset();
+            for (auto& st : pm.f.body) subst_stmt(st, bindings);
+            for (const auto& p : pm.f.params) {
+                pm.params.push_back(p.ann ? ty_of(*p.ann) : cty_void());
+            }
+            {
+                FnSig sig;
+                sig.params = pm.params;
+                sig.ret = cty_void();
+                sig.is_async = false;
+                sigs[pm.f.name] = std::move(sig);
+            }
+            prepped.push_back(std::move(pm));
+        }
+        for (const auto& m : decl.methods) {
+            if (m.is_abstract || m.is_static) continue;
+            PrepMethod pm;
+            pm.f = clone_fn_decl(m);
+            switch (m.kind) {
+                case ast::MemberKind::Getter: pm.f.name = mangled + "__get_" + m.name; break;
+                case ast::MemberKind::Setter: pm.f.name = mangled + "__set_" + m.name; break;
+                case ast::MemberKind::Method: pm.f.name = mangled + "__" + m.name; break;
+            }
+            ast::TyAnn self_ann;
+            self_ann.name = mangled;
+            self_ann.span = span;
+            ast::Param this_p;
+            this_p.name = "this";
+            this_p.ann = self_ann;
+            this_p.span = span;
+            pm.f.params.insert(pm.f.params.begin(), std::move(this_p));
+            for (auto& p : pm.f.params)
+                if (p.ann) subst_ann(*p.ann, bindings);
+            if (pm.f.ret_ann) subst_ann(*pm.f.ret_ann, bindings);
+            for (auto& st : pm.f.body) subst_stmt(st, bindings);
+            for (const auto& p : pm.f.params) {
+                pm.params.push_back(p.ann ? ty_of(*p.ann) : cty_void());
+            }
+            if (pm.f.ret_ann) pm.pre_ret = ty_of(*pm.f.ret_ann);
+            {
+                FnSig sig;
+                sig.params = pm.params;
+                sig.ret = pm.pre_ret;
+                sig.is_async = false;
+                sigs[pm.f.name] = std::move(sig);
+            }
+            prepped.push_back(std::move(pm));
+        }
+        for (auto& pm : prepped) {
+            // check the body in a fresh function context, exactly like a
+            // monomorphized generic function
+            std::optional<CTy> saved_ret_ty = std::move(ret_ty);
+            ret_ty.reset();
+            bool saved_float = saw_float_ret;
+            uint8_t saved_float_bits = ret_float_bits;
+            bool saved_async = is_async_ctx;
+            bool saved_toplevel = in_toplevel;
+            std::optional<std::pair<CTy, bool>> saved_promise_infer = std::move(promise_infer);
+            promise_infer.reset();
+            CFn cf = check_fn(pm.f);
+            ret_ty = std::move(saved_ret_ty);
+            saw_float_ret = saved_float;
+            ret_float_bits = saved_float_bits;
+            is_async_ctx = saved_async;
+            in_toplevel = saved_toplevel;
+            promise_infer = std::move(saved_promise_infer);
+            CTy ret = cf.ret;
+            mono_fns.push_back(std::move(cf));
+            if (!pm.pre_ret) {
+                FnSig sig;
+                sig.params = pm.params;
+                sig.ret = ret;
+                sig.is_async = false;
+                sigs[pm.f.name] = std::move(sig);
+            }
+        }
         return cty_object(id, mangled);
     }
 
     /// Check a call with explicit type arguments: `pick<Int32>(1, 2, true)`.
+    /// Also handles module-qualified generic calls: `map.newMap<string>()`.
     CExpr check_call_gen(const ast::Expr& callee, const std::vector<ast::TyAnn>& type_args,
                          const std::vector<ast::ExprPtr>& args, Span span) {
-        auto* id = std::get_if<ast::EIdent>(&callee.v);
-        if (!id) {
+        std::string name;
+        if (auto* id = std::get_if<ast::EIdent>(&callee.v)) {
+            name = id->name;
+        } else if (auto* mem = std::get_if<ast::EMember>(&callee.v)) {
+            // `mod.fn<T>(...)` — resolve the member chain to the module
+            // function's mangled name, then proceed as a direct generic call
+            std::vector<std::string> chain;
+            if (member_chain(callee, chain) && chain.size() >= 2 &&
+                contains_str(uses, chain[0])) {
+                const std::string& m = chain[0];
+                std::string full = use_prefix_of(m);
+                for (size_t i = 1; i < chain.size(); ++i) full += "__" + chain[i];
+                if (generic_fns.count(full)) {
+                    if (!exported_fns.count(full)) {
+                        diag("no exported member '" + chain.back() + "' from module '" + m + "'",
+                             span);
+                        return cbool(false);
+                    }
+                    return check_generic_call(full, &type_args, args, span);
+                }
+                if (sigs.count(full)) {
+                    diag("function '" + chain.back() + "' does not take type parameters", span);
+                    return cbool(false);
+                }
+                diag("module '" + m + "' has no function '" + chain.back() + "'", span);
+                return cbool(false);
+            }
+            diag("type arguments are only supported on direct function calls", span);
+            return cbool(false);
+        } else {
             diag("type arguments are only supported on direct function calls", span);
             return cbool(false);
         }
-        const std::string& name = id->name;
         if (generic_fns.count(name)) {
             return check_generic_call(name, &type_args, args, span);
         }
@@ -5076,13 +5290,19 @@ std::vector<Diag> lower_classes(ast::Program& program) {
     std::vector<Diag> diags;
     std::vector<ast::FnDecl> hoisted;
     for (auto& cl : program.classes) {
-        if (!cl.type_params.empty() &&
-            (cl.ctor || !cl.methods.empty() ||
-             std::any_of(cl.fields.begin(), cl.fields.end(),
-                         [](const ast::ClassField& f) { return f.is_static; }))) {
-            diags.push_back(
-                Diag{"generic classes do not support constructors, methods, or statics yet",
-                     cl.span});
+        if (!cl.type_params.empty()) {
+            // generic classes are instantiated per type argument (each `new
+            // Box<T>()` monomorphizes a concrete class), so the generic
+            // declaration itself is never lowered; methods are monomorphized
+            // alongside the fields in `mono_class`. Constructors and statics
+            // have no per-instantiation story yet.
+            if (cl.ctor || std::any_of(cl.fields.begin(), cl.fields.end(),
+                                       [](const ast::ClassField& f) { return f.is_static; }) ||
+                std::any_of(cl.methods.begin(), cl.methods.end(),
+                            [](const ast::FnDecl& m) { return m.is_static; })) {
+                diags.push_back(
+                    Diag{"generic classes do not support constructors or statics yet", cl.span});
+            }
             continue;
         }
         ast::TyAnn self_ann;

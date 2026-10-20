@@ -225,10 +225,21 @@ struct CStaticSet {
     std::shared_ptr<struct CExpr> value;
     CTy elem;
 };
+// `throw expr;` — the value is a string carrying the error message.
+struct CThrow {
+    std::shared_ptr<struct CExpr> value;
+};
+// `try { ... } catch (e) { ... }` — the catch binding, when present, is a
+// `string` (the panic / throw message).
+struct CTry {
+    std::vector<CStmt> try_body;
+    std::optional<std::pair<size_t, CTy>> catch_var;
+    std::vector<CStmt> catch_body;
+};
 
 struct CStmt {
     std::variant<CLet, CAssign, CIf, CWhile, CIndexSet, CFieldSet, CIfaceSet,
-                 CStaticSet, CFor, CReturn, CExprStmt>
+                 CStaticSet, CFor, CReturn, CExprStmt, CThrow, CTry>
         v;
     CStmt() : v(CLet{}) {}
 };

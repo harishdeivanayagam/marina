@@ -1014,8 +1014,9 @@ int cmd_add(const std::vector<std::string>& rest) {
     }
     const std::string& pkg = rest[0];
     // std modules are built into the compiler/runtime — nothing to install
-    if (pkg == "net" || pkg == "http" || pkg == "fs" || pkg == "crypto" || pkg == "sql") {
-        std::cout << "'" << pkg << "' is a built-in std module — available with `use "
+    if (pkg == "net" || pkg == "http" || pkg == "fs" || pkg == "crypto" || pkg == "sql" ||
+        pkg == "map") {
+        std::cout << "'" << pkg << "' is a built-in std module — available with `import "
                   << pkg << "`" << "\n";
         return 0;
     }
@@ -1070,8 +1071,8 @@ int cmd_add(const std::vector<std::string>& rest) {
     }
 
     std::cerr << "error: unknown package '" << source << "'" << std::endl;
-    std::cerr << "  std modules net, http, fs, crypto and sql are built-in (`use fs`, "
-                 "`use crypto`, ...)" << std::endl;
+    std::cerr << "  std modules net, http, fs, crypto, sql and map are built-in (`import fs`, "
+                 "`import crypto`, ...)" << std::endl;
     std::cerr << "  install source packages from a local path or a git URL:" << std::endl;
     std::cerr << "    wave add ./my-pkg" << std::endl;
     std::cerr << "    wave add https://github.com/user/my-pkg.git" << std::endl;
@@ -1154,7 +1155,7 @@ int install_from_dir(const fs::path& dir, std::optional<std::string> explicit_ve
     }
     std::cout << "installed " << name << "@" << version << " into " << disp(dest)
               << "\n";
-    std::cout << "use it with `use " << name << "`" << "\n";
+    std::cout << "import it with `import " << name << "`" << "\n";
     return 0;
 }
 

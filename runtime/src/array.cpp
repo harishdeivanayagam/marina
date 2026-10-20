@@ -22,9 +22,8 @@ MValue mv_from(int32_t tag, const MValue& v) {
 ArrayObj* as_array(void* p) { return reinterpret_cast<ArrayObj*>(p); }
 
 void array_get_checked_panic(int64_t i, int64_t len) {
-    std::cerr << "marina runtime panic: array index " << i
-              << " out of bounds (length " << len << ")\n";
-    std::exit(101);
+    rt_panic("array index " + std::to_string(i) +
+             " out of bounds (length " + std::to_string(len) + ")");
 }
 
 MValue array_get_checked(void* a, int64_t i) {
@@ -104,8 +103,7 @@ extern "C" int64_t marina_array_push(void* a, const MValue* v) {
 extern "C" void marina_array_pop(void* a, MValue* out) {
     marina_rt::ArrayObj* arr = reinterpret_cast<marina_rt::ArrayObj*>(a);
     if (arr->data.empty()) {
-        std::cerr << "marina runtime panic: pop from an empty array\n";
-        std::exit(101);
+        marina_rt::rt_panic("pop from an empty array");
     }
     MValue v = arr->data.back();
     arr->data.pop_back();
@@ -116,8 +114,7 @@ extern "C" void marina_array_pop(void* a, MValue* out) {
 extern "C" void marina_array_shift(void* a, MValue* out) {
     marina_rt::ArrayObj* arr = reinterpret_cast<marina_rt::ArrayObj*>(a);
     if (arr->data.empty()) {
-        std::cerr << "marina runtime panic: shift from an empty array\n";
-        std::exit(101);
+        marina_rt::rt_panic("shift from an empty array");
     }
     MValue v = arr->data.front();
     arr->data.erase(arr->data.begin());
@@ -141,9 +138,8 @@ extern "C" void marina_array_set(void* a, int64_t i, const MValue* v) {
     marina_rt::ArrayObj* arr = reinterpret_cast<marina_rt::ArrayObj*>(a);
     int64_t len = (int64_t)arr->data.size();
     if (i < 0 || i >= len) {
-        std::cerr << "marina runtime panic: array index " << i
-                  << " out of bounds (length " << len << ")\n";
-        std::exit(101);
+        marina_rt::rt_panic("array index " + std::to_string(i) +
+                            " out of bounds (length " + std::to_string(len) + ")");
     }
     MValue nv = marina_rt::mv_from(arr->tag, *v);
     marina_rt::retain_payload(nv);

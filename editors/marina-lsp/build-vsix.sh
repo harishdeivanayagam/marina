@@ -1,8 +1,9 @@
 #!/bin/sh
-# Build marina-lsp-0.3.1.vsix with nothing but `zip` (no npm/vsce needed).
+# Build marina-lsp-0.4.0.vsix with nothing but `zip` (no npm/vsce needed).
 # A VSIX is a zip: manifest files at the root, extension contents under extension/.
 set -eu
 cd "$(dirname "$0")"
+VERSION=$(sed -n 's/.*"version": "\([^"]*\)".*/\1/p' package.json)
 
 rm -rf build
 mkdir -p build/extension/syntaxes build/extension/fileicons/icons
@@ -14,8 +15,8 @@ cp fileicons/marina-wave-icon-theme.json build/extension/fileicons/
 cp fileicons/icons/wave.svg build/extension/fileicons/icons/
 
 cd build
-zip -q -r ../marina-lsp-0.3.1.vsix '[Content_Types].xml' extension.vsixmanifest extension
+zip -q -r ../marina-lsp-$VERSION.vsix '[Content_Types].xml' extension.vsixmanifest extension
 cd ..
 
 rm -rf build
-echo "built $(pwd)/marina-lsp-0.3.1.vsix"
+echo "built $(pwd)/marina-lsp-$VERSION.vsix"

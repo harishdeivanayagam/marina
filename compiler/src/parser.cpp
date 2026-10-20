@@ -120,14 +120,14 @@ private:
                 InterfaceDecl it = interface_decl();
                 it.exported = exported;
                 prog.interfaces.push_back(std::move(it));
-            } else if (is_kw(peek(), Kw::Use)) {
+            } else if (is_kw(peek(), Kw::Import)) {
                 if (exported) {
                     return error<Program>("export must precede a function, class, or interface");
                 }
                 prog.uses.push_back(use_decl());
-            } else if (is_kw(peek(), Kw::Import)) {
+            } else if (is_kw(peek(), Kw::Use)) {
                 return error<Program>(
-                    "`import` statements are not supported — declare modules with `use <module>`");
+                    "`use` is not supported — declare modules with `import <module>`");
             } else {
                 if (exported) {
                     return error<Program>("export must precede a function, class, or interface");
@@ -138,13 +138,13 @@ private:
         return prog;
     }
 
-    // `use <module>` (optionally with a trailing `;`). The module is a path:
-    // a std module name (`http`), a local folder relative to the entry
+    // `import <module>` (optionally with a trailing `;`). The module is a
+    // path: a std module name (`http`), a local folder relative to the entry
     // file's directory (`sample_mod`, `sample_mod/sub`), or a registry
     // package name.
     std::pair<std::string, Span> use_decl() {
         Span sp = span();
-        bump(); // use
+        bump(); // import
         auto name = expect_ident();
         std::string full = name.first;
         while (is_p(peek(), P::Slash)) {
@@ -489,6 +489,8 @@ private:
         if (is_kw(peek(), Kw::Let) || is_kw(peek(), Kw::Const)) {
             return let_stmt();
         }
+        if (is_kw(peek(), Kw::Throw)) return throw_stmt();
+        if (is_kw(peek(), Kw::Try)) return try_stmt();
         if (is_kw(peek(), Kw::Return)) {
             SReturn r;
             r.value = std::nullopt;
@@ -785,6 +787,46 @@ private:
         i.span = sp;
         Stmt s;
         s.v = std::move(i);
+        return s;
+    }
+
+    // `throw expr;` — the value must be a string (enforced by the checker).
+    Stmt throw_stmt() {
+        SThrow t;
+        Span sp = span();
+        bump(); // throw
+        if (is_p(peek(), P::Semi) || is_p(peek(), P::RBrace) || is_eof(peek())) {
+            return error<Stmt>("throw requires a value (marina has no re-throw without a value)");
+        }
+        t.value = expr();
+        eat_punct(P::Semi);
+        t.span = sp;
+        Stmt s;
+        s.v = std::move(t);
+        return s;
+    }
+
+    // `try { ... } catch [ (e) ] { ... }` — the catch binding, when present,
+    // is a `string` (the error message). No `finally` in marina v0.1.
+    Stmt try_stmt() {
+        STryCatch t;
+        Span sp = span();
+        bump(); // try
+        t.try_body = block();
+        if (!is_kw(peek(), Kw::Catch)) {
+            return error<Stmt>("expected 'catch' after the try block");
+        }
+        bump(); // catch
+        if (eat_punct(P::LParen)) {
+            auto name = expect_ident();
+            t.catch_name = name.first;
+            expect_punct(P::RParen, ")");
+        }
+        t.catch_body = block();
+        eat_punct(P::Semi);
+        t.span = sp;
+        Stmt s;
+        s.v = std::move(t);
         return s;
     }
 
@@ -1322,6 +1364,8 @@ Span stmt_span(const Stmt& s) {
     if (auto* x = std::get_if<SWhile>(&s.v)) return x->span;
     if (auto* x = std::get_if<SFor>(&s.v)) return x->span;
     if (auto* x = std::get_if<SExpr>(&s.v)) return x->expr->span;
+    if (auto* x = std::get_if<SThrow>(&s.v)) return x->span;
+    if (auto* x = std::get_if<STryCatch>(&s.v)) return x->span;
     return Span{1, 1};
 }
 

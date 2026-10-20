@@ -1,4 +1,4 @@
-use sample_mod
+import sample_mod
 
 async function main() {
     let calc = new sample_mod.Calc(10, 20)

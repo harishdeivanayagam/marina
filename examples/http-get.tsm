@@ -1,4 +1,4 @@
-use http
+import http
 
 // HTTP client built on the net module.
 // Start the todo server first: `wave run examples/todo-http.tsm`

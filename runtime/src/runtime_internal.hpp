@@ -102,6 +102,16 @@ std::unordered_map<int32_t, ClassInfo>& class_map();
 
 [[noreturn]] void rt_panic(const std::string& msg);
 
+// Longjmp into the innermost open try frame (or abort when uncaught).
+// is_panic: runtime panic (reported as "marina runtime panic: ...")
+//           vs a user `throw` ("uncaught exception: ...").
+[[noreturn]] void rt_raise(const std::string& msg, bool is_panic);
+// Report a fatal error and exit(101) — used when no handler frame exists.
+[[noreturn]] void rt_die(const std::string& msg, bool is_panic);
+// Run an event-loop task, reporting native C++ exceptions instead of
+// letting them terminate the process.
+void rt_guard(const std::function<void()>& f);
+
 // Render an errno the way Rust's std::io::Error displays OS errors:
 // "<strerror> (os error <n>)".
 std::string os_error(int err);

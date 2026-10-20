@@ -1,0 +1,49 @@
+import map
+
+// map — the std dictionary, written in Marina itself (stdlib/map/main.tsm).
+// A Map<V> is string-keyed; each value type V gets its own specialized copy
+// of the code at compile time, so lookups cost a plain function call.
+
+function main() {
+    // 1. create and fill — map.newMap<V>(), one call per value type
+    let ages = map.newMap<Int32>()
+    ages.set("lena", 30)
+    ages.set("kim", 25)
+    ages.set("sam", 41)
+
+    // 2. read: get panics on a missing key, getOr falls back instead
+    console.log(ages.get("lena"))      // 30
+    console.log(ages.getOr("sam", 0))  // 41
+    console.log(ages.getOr("zoe", 0))  // 0 (zoe is not in the map)
+    console.log(ages.has("kim"))       // true
+    console.log(ages.has("zoe"))       // false
+
+    // 3. set overwrites an existing key in place (no duplicate entries)
+    ages.set("lena", 31)
+    console.log(ages.get("lena"))      // 31
+    console.log(ages.size)             // 3
+
+    // 4. keys and values come back in insertion order
+    console.log(ages.keys)             // [lena, kim, sam]
+    console.log(ages.values)           // [31, 25, 41]
+
+    // 5. iterate by key (index with getOr to stay panic-safe)
+    for (let i = 0; i < ages.keys.length; i++) {
+        console.log(`${ages.keys[i]} is ${ages.getOr(ages.keys[i], 0)}`)
+    }
+
+    // 6. delete removes one entry; clear removes them all
+    ages.delete("kim")
+    console.log(ages.size)             // 2
+    console.log(ages.has("kim"))       // false
+
+    ages.clear()
+    console.log(ages.size)             // 0
+
+    // 7. value types are independent — a string-valued map is a new class
+    let caps = map.newMap<string>()
+    caps.set("germany", "berlin")
+    caps.set("japan", "tokyo")
+    console.log(caps.get("japan"))     // tokyo
+    console.log(caps.size)             // 2
+}

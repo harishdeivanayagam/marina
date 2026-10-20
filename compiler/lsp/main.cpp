@@ -709,7 +709,7 @@ std::vector<LspDiag> check_document(const std::string& text, const std::string& 
                               sat_sub(e.span.line, 1), e.span.col, e.msg});
         return out;
     }
-    // resolve `use` statements first (same as `wave check`): registry
+    // resolve `import` statements first (same as `wave check`): registry
     // packages are merged in place, std modules are kept as-is
     {
         auto use_diags = pipeline::resolve_uses(program);
@@ -1121,9 +1121,10 @@ Json global_completions(const ast::Program& program, const ir::Checked& checked)
 
     static const char* keywords[] = {"let",     "const",    "function", "async",
                                      "await",   "return",   "if",       "else",
-                                     "while",   "for",      "true",     "false",
-                                     "new",     "class",    "use",      "import",
-                                     "interface", "export"};
+                                     "while",   "for",      "try",      "catch",
+                                     "throw",   "true",     "false",
+                                     "new",     "class",    "import",   "interface",
+                                     "export"};
     for (const char* kw : keywords) add(kw, 14, "keyword", "");
 
     static const char* types[] = {"Int8",    "Int16",   "Int32",  "Int64",
@@ -1131,9 +1132,9 @@ Json global_completions(const ast::Program& program, const ir::Checked& checked)
                                   "Float32", "Float64", "bool",   "String"};
     for (const char* ty : types) add(ty, 7, "type", "");
 
-    static const char* modules[] = {"net", "http", "fs", "crypto", "sql"};
+    static const char* modules[] = {"net", "http", "fs", "crypto", "sql", "map"};
     for (const char* m : modules)
-        add(m, 9, "std module", "Import with `use " + std::string(m) + "`.");
+        add(m, 9, "std module", "Import with `import " + std::string(m) + "`.");
     add("console", 9, "builtin", "Console output: `console.log(value)`.");
     add("setTimeout", 3, "setTimeout(fn, ms)", "Run `fn` after `ms` milliseconds on the event loop.");
     add("Promise", 7, "class Promise<T>",
@@ -1254,8 +1255,9 @@ Json completion(const std::string& text, int64_t line, int64_t col) {
         // static-only fallback
         static const char* keywords[] = {"let",   "const",  "function", "async",  "await",
                                          "return", "if",     "else",     "while",  "for",
-                                         "true",   "false",  "new",      "class",  "use",
-                                         "import", "interface", "export"};
+                                         "try",   "catch",  "throw",    "true",   "false",
+                                         "new",   "class",  "import",
+                                         "interface", "export"};
         for (const char* kw : keywords)
             fallback_items.push_back(completion_item(kw, 14, "keyword", ""));
         static const char* types[] = {"Int8",    "Int16",   "Int32",  "Int64",  "UInt8",

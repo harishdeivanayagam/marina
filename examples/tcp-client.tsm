@@ -1,4 +1,4 @@
-use net
+import net
 
 // Raw TCP: connect, write, read the reply back, close.
 // Try it against anything that echoes: `nc -l 8080` in another terminal.

@@ -876,7 +876,7 @@ void blocking_listen_thread(ListenJob job) {
         }
         // ownership: both objects are handed to the handler with rc 1;
         // the compiled handler releases them when it returns.
-        job.f(job.env, &req_mv, &res_mv);
+        rt_guard([&] { job.f(job.env, &req_mv, &res_mv); });
         {
             std::lock_guard<std::mutex> lk(res_sockets().mu);
             auto it = res_sockets().fds.find(reinterpret_cast<size_t>(res_o));
@@ -1192,7 +1192,16 @@ void evented_listen_thread(std::string host_s, uint16_t port_n, void* promise,
                 // responded. (Released when the connection retires.)
                 retain_ptr(res);
                 auto af = reinterpret_cast<MarinaAsyncListenCb>(route->f);
-                void* pr = af(route->env, &req_mv, &res_mv);
+                void* pr = nullptr;
+                rt_guard([&] { pr = af(route->env, &req_mv, &res_mv); });
+                if (pr == nullptr) {
+                    // rt_guard exits on fatal errors; a null promise here
+                    // would mean the handler failed silently — drop the
+                    // connection.
+                    ::close(conns[idx].fd);
+                    conns.erase(conns.begin() + idx);
+                    continue;
+                }
                 if (http_debug()) {
                     std::cerr << "[evloop] async dispatch -> promise " << pr << "\n";
                 }
@@ -1203,7 +1212,7 @@ void evented_listen_thread(std::string host_s, uint16_t port_n, void* promise,
                 conns[idx].deadline =
                     std::chrono::steady_clock::now() + std::chrono::seconds(30);
             } else {
-                route->f(route->env, &req_mv, &res_mv);
+                rt_guard([&] { route->f(route->env, &req_mv, &res_mv); });
                 // handler never responded -> 404
                 bool unresponded;
                 {

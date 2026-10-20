@@ -48,7 +48,7 @@ static void worker_loop() {
                 cv.wait(lk);
             }
         }
-        task();
+        rt_guard(task);
         {
             std::lock_guard<std::mutex> lk(m);
             rt().running -= 1;
