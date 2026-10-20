@@ -273,6 +273,6 @@ ages.set(<span class="s">"kim"</span>, 25)
       <tr><td><code>charCodeAt(index)</code></td><td>Byte (code unit) at <code>index</code>, 0 when out of bounds.</td></tr>
       <tr><td><code>substring(start, end)</code></td><td>Substring over byte indices <code>[start, end)</code>, clamped; an end below start yields <code>""</code>.</td></tr>
     </table>
-    <p><code>String.fromCharCode(code)</code> builds a 1-char string from a code unit: <code>String.fromCharCode(72)</code> is <code>"H"</code>. String equality (<code>==</code>/<code>!=</code>) compares content, and any value can be interpolated into template literals: <code>`hello ${name}`</code>. <code>console.log</code> formats any value via its string form.</p>
+    <p><code>String.fromCharCode(code)</code> builds a 1-char string from a code unit: <code>String.fromCharCode(72)</code> is <code>"H"</code>. It also accepts a 1-char string (<code>String.fromCharCode(s.charAt(0))</code>), using its byte code. String equality (<code>==</code>/<code>!=</code>) compares content, and any value can be interpolated into template literals: <code>`hello ${name}`</code>. <code>console.log</code> formats any value via its string form.</p>
   </div>
 </div>

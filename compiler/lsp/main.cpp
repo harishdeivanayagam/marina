@@ -1024,8 +1024,8 @@ Json member_completions(const std::string& receiver, const ir::Checked& checked)
         add("log", 2, "console.log(value): Void",
             "Print a value (string form) to stdout with a trailing newline.");
     } else if (receiver == "String") {
-        add("fromCharCode", 3, "String.fromCharCode(code: Int32): String",
-            "A 1-char string from a byte code unit (truncating, byte semantics).");
+        add("fromCharCode", 3, "String.fromCharCode(code: Int32 | String): String",
+            "A 1-char string from a byte code unit (or the code of a 1-char string).");
     } else if (receiver == "net") {
         add("connect", 3, "net.connect(host: String, port: Int32): Stream",
             "Open a TCP connection and return a `Stream` with `write`, `read_all` and `close`.");
