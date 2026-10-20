@@ -5,6 +5,49 @@ let c = "Hello, World!"
 
 console.log(a + b)
 
-for (let i = 0; i < c.length; i++) {
-    console.log(c.charAt(i))
+interface Person {
+    name: string
+    age: Int32
+    height: Int32
+}
+
+class Student implements Person {
+    private name: string
+    private age: Int32
+    private height: Int32
+
+    constructor(name: string, age: Int32) {
+        this.name = name
+        this.age = age
+        this.height = 0
+    }
+
+    public getName(): string {
+        return this.name
+    }
+
+
+    public getAge(): Int32 {
+        return this.age
+    }
+
+    public setName(name: string): void {
+        this.name = name
+    }
+
+    public setAge(age: Int32): void {
+        this.age = age
+    }
+}
+
+
+
+function main() {
+    let student = new Student("John", 20)
+    console.log(student.getName())
+    console.log(student.getAge())
+    student.setName("Jane")
+    student.setAge(21)
+    console.log(student.getName())
+    console.log(student.getAge())
 }

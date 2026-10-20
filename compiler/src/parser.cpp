@@ -185,9 +185,10 @@ private:
                 TyAnn ann = ty_ann();
                 fields.emplace_back(fname.first, std::move(ann));
             }
-            if (!eat_punct(P::Comma) && !is_p(peek(), P::RBrace)) {
-                expect_punct(P::Semi, ";");
-            }
+            // members are newline-separated (as in TypeScript); `,`/`;`
+            // accepted and optional
+            eat_punct(P::Comma);
+            eat_punct(P::Semi);
         }
         bump(); // }
         InterfaceDecl d;
@@ -323,10 +324,11 @@ private:
                                "(strict mode)");
                 }
                 if (is_abstract_m) {
-                    // signature only; a subclass must implement it
-                    if (!eat_punct(P::Comma) && !is_p(peek(), P::RBrace)) {
-                        expect_punct(P::Semi, ";");
-                    }
+                    // signature only; a subclass must implement it.
+                    // newline-separated like other members; `,`/`;`
+                    // accepted and optional
+                    eat_punct(P::Comma);
+                    eat_punct(P::Semi);
                 } else {
                     m.body = block();
                 }
