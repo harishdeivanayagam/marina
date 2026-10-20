@@ -485,7 +485,15 @@ const char* DECLARES =
     "declare ptr @marina_net_close_async(ptr)\n"
     "declare ptr @marina_http_request_async(ptr, ptr, ptr, i32)\n"
     "declare void @marina_event_loop_start()\n"
-    "declare i32 @marina_event_loop_run()";
+    "declare i32 @marina_event_loop_run()\n"
+    "declare ptr @marina_try_push()\n"
+    "declare void @marina_try_pop()\n"
+    "declare ptr @marina_catch_string()\n"
+    "declare void @marina_throw_str(ptr)\n"
+    // setjmp is called directly from generated code (SJLJ-style exceptions:
+    // the runtime longjmps back into the setjmp point of the innermost open
+    // try). returns_twice keeps the optimizer from caching values across it.
+    "declare i32 @setjmp(ptr) #0";
 
 std::string render_fn(const IrFn& f);
 
@@ -512,6 +520,9 @@ struct Gen {
     size_t tmp = 0;
     size_t lbl = 0;
     size_t lit = 0;
+    // Number of open try frames in the current function (early `return`
+    // inside a try body must pop them all before leaving the frame).
+    size_t try_depth = 0;
     size_t var_tmp = 1'000'000;  // ids for synthetic await targets
     // current callback-lambda context (set while generating a lambda body)
     std::optional<std::string> lambda_out;
@@ -604,6 +615,16 @@ struct Gen {
         for (const auto& n : names) {
             emit("call void @marina_release(ptr " + n + ")");
         }
+    }
+
+    // Pop every try frame opened in the current function (called from the
+    // return epilogues: a `return` inside a try body must unwind the
+    // runtime's handler stack before leaving the frame).
+    void emit_try_pops() {
+        for (size_t i = 0; i < try_depth; ++i) {
+            emit("call void @marina_try_pop()");
+        }
+        try_depth = 0;
     }
 
     // ------------------------------------------------------------------
@@ -1226,6 +1247,7 @@ struct Gen {
                 }
                 flush_pending();
                 release_scope_vars();
+                emit_try_pops();
                 std::string el = label_of(*lambda_exit);
                 term("br label %" + el);
                 return;
@@ -1263,6 +1285,62 @@ struct Gen {
         } else if (auto* st = std::get_if<CExprStmt>(&s.v)) {
             CgVal v = cg_expr(*st->expr);
             discard(v);
+        } else if (auto* st = std::get_if<CThrow>(&s.v)) {
+            // Raising an exception is a longjmp into the innermost open
+            // try frame (or a print + exit when uncaught) — the call never
+            // returns. Releases for temporaries are emitted before the
+            // unreachable terminator; the thrown value itself leaks on the
+            // exceptional path.
+            CgVal v = cg_expr(*st->value);
+            std::string mv = build_mv(v);
+            borrow(v);
+            emit("call void @marina_throw_str(ptr " + mv + ")");
+            flush_pending();
+            term("unreachable");
+        } else if (auto* st = std::get_if<CTry>(&s.v)) {
+            // SJLJ-style handler: push a try frame and setjmp into it.
+            // setjmp returns 0 to run the body; after a throw (longjmp) it
+            // returns 1 and we run the catch body instead.
+            std::string h = fresh("tf");
+            emit(h + " = call ptr @marina_try_push()");
+            std::string r = fresh("tj");
+            emit(r + " = call i32 @setjmp(ptr " + h + ") #0");
+            std::string cmp = fresh("tc");
+            emit(cmp + " = icmp ne i32 " + r + ", 0");
+            size_t body_b = new_block("try.body");
+            size_t catch_b = new_block("try.catch");
+            size_t end_b = new_block("try.end");
+            term("br i1 " + cmp + ", label %" + label_of(catch_b) + ", label %" +
+                 label_of(body_b));
+            // try body
+            switch_block(body_b);
+            try_depth += 1;
+            scopes.emplace_back();
+            cg_body(st->try_body);
+            pop_scope();
+            // a `return` inside the body already popped every try frame via
+            // the epilogue (`emit_try_pops` zeroes the depth) — don't wrap
+            if (try_depth > 0) try_depth -= 1;
+            if (!terminated()) emit("call void @marina_try_pop()");
+            branch_to(end_b);
+            // catch body: pop the frame first (it is still on the runtime
+            // stack after the longjmp), then bind the message string
+            switch_block(catch_b);
+            emit("call void @marina_try_pop()");
+            scopes.emplace_back();
+            if (st->catch_var.has_value()) {
+                auto [id, ty] = *st->catch_var;
+                CgTy cg = cg_of(ty);
+                Access a = declare_access(id, cg);
+                std::string msg = fresh("cm");
+                emit(msg + " = call ptr @marina_catch_string()");
+                store_access(a, msg, cg);
+                scopes.back().insert(id, a);
+            }
+            cg_body(st->catch_body);
+            pop_scope();
+            branch_to(end_b);
+            switch_block(end_b);
         } else {
             cg_unreachable("unknown statement kind in codegen");
         }
@@ -1318,6 +1396,7 @@ struct Gen {
 
     // Releases every live variable of the current (sync) function, then ret.
     void sync_epilogue(std::optional<CgVal> v) {
+        emit_try_pops();
         release_scope_vars();
         flush_pending();
         if (v.has_value()) {
@@ -1358,6 +1437,7 @@ struct Gen {
         emit("call void @marina_promise_resolve(ptr " + pr.first + ", ptr " + mv + ")");
         flush_pending();
         release_all_frame_slots();
+        emit_try_pops();
         emit("call void @marina_frame_free(ptr %fr)");
         term("ret void");
     }
@@ -3340,6 +3420,7 @@ struct Gen {
         for (const auto& f : fns) {
             out += render_fn(f);
         }
+        out += "attributes #0 = { returns_twice }\n";
         return out;
     }
 };

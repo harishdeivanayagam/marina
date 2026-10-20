@@ -85,12 +85,16 @@
           "match": "\\b(for|while)\\b"
         },
         {
+          "name": "keyword.control.exception.marina",
+          "match": "\\b(try|catch|throw)\\b"
+        },
+        {
           "name": "keyword.control.return.marina",
           "match": "\\breturn\\b"
         },
         {
           "name": "keyword.declaration.marina",
-          "match": "\\b(let|const|function|async|class|interface|new|public|private|protected|static|abstract|override|export|use|extends|implements|get|set|super)\\b"
+          "match": "\\b(let|const|function|async|class|interface|new|public|private|protected|static|abstract|override|export|import|extends|implements|get|set|super)\\b"
         },
         {
           "name": "constant.language.boolean.marina",

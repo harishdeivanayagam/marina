@@ -112,6 +112,9 @@ private:
                 else if (name == "use") tok = TKw{Kw::Use};
                 else if (name == "import") tok = TKw{Kw::Import};
                 else if (name == "interface") tok = TKw{Kw::Interface};
+                else if (name == "try") tok = TKw{Kw::Try};
+                else if (name == "catch") tok = TKw{Kw::Catch};
+                else if (name == "throw") tok = TKw{Kw::Throw};
                 else tok = TIdent{std::move(name)};
             } else {
                 tok = scan_punct();

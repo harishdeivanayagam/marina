@@ -39,6 +39,9 @@ enum class Kw {
     Use,
     Import,
     Interface,
+    Try,
+    Catch,
+    Throw,
 };
 
 enum class P {

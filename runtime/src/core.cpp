@@ -5,6 +5,7 @@
 
 #include <cerrno>
 #include <cmath>
+#include <csetjmp>
 #include <iostream>
 #include <cstdio>
 #include <cstdlib>
@@ -25,9 +26,53 @@ namespace marina_rt {
 // Panics & error rendering
 // ---------------------------------------------------------------------------
 
-void rt_panic(const std::string& msg) {
-    std::cerr << "marina runtime panic: " << msg << "\n";
+// SJLJ-style exception frames: generated code pushes a frame (holding the
+// setjmp buffer) with `marina_try_push` for each `try` block and pops it
+// when the block exits. `rt_raise` longjmps into the innermost open frame
+// on the current thread; with none open it aborts the process like before.
+struct TryFrame {
+    jmp_buf buf;
+    TryFrame* prev;
+};
+
+thread_local TryFrame* try_top = nullptr;
+// Message (and kind) of the exception in flight, read by the generated
+// catch block through `marina_catch_string`.
+thread_local std::string pending_error;
+thread_local bool pending_is_panic = true;
+
+[[noreturn]] void rt_die(const std::string& msg, bool is_panic) {
+    std::cerr << (is_panic ? "marina runtime panic: " : "uncaught exception: ")
+              << msg << "\n";
     std::exit(101);
+}
+
+[[noreturn]] void rt_raise(const std::string& msg, bool is_panic) {
+    pending_error = msg;
+    pending_is_panic = is_panic;
+    TryFrame* top = try_top;
+    if (top) {
+        longjmp(top->buf, 1);
+    }
+    rt_die(msg, is_panic);
+}
+
+void rt_panic(const std::string& msg) {
+    rt_raise(msg, true);
+}
+
+// Run a task (event-loop callback, waiter, timer job, http handler) on a
+// worker thread. marina exceptions are longjmps into generated frames, so
+// nothing normally escapes; any native C++ exception (bad_alloc, ...) is
+// still reported and fatal instead of crashing with std::terminate.
+void rt_guard(const std::function<void()>& f) {
+    try {
+        f();
+    } catch (const std::exception& e) {
+        rt_die(std::string("internal error: ") + e.what(), true);
+    } catch (...) {
+        rt_die("internal error (native exception)", true);
+    }
 }
 
 std::string os_error(int err) {
@@ -488,6 +533,39 @@ extern "C" void* marina_args() {
         a->data.push_back(mv);
     }
     return arr;
+}
+
+// ---------------------------------------------------------------------------
+// try / catch / throw (SJLJ-style exception frames)
+// ---------------------------------------------------------------------------
+
+// Open a handler frame and return the setjmp buffer for the generated code
+// (`call i32 @setjmp(ptr buf)` — declared returns_twice). The frame stays
+// open until marina_try_pop or a longjmp lands in it.
+extern "C" void* marina_try_push() {
+    TryFrame* f = new TryFrame();
+    f->prev = try_top;
+    try_top = f;
+    return &f->buf;
+}
+
+extern "C" void marina_try_pop() {
+    TryFrame* top = try_top;
+    if (top) {
+        try_top = top->prev;
+        delete top;
+    }
+}
+
+// The catch block's string binding: a fresh owned marina string holding the
+// message of the exception that was just caught.
+extern "C" void* marina_catch_string() {
+    return alloc_string(pending_error, 1);
+}
+
+// `throw expr;` — expr is a string value (checked by the compiler).
+extern "C" void marina_throw_str(const MValue* v) {
+    rt_raise(mv_to_string(*v), false);
 }
 
 } // namespace marina_rt

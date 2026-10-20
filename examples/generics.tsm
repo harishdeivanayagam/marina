@@ -1,5 +1,5 @@
 // Generic functions and generic classes are monomorphized at compile time.
-use fs
+import fs
 
 // Type parameters are inferred from the call site.
 function pick<T>(a: T, b: T, takeFirst: bool): T {

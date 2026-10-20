@@ -376,6 +376,11 @@ void qual_stmt(ast::Stmt& s, const std::set<std::string>& local,
         for (auto& t : x->body) qual_stmt(t, local, pkg);
     } else if (auto* x = std::get_if<ast::SExpr>(&s.v)) {
         qual_expr(x->expr, local, pkg);
+    } else if (auto* x = std::get_if<ast::SThrow>(&s.v)) {
+        qual_expr(x->value, local, pkg);
+    } else if (auto* x = std::get_if<ast::STryCatch>(&s.v)) {
+        for (auto& t : x->try_body) qual_stmt(t, local, pkg);
+        for (auto& t : x->catch_body) qual_stmt(t, local, pkg);
     }
 }
 
@@ -517,6 +522,11 @@ void hide_stmt(ast::Stmt& s, const std::map<std::string, std::string>& hide) {
         for (auto& t : x->body) hide_stmt(t, hide);
     } else if (auto* x = std::get_if<ast::SExpr>(&s.v)) {
         hide_expr(x->expr, hide);
+    } else if (auto* x = std::get_if<ast::SThrow>(&s.v)) {
+        hide_expr(x->value, hide);
+    } else if (auto* x = std::get_if<ast::STryCatch>(&s.v)) {
+        for (auto& t : x->try_body) hide_stmt(t, hide);
+        for (auto& t : x->catch_body) hide_stmt(t, hide);
     }
 }
 
@@ -551,6 +561,18 @@ bool load_registry_package(const std::string& name, std::string& out_src,
     if (!ir::is_kebab_case(name)) {
         out_err = "invalid module name '" + name + "'";
         return false;
+    }
+    // std modules implemented in Marina itself ship with the compiler as
+    // plain .tsm sources under `stdlib/` and are merged like packages
+    if (name == "map") {
+        fs::path p = fs::path(workspace_root()) / "stdlib" / name / "main.tsm";
+        auto src = read_file(p);
+        if (!src) {
+            out_err = "std module '" + name + "' is missing its source (" + p.string() + ")";
+            return false;
+        }
+        out_src = *src;
+        return true;
     }
     fs::path pkg_dir = fs::path(registry_root()) / name;
     std::error_code ec;

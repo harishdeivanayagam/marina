@@ -1,7 +1,7 @@
 // The fs and crypto standard libraries.
 // fs calls are async now: `await` them (main is async).
-use fs
-use crypto
+import fs
+import crypto
 
 async function main() {
     // --- filesystem ---

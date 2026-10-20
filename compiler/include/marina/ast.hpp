@@ -208,10 +208,24 @@ struct SFor {
 struct SExpr {
     ExprPtr expr;
 };
+// `throw expr;` — raises an exception carrying a string message.
+struct SThrow {
+    ExprPtr value;
+    Span span;
+};
+// `try { ... } catch (e) { ... }` — runs the try body; on a runtime panic
+// or a `throw`, binds the error message (a `string`) to `catch_name` and
+// runs the catch body.
+struct STryCatch {
+    std::vector<Stmt> try_body;
+    std::optional<std::string> catch_name;
+    std::vector<Stmt> catch_body;
+    Span span;
+};
 
 struct Stmt {
     std::variant<SLet, SAssign, SMemberAssign, SIndexAssign, SReturn, SIf,
-                 SWhile, SFor, SExpr>
+                 SWhile, SFor, SExpr, SThrow, STryCatch>
         v;
     Stmt() : v(SLet{}) {}
 };

@@ -14,6 +14,7 @@ Memory management is **Automatic Reference Counting (ARC)**, in the style of Swi
 ```
 marina/
 ├── examples/                  # example programs (see below)
+├── stdlib/                    # std modules written in Marina itself (map)
 ├── compiler/                  # the compiler library + LSP (C++20)
 │   ├── include/marina/        # public headers
 │   ├── src/                   # lexer, parser, checker, codegen, pipeline
@@ -118,7 +119,7 @@ Projects are described by a **`package.json`** in the project root:
 }
 ```
 
-**The registry model** — like Rust's crates.io, not node_modules. Packages are installed *once* into a global registry (default `~/.wave/registry/<name>/<version>/main.tsm`, override with the `WAVE_REGISTRY` env var) and every project on the machine uses that copy. There is no per-project dependency folder to commit or vendor. A package is a directory (or git repo) with a `main.tsm` entry file and optional `package.json` metadata (`name`, `version`); `wave add` copies it into the registry and records the dependency. In code, `use my-pkg` merges the package behind a namespace: `my-pkg.fn(...)` calls an `export`ed function. A function or class without `export` is not visible to other modules (`no exported member 'fn' from module 'my-pkg'`). Packages expose functions and classes only — no top-level statements, no `main`, and no dependencies on other packages yet (std modules `net`/`http`/`fs`/`crypto`/`sql` are allowed).
+**The registry model** — like Rust's crates.io, not node_modules. Packages are installed *once* into a global registry (default `~/.wave/registry/<name>/<version>/main.tsm`, override with the `WAVE_REGISTRY` env var) and every project on the machine uses that copy. There is no per-project dependency folder to commit or vendor. A package is a directory (or git repo) with a `main.tsm` entry file and optional `package.json` metadata (`name`, `version`); `wave add` copies it into the registry and records the dependency. In code, `import my-pkg` merges the package behind a namespace: `my-pkg.fn(...)` calls an `export`ed function. A function or class without `export` is not visible to other modules (`no exported member 'fn' from module 'my-pkg'`). Packages expose functions and classes only — no top-level statements, no `main`, and no dependencies on other packages yet (std modules `net`/`http`/`fs`/`crypto`/`sql`/`map` are allowed).
 
 ### One-off files
 
@@ -380,6 +381,7 @@ Rules:
 - Type bindings are inferred from the call arguments when possible; explicit type arguments (`pick<Int32>(...)`) override inference
 - A generic function whose return type is annotated may call itself recursively; without an annotation, recursion needs an explicit type argument at the recursive call
 - Generic classes are instantiated with `new Name<T>()`; each `T` used produces a distinct static class with its own field layout
+- Generic classes support constructors and methods (the std `map` module is built on this): every method is specialized per instantiation with a `this` parameter, and `private` methods are usable inside the class
 
 ### Interfaces
 
@@ -468,18 +470,40 @@ for (let i = 0; i < 4; i += 2) {
 
 Loop conditions must be `bool` (no truthiness), and the init variable of a `for` is scoped to the loop.
 
+### Exceptions: `try` / `catch` / `throw`
+
+`throw` raises an exception carrying a `string` message; `try`/`catch` runs code and handles anything raised inside it — including **runtime panics** (array index out of bounds, popping an empty array, fs/sql errors), which are catchable like in JavaScript:
+
+```tsm
+let numbers = [1, 2, 3]
+
+try {
+    throw "custom failure"
+} catch (err) {
+    console.log(`caught: ${err}`)  // caught: custom failure
+}
+
+try {
+    console.log(numbers[10])       // runtime panic: index out of bounds
+} catch (err) {
+    console.log(`caught: ${err}`)  // caught: array index 10 out of bounds (length 3)
+}
+```
+
+The `catch` binding is a `string` (the error message) and is optional — a bare `catch { ... }` ignores it. Exceptions propagate across function calls to the nearest enclosing `try`; an exception that reaches the top of the program prints `uncaught exception: ...` (or `marina runtime panic: ...` for runtime errors) and exits with status 101. `throw` requires a string value, and `await` is not allowed inside a `try` or `catch` block (v0.2). There is no `finally`.
+
 ### Entry point
 
 Define `main` (sync or `async`). If it is `async`, the runtime drives its promise to completion before exiting.
 
-## Standard libraries: `net`, `http`, `fs`, `crypto` and `sql`
+## Standard libraries: `net`, `http`, `fs`, `crypto`, `sql` and `map`
 
-Four std modules ship with the compiler and runtime — bring them in with a top-level `use` statement (`use http`; the JS-style `import http from "http"` is **not** supported). **`http` is built on top of `net`**: its client literally composes `net.connect`/`write`/`read_all`/`close` in the runtime.
+Std modules ship with the compiler and runtime — bring them in with a top-level `import` statement (`import http`). **`http` is built on top of `net`**: its client literally composes `net.connect`/`write`/`read_all`/`close` in the runtime. **`map` is different: it is written in Marina itself** (`stdlib/map/main.tsm`) — a generic `Map<V>` class monomorphized per value type, exactly like a user-defined module.
 
 ### `net` — raw TCP
 
 ```tsm
-use net
+import net
 
 async function main() {
     let s = net.connect("localhost", 8080)  // returns a Stream (blocks until connected)
@@ -495,7 +519,7 @@ async function main() {
 ### `http` — client and server
 
 ```tsm
-use http
+import http
 
 // --- low-level server: http.listen(port, handler) ---
 let todos = ["buy groceries", "ship v0.2"]
@@ -527,7 +551,7 @@ let resp2 = http.post("http://localhost:8080/todos", "new todo")
 For real services there is a higher-level, express-flavored API: a `Server` with path-prefixed routers and a JSON body validator, all built from module-qualified `new` expressions and dotted type annotations.
 
 ```tsm
-use http
+import http
 
 let todos = ["Buy groceries", "Buy a new phone", "Buy a new car"]
 
@@ -577,7 +601,7 @@ curl -X POST localhost:8080/todos -d '{"text":"hi"}'         # -> runtime panic 
 ### `fs` — the filesystem
 
 ```ts
-use fs
+import fs
 
 fs.writeFile("/tmp/demo.txt", "hello from marina")
 console.log(fs.exists("/tmp/demo.txt"))     // true
@@ -595,7 +619,7 @@ fs.remove("/tmp/demo.txt")                  // file or directory (recursive for 
 Pure C++ implementations in the runtime (no external libraries beyond libc++/sqlite): a from-scratch SHA-256, hand-rolled base64, and `/dev/urandom` for randomness.
 
 ```ts
-use crypto
+import crypto
 
 console.log(crypto.sha256("hello"))          // 64-char lowercase hex digest
 console.log(crypto.base64Encode("marina"))   // bWFyaW5h
@@ -611,7 +635,7 @@ let id = crypto.uuid()                       // random v4 UUID (8-4-4-4-12)
 SQL with prepared statements via tagged templates. In v0.2 the only driver is **SQLite** (FFI against the system `libsqlite3` — macOS ships it; Linux needs the `sqlite3` package). `mysql`, `pg` and `mariadb` are accepted driver names but abort at compile time (or runtime panic) until implemented.
 
 ```ts
-use sql
+import sql
 
 // driver: "sqlite" | "mysql" | "pg" | "mariadb" (only sqlite works in v0.2)
 let db = new sql.Connection("sqlite", "/tmp/data.db")
@@ -632,6 +656,39 @@ db.close()
 - `db.close()` — closes the connection; using it afterwards is a runtime panic
 - Binds accept any integer (`Int8`–`Int64`, `UInt8`–`UInt64`), any float (`Float32`, `Float64`), `string`, `bool` and null; anything else is rejected by the checker. Values are passed to SQLite as a 64-bit integer or a 64-bit float (`UInt64` above 2^63−1 does not round-trip through SQLite's signed integer)
 - Values interpolated into `sql.stmt\`...\`` are always bound as parameters (prepared statements) — never string-concatenated, so no SQL injection
+
+### `map` — a dictionary, written in Marina itself
+
+`map` is the proof that the module system and generics are real: the whole module is **Marina code** (`stdlib/map/main.tsm`), not a C++ builtin. It provides a string-keyed dictionary `Map<V>` whose values can be any one type — each distinct `V` produces its own specialized copy of the code, exactly like generic functions — so it costs nothing at runtime.
+
+```ts
+import map
+
+let ages = map.newMap<Int32>()   // one factory call per value type
+ages.set("lena", 30)
+ages.set("kim", 25)
+ages.set("lena", 31)             // set overwrites an existing key
+
+console.log(ages.get("lena"))    // 31
+console.log(ages.size)           // 2
+console.log(ages.has("kim"))     // true
+console.log(ages.keys)           // [lena, kim] — insertion order
+console.log(ages.values)         // [31, 25]
+
+ages.delete("kim")
+ages.clear()                     // remove everything
+```
+
+API:
+- `map.newMap<V>() -> Map<V>` — create an empty map (the factory is the public way in; generic `new map.Map<V>()` is not supported yet)
+- `set(key: string, value: V): void` — insert or overwrite
+- `get(key: string) -> V` — the value at `key`; a missing key aborts with the array bounds panic (no error values — same philosophy as fs/http)
+- `getOr(key: string, fallback: V) -> V` — safe read: returns `fallback` when the key is absent
+- `has(key: string) -> bool` — key present?
+- `delete(key: string): void`, `clear(): void`
+- getters: `size -> Int32`, `keys -> Array<string>`, `values -> Array<V>` (in key insertion order)
+
+Implementation notes: `Map<V>` keeps two parallel private arrays (`keyList: Array<string>`, `valList: Array<V>`) in sync and does a linear scan for lookup — fine for the small collections Marina targets. Everything (including the `private indexOf` helper) is ordinary Marina: a generic class with methods, exported through a module.
 
 ## How a program is compiled
 
@@ -681,18 +738,20 @@ Marina ships its own language server (`marina-lsp`, in `compiler/lsp/main.cpp`) 
 | `examples/async-example.tsm` | `async/await`, promises, promise executors, `setTimeout`, fire-and-forget calls |
 | `examples/objects.tsm` | ghost classes from object literals, declared classes, field access/mutation, objects in arrays |
 | `examples/todo-http.tsm` | express-style server: `new http.Server`, `server.router`, `router.get/post`, `new http.JsonValidator`, `await server.listen`, top-level globals shared with handlers (try `curl localhost:8080/todos`) |
-| `examples/http-get.tsm` | `use http` client: `http.get`, reading `resp.status`/`resp.body` (start the todo server first) |
-| `examples/tcp-client.tsm` | `use net`: `net.connect`, `stream.write`/`read_all`/`close` (run against `nc -l 8080`) |
+| `examples/http-get.tsm` | `import http` client: `http.get`, reading `resp.status`/`resp.body` (start the todo server first) |
+| `examples/tcp-client.tsm` | `import net`: `net.connect`, `stream.write`/`read_all`/`close` (run against `nc -l 8080`) |
 | `examples/generics.tsm` | generic functions with inferred and explicit type arguments, generic `class Box<T>` |
 | `examples/interfaces.tsm` | structural interfaces: fields, methods dispatched by class, `Array<Named>`, private methods |
 | `examples/inheritance.tsm` | TypeScript-style OOP: `extends`, `implements`, abstract classes/methods, virtual dispatch through `Array<Shape>`, `protected`, statics, getters, `super` |
 | `examples/oop-all.tsm` | full OOP sweep: two-level inheritance with `super.method()`, abstract members implemented (and inherited), `get`/`set` pairs, statics + static getters, interfaces satisfied by inheritance, polymorphic factory functions |
-| `examples/fs-crypto.tsm` | `use fs` (write/read/exists/mkdir/readDir/remove) and `use crypto` (sha256, base64, randomHex, uuid) |
-| `examples/todos-http-sqlite.tsm` | `use sql`: `new sql.Connection`, `sql.stmt\`...\`` prepared statements, `db.execute`/`db.query`, typed rows via interfaces — a persistent todo REST API on SQLite (try `curl localhost:8080/todos`) |
+| `examples/map-demo.tsm` | `import map`: the std `Map<V>` dictionary — `newMap`, `set`/`get`/`getOr`/`has`/`delete`/`clear`, `size`/`keys`/`values` getters, overwrite-on-set, key iteration, one instantiation per value type |
+| `examples/try-catch.tsm` | `try`/`catch`/`throw`: catching thrown strings, catching runtime panics, the catch binding, propagation across calls, `return` inside a `try` |
+| `examples/fs-crypto.tsm` | `import fs` (write/read/exists/mkdir/readDir/remove) and `import crypto` (sha256, base64, randomHex, uuid) |
+| `examples/todos-http-sqlite.tsm` | `import sql`: `new sql.Connection`, `sql.stmt\`...\`` prepared statements, `db.execute`/`db.query`, typed rows via interfaces — a persistent todo REST API on SQLite (try `curl localhost:8080/todos`) |
 
 ## Current limitations (v0.2)
 
-- Packages expose functions and classes only: no top-level statements, no `main`, and no package-on-package dependencies (std modules `net`/`http`/`fs`/`crypto`/`sql` are allowed)
+- Packages expose functions and classes only: no top-level statements, no `main`, and no package-on-package dependencies (std modules `net`/`http`/`fs`/`crypto`/`sql`/`map` are allowed)
 - sql: SQLite only (via the system `libsqlite3`); `mysql`/`pg`/`mariadb` drivers are planned but abort at compile time; rows of `db.query` are dynamically bound to the SELECT's columns (no nested transactions, no prepared-statement reuse across calls)
 - http: `http://` URLs only (no TLS/https), sequential request handling on the server (one connection at a time), no request headers, no streaming responses; one HTTP server per program; the express-style API supports `get`/`post` routes only
 - Schema validation (`JsonValidator.validate`) aborts the program with a runtime panic on an invalid body (no per-request error responses yet)
@@ -701,7 +760,8 @@ Marina ships its own language server (`marina-lsp`, in `compiler/lsp/main.cpp`) 
 - Interfaces cannot appear as class fields through `Array<Interface>`/`Promise<Interface>` annotations yet
 - Generic recursion requires an annotated return type (or an explicit type argument at the recursive call); no generic constraints/bounds on type parameters
 - No `break`/`continue` inside loops
-- `await` is only allowed at the top level of an `async function` body (not inside `if`/`while`/`for`)
+- `await` is only allowed at the top level of an `async function` body (not inside `if`/`while`/`for`/`try`)
+- Exceptions carry a string message only (`throw` takes a string, `catch` binds a string); no `finally`, no typed/structured errors, no re-throw sugar
 - Promises never reject (`reject` is rejected by the checker); no promise-of-promise
 - Lambdas are supported only where the compiler needs them (promise executors, `setTimeout` callbacks, array callbacks)
 - Return types of unannotated functions are inferred in declaration order — recursive calls to the function being checked need an explicit return-type annotation
