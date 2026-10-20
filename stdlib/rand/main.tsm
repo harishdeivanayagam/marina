@@ -17,14 +17,17 @@
 // Array helpers (`int`, `pick`, `shuffle`) need Int32 indices, and
 // integer widths do not convert to each other, so they draw from an
 // independent 32-bit LCG (`glibc`-style constants) kept alongside the
-// 64-bit state. Two `Rand`s created in the same millisecond share their
-// Int32 sequence — use `newRand(seed)` with distinct seeds when that
-// matters.
+// 64-bit state. That Int32 stream is seeded from `/dev/urandom` (via
+// `crypto.randomHex`) in every constructor — it cannot be derived from
+// the Int64 state, so `int()`/`pick()`/`shuffle()` are fresh per
+// instance even for identical seeds. The Int64 methods (`next`,
+// `below`, `range`, `float`, `bool`) remain fully seed-reproducible.
 //
 // All bounds are exclusive on the upper end and throw on invalid input
 // (empty arrays, non-positive bounds), following the language's
 // exception philosophy.
 
+import crypto
 import time
 
 export class Rand {
@@ -37,7 +40,26 @@ export class Rand {
         let a: Int64 = 6364136223846793005
         let c: Int64 = 1442695040888963407
         this.state = this.state * a + c
-        this.small = 12345
+        this.small = this.urandomSmall()
+    }
+
+    // a random Int32 from /dev/urandom: 4 random bytes as hex, each
+    // hex character a nibble — the only way to narrow into Int32, since
+    // integer widths do not convert in-language
+    private urandomSmall(): Int32 {
+        let hex = crypto.randomHex(4)
+        let v: Int32 = 0
+        for (let i = 0; i < 8; i++) {
+            let c = hex.charAt(i)
+            let nib: Int32 = 0
+            if (c >= 48 && c <= 57) {
+                nib = c - 48
+            } else if (c >= 97 && c <= 102) {
+                nib = c - 87
+            }
+            v = v * 16 + nib
+        }
+        return v
     }
 
     // the raw next value: the full signed Int64 state
@@ -104,7 +126,7 @@ export function newRand(seed: Int64): Rand {
 }
 
 // create a Rand seeded from the wall clock and the monotonic clock
-// (the module's own `use time` provides the seeds; callers just
+// (the module's own `import time` provides the seeds; callers just
 // `import rand`)
 export function newSeeded(): Rand {
     let a: Int64 = 6364136223846793005

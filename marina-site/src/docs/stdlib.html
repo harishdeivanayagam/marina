@@ -221,11 +221,11 @@ ages.set(<span class="s">"kim"</span>, 25)
 <span class="f">console</span>.log(ages.keys)          <span class="c">// [lena, kim]</span></code></pre>
 
     <h2 id="rand">rand — randomness</h2>
-    <p>Written in Marina itself (<code>stdlib/rand/main.tsm</code>, merged like a package). A <code>Rand</code> holds a 64-bit linear congruential state advanced with multiply/add; array helpers draw from an independent 32-bit stream (integer widths do not convert to each other, so <code>Int32</code> indices need their own sequence).</p>
+    <p>Written in Marina itself (<code>stdlib/rand/main.tsm</code>, merged like a package). A <code>Rand</code> holds a 64-bit linear congruential state advanced with multiply/add; the array helpers draw from an independent 32-bit stream seeded from <code>/dev/urandom</code> (integer widths do not convert to each other, so <code>Int32</code> indices need their own sequence).</p>
     <table>
       <tr><th>Member</th><th>Description</th></tr>
       <tr><td><code>rand.newSeeded()</code></td><td>A generator seeded from the wall clock and the monotonic clock.</td></tr>
-      <tr><td><code>rand.newRand(seed)</code></td><td>A generator from an explicit <code>Int64</code> seed (same seed → same sequence).</td></tr>
+      <tr><td><code>rand.newRand(seed)</code></td><td>A generator from an explicit <code>Int64</code> seed (same seed → same <code>Int64</code> sequence; the <code>Int32</code> stream stays urandom-seeded).</td></tr>
       <tr><td><code>r.next()</code></td><td>The raw next value — the full signed <code>Int64</code> state.</td></tr>
       <tr><td><code>r.below(n)</code></td><td>Uniform <code>Int64</code> in <code>[0, n)</code>.</td></tr>
       <tr><td><code>r.range(lo, hi)</code></td><td>Uniform <code>Int64</code> in <code>[lo, hi)</code>.</td></tr>
