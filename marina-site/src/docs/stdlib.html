@@ -1,7 +1,7 @@
 ---
 layout: base.html
 title: The Standard Library
-description: Marina's built-in globals (console, setTimeout, Promise) and the std modules — net, http, fs, crypto and sql — with signatures and examples.
+description: Marina's built-in globals (console, setTimeout, Promise) and all nine std modules — net, http, fs, crypto, time, os, sql, map and rand — with signatures and examples.
 ---
 
 <div class="wrap doc-layout">
@@ -16,6 +16,7 @@ description: Marina's built-in globals (console, setTimeout, Promise) and the st
     <a href="#time">time — clocks &amp; sleep</a>
     <a href="#os">os — platform &amp; process</a>
     <a href="#sql">sql — SQLite</a>
+    <a href="#map">map — dictionary</a>
     <a href="#rand">rand — randomness</a>
     <a href="#arrays">Array methods</a>
     <a href="#strings">String members</a>
@@ -23,13 +24,13 @@ description: Marina's built-in globals (console, setTimeout, Promise) and the st
 
   <div class="doc">
     <h1>The Standard Library</h1>
-    <p class="muted">Everything marina programs can call without installing a package: a handful of built-in globals, five <code>use</code>-able std modules, and the methods every array and string carries.</p>
+    <p class="muted">Everything marina programs can call without installing a package: a handful of built-in globals, nine <code>import</code>-able std modules, and the methods every array and string carries.</p>
 
     <h2 id="overview">Overview</h2>
     <p>Two kinds of library ship with the language:</p>
     <ul>
       <li><strong>Built-in globals</strong> — <code>console</code>, <code>setTimeout</code> and <code>Promise</code> are always available, no import needed.</li>
-      <li><strong>Std modules</strong> — <code>net</code>, <code>http</code>, <code>fs</code>, <code>crypto</code> and <code>sql</code> are brought in with a top-level <code>import</code> statement:</li>
+      <li><strong>Std modules</strong> — <code>net</code>, <code>http</code>, <code>fs</code>, <code>crypto</code>, <code>time</code>, <code>os</code>, <code>sql</code>, <code>map</code> and <code>rand</code> are brought in with a top-level <code>import</code> statement:</li>
     </ul>
 <pre><code><span class="k">import</span> http
 <span class="k">import</span> crypto</code></pre>
@@ -196,6 +197,28 @@ description: Marina's built-in globals (console, setTimeout, Promise) and the st
     <span class="k">let</span> rows = <span class="k">await</span> db.query(<span class="t">sql</span>.stmt<span class="s">`SELECT id, name FROM t`</span>)
     <span class="f">console</span>.log(rows)
 }</code></pre>
+
+    <h2 id="map">map — a dictionary, written in Marina itself</h2>
+    <p>Like <code>rand</code> below, the whole module is <strong>Marina code</strong> (<code>stdlib/map/main.tsm</code>) — the proof that the module system and generics are real. A string-keyed dictionary <code>Map&lt;V&gt;</code>; each distinct value type <code>V</code> produces its own specialized copy of the code at compile time, so lookups cost a plain function call.</p>
+    <table>
+      <tr><th>Member</th><th>Description</th></tr>
+      <tr><td><code>map.newMap&lt;V&gt;()</code></td><td>Create an empty map (the factory is the public way in; generic <code>new map.Map&lt;V&gt;()</code> is not supported yet).</td></tr>
+      <tr><td><code>m.set(key, value)</code></td><td>Insert or overwrite; keys keep insertion order.</td></tr>
+      <tr><td><code>m.get(key)</code></td><td>The value at <code>key</code>; a missing key aborts with the array bounds panic (no error values).</td></tr>
+      <tr><td><code>m.getOr(key, fallback)</code></td><td>Safe read — returns <code>fallback</code> when the key is absent.</td></tr>
+      <tr><td><code>m.has(key)</code></td><td>Key present?</td></tr>
+      <tr><td><code>m.delete(key)</code> / <code>m.clear()</code></td><td>Remove one entry / remove everything.</td></tr>
+      <tr><td><code>m.size</code> / <code>m.keys</code> / <code>m.values</code></td><td>Getters: entry count, the keys (<code>Array&lt;string&gt;</code>) and the values, in key insertion order.</td></tr>
+    </table>
+<pre><code><span class="k">import</span> map
+
+<span class="k">let</span> ages = <span class="t">map</span>.newMap&lt;<span class="t">Int32</span>&gt;()
+ages.set(<span class="s">"lena"</span>, 30)
+ages.set(<span class="s">"kim"</span>, 25)
+<span class="f">console</span>.log(ages.get(<span class="s">"lena"</span>))   <span class="c">// 30</span>
+<span class="f">console</span>.log(ages.getOr(<span class="s">"zoe"</span>, 0))  <span class="c">// 0</span>
+<span class="f">console</span>.log(ages.has(<span class="s">"kim"</span>))    <span class="c">// true</span>
+<span class="f">console</span>.log(ages.keys)          <span class="c">// [lena, kim]</span></code></pre>
 
     <h2 id="rand">rand — randomness</h2>
     <p>Written in Marina itself (<code>stdlib/rand/main.tsm</code>, merged like a package). A <code>Rand</code> holds a 64-bit linear congruential state advanced with multiply/add; array helpers draw from an independent 32-bit stream (integer widths do not convert to each other, so <code>Int32</code> indices need their own sequence).</p>
