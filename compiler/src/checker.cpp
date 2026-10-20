@@ -4503,8 +4503,10 @@ public:
                         return cbool(false);
                     }
                     CExpr a = check_expr(*args[0], false);
-                    adapt_literal(a, cty_int(32, false));
-                    coerce(expr_ty(a), cty_int(32, false), args[0]->span);
+                    if (expr_ty(a).tag != CTy::Tag::Str) {
+                        adapt_literal(a, cty_int(32, false));
+                        coerce(expr_ty(a), cty_int(32, false), args[0]->span);
+                    }
                     CStringFromCharCode f;
                     f.v = exptr(std::move(a));
                     return ce(std::move(f));

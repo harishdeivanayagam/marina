@@ -2287,7 +2287,15 @@ struct Gen {
         }
         if (auto* x = std::get_if<CStringFromCharCode>(&e.v)) {
             CgVal v = cg_expr(*x->v);
-            std::string i = sext_i64(v);
+            std::string i;
+            if (v.ty == CgTy::Str) {
+                // fromCharCode(charAt(i)): the code of the 1-char string
+                std::string p = borrow(v);
+                i = fresh("sfc");
+                emit(i + " = call i64 @marina_string_charcode_at(ptr " + p + ", i64 0)");
+            } else {
+                i = sext_i64(v);
+            }
             std::string out = alloca("%mv");
             emit("call void @marina_string_from_code(i64 " + i + ", ptr " + out + ")");
             discard(v);
