@@ -21,13 +21,13 @@ backed by SQLite at `/tmp/todos-http-sqlite.db` (fresh DB, seeded with 10 rows).
 ## Methodology
 
 - Load generated **locally on the instance** (loopback) with `wrk`, so the
-  network path is identical for all four (a public-internet load test from the
-  dev machine proved impossible — the user's ISP path blackholes large packets
-  and filters the ports, see caveats).
+network path is identical for all four (a public-internet load test from the
+dev machine proved impossible — the user's ISP path blackholes large packets
+and filters the ports, see caveats).
 - Per implementation: fresh DB → 10s warmup → **30 s** `wrk -t4 -c64` GET
-  → **20 s** `wrk -t4 -c64` POST → also a `wrk -t2 -c2` GET run.
+→ **20 s** `wrk -t4 -c64` POST → also a `wrk -t2 -c2` GET run.
 - Memory = process `VmRSS`, sampled every 50–100 ms; peak taken over the
-  whole run (idle = right after startup, peak = under the c64 load).
+whole run (idle = right after startup, peak = under the c64 load).
 - POST inserts a row per request (table grows during the 20 s run for all).
 
 ## Results
@@ -61,16 +61,16 @@ The sweep is smooth at every concurrency level — no collapse.
 ## Summary
 
 - **Max requests/sec**: Bun wins on GET (~19.9k req/s, ~597k requests in
-  30 s). The evented marina build is in the same league as Go and Node —
-  ~11.1k req/s at c=64 (~334k requests in 30 s), beating both at c=64 with
-  tighter p99 latency (10 ms vs 15–55 ms). POST (write + validation) at
-  1,400 req/s beats Bun and Node; Go keeps a ~2× edge there.
+30 s). The evented marina build is in the same league as Go and Node —
+~11.1k req/s at c=64 (~334k requests in 30 s), beating both at c=64 with
+tighter p99 latency (10 ms vs 15–55 ms). POST (write + validation) at
+1,400 req/s beats Bun and Node; Go keeps a ~2× edge there.
 - **Memory**: Marina's AOT binary is the lightest by a wide margin
-  (4.2 MB idle / 7.1 MB peak) — a third of Go's peak, ~12× lighter than Node.
+(4.2 MB idle / 7.1 MB peak) — a third of Go's peak, ~12× lighter than Node.
 - Architecture no longer bottlenecks: the poll(2) event loop + keep-alive +
-  promise-based async handlers scale flat across concurrency; the remaining
-  ~1.8× gap to Bun on GET is per-request allocation churn in the runtime
-  (string/json handling), not the server core.
+promise-based async handlers scale flat across concurrency; the remaining
+~1.8× gap to Bun on GET is per-request allocation churn in the runtime
+(string/json handling), not the server core.
 
 ## Fixes required to get marina running
 
@@ -79,44 +79,48 @@ during these benchmarks (otherwise the example segfaults non-deterministically
 on both macOS and Linux):
 
 1. **Uninitialized-memory UB in heap allocation** — `marina_object_new`,
+
    `marina_array_new` and `marina_promise_create` assign `Vec`/`Mutex` fields
-   into memory returned by `alloc()` without initialization; Rust then drops
-   the garbage "old value" and frees a bogus pointer (e.g. it crashed freeing
-   `0x62642e6574` = leftover bytes of the string `"…todos-http-sqlite.db"`).
-   Fixed by using `std::ptr::write` for the non-trivial fields.
-2. **`lto = true` in `[profile.release]`** aggravated the same UB (heap-layout
+    into memory returned by `alloc()` without initialization; Rust then drops
+    the garbage "old value" and frees a bogus pointer (e.g. it crashed freeing
+    `0x62642e6574` = leftover bytes of the string `"…todos-http-sqlite.db"`).
+    Fixed by using `std::ptr::write` for the non-trivial fields.
+2. `lto = true` **in** `[profile.release]` aggravated the same UB (heap-layout
+
    dependent crashes). With the UB fixed, LTO builds are stable again.
 3. **Promise ref leaked per await** (evented rerun) — `marina_await` consumed
+
    the caller's reference but nothing ever released it; one promise leaked
-   per request. The waiter task now inherits the consumed ref and releases
-   it after resume.
+    per request. The waiter task now inherits the consumed ref and releases
+    it after resume.
 4. **Array/Object element buffers + Promise Mutex leaked on free** —
+
    `free_obj` released element payloads but never dropped the `Vec` itself
-   (nor the promise's `Mutex`). Fixed with `drop_in_place` before `dealloc`.
+    (nor the promise's `Mutex`). Fixed with `drop_in_place` before `dealloc`.
 5. **Await results leaked for non-string types** — `materialize_await_value`
+
    retained strings but raw-copied arrays/objects into the frame slot; now
-   retains uniformly and the waiter's copy is released after resume.
+    retains uniformly and the waiter's copy is released after resume.
 
 ## The evented server (architecture)
 
 Thread-per-connection and the serial accept loop were both rejected in favor
 of an evented design:
 
-- **Single `poll(2)` event loop** on the main thread: listener + self-pipe
-  wake fd + every connection; no thread per connection.
+- **Single** `poll(2)` **event loop** on the main thread: listener + self-pipe
+wake fd + every connection; no thread per connection.
 - **Non-blocking sockets for life** (accepted sockets do not inherit
-  `O_NONBLOCK` on Linux — set explicitly on every accept).
+`O_NONBLOCK` on Linux — set explicitly on every accept).
 - **Buffered incremental request parsing** (`try_parse_http`: partial reads
-  OK, 64 KB header / 16 MB body caps) instead of one byte per syscall.
+OK, 64 KB header / 16 MB body caps) instead of one byte per syscall.
 - **HTTP keep-alive** — connections flip back to reading after a response
-  (this also eliminated server-side TIME-WAIT churn that poisoned SYN
-  retransmits under `Connection: close`).
-- **Async handlers as promises** — `Request -> Server -> Promise
-  [todosRouter.get()]`: routes are `async`, handlers run to first await on
-  the event loop, blocking I/O (SQLite, fs, net) runs on a worker pool, and
-  the resolved promise resumes the handler.
+(this also eliminated server-side TIME-WAIT churn that poisoned SYN
+retransmits under `Connection: close`).
+- **Async handlers as promises** — `Request -> Server -> Promise [todosRouter.get()]`: routes are `async`, handlers run to first await on
+the event loop, blocking I/O (SQLite, fs, net) runs on a worker pool, and
+the resolved promise resumes the handler.
 - Responses are written with a poll(`POLLOUT`) loop so worker threads never
-  flip the shared `O_NONBLOCK` flag against the event loop.
+flip the shared `O_NONBLOCK` flag against the event loop.
 
 Soak tests after the fixes: 200k GETs on Vultr → **RSS 4.4 MB** (before the
 refcount fixes the same route leaked ~2.5 KB/request → 724 MB); local
@@ -126,14 +130,14 @@ RSS 3.5 MB.
 ## Caveats
 
 - Loopback load generation shares the single vCPU between `wrk` and the
-  server, so absolute numbers are lower than true capacity — identical for
-  all four, so the comparison holds.
+server, so absolute numbers are lower than true capacity — identical for
+all four, so the comparison holds.
 - An attempt to generate load from a second Vultr instance in the same
-  datacenter (0.28 ms RTT) was made, but Vultr's edge filtered/throttled
-  instance-to-instance public traffic on port 8080 (SSH tunnel also collapsed
-  under wrk load); the loadgen instance was deleted unused.
+datacenter (0.28 ms RTT) was made, but Vultr's edge filtered/throttled
+instance-to-instance public traffic on port 8080 (SSH tunnel also collapsed
+under wrk load); the loadgen instance was deleted unused.
 - The user's ISP path to Vultr blr drops 1472-byte packets (MTU blackhole)
-  and filtered HTTP ports during testing, so remote load generation from the
-  dev machine was not viable.
+and filtered HTTP ports during testing, so remote load generation from the
+dev machine was not viable.
 
 Raw outputs: `bench/raw/`. Scripts: `bench/` (ports in `bench/{node,bun,go}/`).

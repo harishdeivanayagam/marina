@@ -1,8 +1,0 @@
-[package]
-name = "marina"
-version = "0.2.0"
-edition = "2021"
-
-[[bin]]
-name = "marina-lsp"
-path = "src/bin/marina-lsp.rs"

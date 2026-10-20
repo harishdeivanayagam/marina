@@ -11,15 +11,9 @@ free -m | head -2
 echo "=== apt packages"
 export DEBIAN_FRONTEND=noninteractive
 apt-get update -qq
-apt-get install -y -qq build-essential clang libsqlite3-dev sqlite3 curl git rsync > /dev/null
+apt-get install -y -qq build-essential cmake clang libsqlite3-dev sqlite3 curl git rsync > /dev/null
 clang --version | head -1
-
-echo "=== rustup (minimal profile)"
-if [ ! -x /root/.cargo/bin/cargo ]; then
-  curl -4 --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain stable
-fi
-source /root/.cargo/env
-rustc --version
+cmake --version | head -1
 
 echo "=== node 22 (NodeSource)"
 if ! command -v node > /dev/null; then

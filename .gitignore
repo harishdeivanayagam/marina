@@ -1,4 +1,3 @@
-/target
+/build
 /.marina
-Cargo.lock
 .DS_Store

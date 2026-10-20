@@ -1,8 +1,0 @@
-[package]
-name = "wave"
-version = "0.2.0"
-edition = "2021"
-
-[dependencies]
-marina = { path = "../marina" }
-serde_json = { version = "1", features = ["preserve_order"] }

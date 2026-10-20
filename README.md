@@ -4,40 +4,35 @@
 
 # Marina
 
-**Marina** is a strictly-typed, ahead-of-time compiled subset of TypeScript that emits **LLVM IR** and links against a custom **Rust runtime**. The language has single-threaded semantics like JavaScript, but the runtime itself is a **multithreaded event loop** — async code is lowered to promise state machines that are resumed on a worker pool.
+**Marina** is a strictly-typed, ahead-of-time compiled subset of TypeScript that emits **LLVM IR** and links against a custom **C++ runtime**. The language has single-threaded semantics like JavaScript, but the runtime itself is a **multithreaded event loop** — async code is lowered to promise state machines that are resumed on a worker pool.
 
 Memory management is **Automatic Reference Counting (ARC)**, in the style of Swift: every heap object (strings, promises) carries a reference count, and the compiler inserts retain/release calls. Interned string literals are immortal (`rc < 0`).
 
 ```
 marina/
 ├── examples/                  # example programs (see below)
-├── crates/
-│   ├── wave/                  # the package manager & build tool (`wave run`, …)
-│   ├── marina/                # the compiler library + LSP (Rust)
-│   │   └── src/
-│   │       ├── bin/marina-lsp.rs  # LSP server (see "Editor support" below)
-│   │       ├── pipeline.rs    # shared lex→parse→check→codegen→link pipeline
-│   │       ├── lexer.rs       # tokenizer
-│   │       ├── ast.rs         # AST types
-│   │       ├── parser.rs      # recursive-descent parser
-│   │       ├── checker.rs     # strict type checker, inference & naming rules
-│   │       └── codegen.rs     # LLVM IR (textual) generation
-│   └── marina-runtime/        # runtime staticlib linked into every binary
-│       └── src/lib.rs         # ARC, promises, event loop, objects, printing, net/http/fs/crypto/sql std modules
+├── compiler/                  # the compiler library + LSP (C++20)
+│   ├── include/marina/        # public headers
+│   ├── src/                   # lexer, parser, checker, codegen, pipeline
+│   ├── lsp/main.cpp           # LSP server (see "Editor support" below)
+│   └── tools/                 # tokdump / astdump debug tools
+├── runtime/                   # runtime staticlib linked into every binary
+│   └── src/                   # ARC, promises, event loop, objects, printing, net/http/fs/crypto/sql std modules
+├── wave/                      # the package manager & build tool (`wave run`, …)
 ├── editors/                   # "marina-lsp" VSIX extension for Cursor/VS Code
-└── Cargo.toml                 # cargo workspace
+└── CMakeLists.txt             # CMake build (C++20)
 ```
 
 ## Requirements
 
-- Rust (cargo) — builds both the compiler and the runtime
+- CMake (≥ 3.20) and a C++20 compiler — build the compiler, runtime, and wave
 - `clang` — compiles the generated `.ll` and links the runtime; the compiler searches `clang`, `clang-21`, `clang-20`, `clang-18`, `cc`
 - `libsqlite3` — linked into every binary for the `sql` std module (macOS ships it; on Linux install the `sqlite3`/`libsqlite3-dev` package)
 
 ## Building
 
 ```sh
-cargo build
+cmake -S . -B build && cmake --build build -j
 ```
 
 ## Running programs
@@ -46,11 +41,11 @@ Marina programs use the **`.tsm`** extension (ts marina), and file names must be
 
 ### The CLI: `wave`
 
-**wave** is the cargo of Marina — the single CLI for the language. Install it (plus `marina-lsp` for editor support):
+**wave** is the cargo of Marina — the single CLI for the language. Build it (plus `marina-lsp` for editor support) from the repo root:
 
 ```sh
-cargo install --path crates/wave
-cargo install --path crates/marina   # installs the `marina-lsp` server
+cmake -S . -B build && cmake --build build -j
+# binaries: build/wave, build/marina-lsp
 ```
 
 | Command | What it does |
@@ -100,7 +95,7 @@ wave build examples/hello-world.tsm
 ./.marina/hello-world
 ```
 
-`build` also writes the textual LLVM IR next to the binary (`./.marina/<name>.ll`) so you can inspect what your program compiles to. From this repo you can also use `cargo run -q -p wave -- run examples/hello-world.tsm`.
+`build` also writes the textual LLVM IR next to the binary (`./.marina/<name>.ll`) so you can inspect what your program compiles to. From this repo you can also use `build/wave run examples/hello-world.tsm`.
 
 ## The language
 
@@ -493,7 +488,7 @@ fs.remove("/tmp/demo.txt")                  // file or directory (recursive for 
 
 ### `crypto` — hashing, encoding, randomness
 
-Pure-Rust implementations in the runtime (no external crates): a from-scratch SHA-256, hand-rolled base64, and `/dev/urandom` for randomness.
+Pure C++ implementations in the runtime (no external libraries beyond libc++/sqlite): a from-scratch SHA-256, hand-rolled base64, and `/dev/urandom` for randomness.
 
 ```ts
 use crypto
@@ -545,7 +540,7 @@ The runtime exports a stable C ABI (`marina_retain`, `marina_release`, `marina_p
 
 ## Editor support
 
-Marina ships its own language server (`marina-lsp`, in `crates/marina/src/bin/marina-lsp.rs`) — a dependency-free JSON-RPC implementation over stdio that reuses the compiler's lexer/parser/checker.
+Marina ships its own language server (`marina-lsp`, in `compiler/lsp/main.cpp`) — a dependency-free JSON-RPC implementation over stdio that reuses the compiler's lexer/parser/checker.
 
 **Features**
 
@@ -559,9 +554,9 @@ Marina ships its own language server (`marina-lsp`, in `crates/marina/src/bin/ma
 
 1. Install the server on your `PATH`:
    ```
-   cargo install --path crates/marina
+   cmake -S . -B build && cmake --build build -j && cp build/marina-lsp /usr/local/bin/
    ```
-   (installs the `marina-lsp` server)
+   (builds the `marina-lsp` server)
 2. Extensions panel → `…` → **Install from VSIX…** → `editors/marina-lsp/marina-lsp-0.2.2.vsix`
    (rebuild with `editors/marina-lsp/build-vsix.sh`)
 3. Open any `.tsm` file — highlighting applies immediately and diagnostics appear on open and every edit. If the binary
