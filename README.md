@@ -1,6 +1,13 @@
 <p align="center">
-  <img src="assets/logo.svg" alt="Marina" width="640">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="assets/logo-dark.svg">
+    <source media="(prefers-color-scheme: light)" srcset="assets/logo-light.svg">
+    <img src="assets/logo-light.svg" alt="Marina" width="280">
+  </picture>
 </p>
+<p align="center"><em>a strictly-typed, AOT-compiled TypeScript subset</em></p>
+
+> **Experimental.** Marina is a research project. Do not use it in production.
 
 # Marina
 

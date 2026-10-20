@@ -1,0 +1,14 @@
+{
+  "name": "marina-site",
+  "version": "1.0.0",
+  "description": "Website for the Marina language — marina-lang.vercel.app",
+  "type": "module",
+  "scripts": {
+    "dev": "eleventy --serve",
+    "build": "eleventy",
+    "serve": "eleventy --serve"
+  },
+  "devDependencies": {
+    "@11ty/eleventy": "^3.0.0"
+  }
+}
