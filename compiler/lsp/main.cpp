@@ -680,10 +680,14 @@ std::vector<LspDiag> check_document(const std::string& text, const std::string& 
     }
     bool has_ext = path_ends_with_tsm(path);
     if (!has_ext) {
-        out.push_back(LspDiag{0, 0, 0, 1,
-                              "marina programs use the .tsm extension (ts marina)"});
+        // The editor client only attaches this server to marina (.tsm)
+        // documents. If a non-.tsm URI arrives anyway (stale session state,
+        // a mis-associated file), publish empty diagnostics instead of the
+        // ".tsm extension" error — that convention belongs to the CLI
+        // (`wave check`), and flagging e.g. README.md here was pure noise.
+        return out;
     }
-    if (has_ext && !ir::is_kebab_case(stem)) {
+    if (!ir::is_kebab_case(stem)) {
         out.push_back(
             LspDiag{0, 0, 0, 1,
                     "file names must be kebab-case (lowercase words separated by '-')"});

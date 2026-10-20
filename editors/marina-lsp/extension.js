@@ -175,6 +175,13 @@ function handleMessage(msg, diagnostics) {
   // server → client notifications (no id): publishDiagnostics
   if (msg.method === 'textDocument/publishDiagnostics') {
     const uri = vscode.Uri.parse(msg.params.uri);
+    // The server should only ever diagnose marina (.tsm) documents. If
+    // diagnostics arrive for anything else (old server binary, mis-associated
+    // file), clear that URI's collection instead of rendering the error.
+    if (!msg.params.uri || !msg.params.uri.endsWith('.tsm')) {
+      diagnostics.set(uri, []);
+      return;
+    }
     const diags = (msg.params.diagnostics || []).map((d) => {
       const start = new vscode.Position(d.range.start.line, d.range.start.character);
       const end = new vscode.Position(d.range.end.line, d.range.end.character);
