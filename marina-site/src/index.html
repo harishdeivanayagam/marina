@@ -1,0 +1,129 @@
+---
+layout: base.html
+description: Marina is a strictly-typed, ahead-of-time compiled subset of TypeScript that emits LLVM IR and links against a custom C++ runtime, with a multithreaded event loop and ARC memory management.
+---
+
+<section class="hero">
+  <div class="wrap">
+    <p class="kicker"><img src="/mark.svg" alt=""> v0.2.0</p>
+    <h1>TypeScript,<br>compiled ahead of time.</h1>
+    <p class="lead">
+      A strict subset of TypeScript. It emits LLVM IR and links a C++ runtime:
+      single-threaded semantics, a multithreaded event loop, memory by reference counting.
+      Experimental — do not use it in production.
+    </p>
+    <div class="hero-cta">
+      <a class="btn btn-primary" href="/docs/wave">wave run</a>
+      <a class="btn" href="/docs/language">language</a>
+      <a class="btn" href="/benchmark">benchmarks</a>
+    </div>
+    <dl class="stats">
+      <div><dt>binary</dt><dd>2.5 MB</dd></div>
+      <div><dt>idle rss</dt><dd>4.2 MB</dd></div>
+      <div><dt>get, c=64</dt><dd>11,102/s</dd></div>
+      <div><dt>peak rss</dt><dd>7.1 MB</dd></div>
+    </dl>
+  </div>
+</section>
+
+<section class="block">
+  <div class="wrap">
+    <h2 class="sec">// what it is</h2>
+    <dl class="spec">
+      <div>
+        <dt>compile</dt>
+        <dd>Lex, parse, type-check, LLVM IR, then clang. A static executable. No VM, no JIT warmup.</dd>
+      </div>
+      <div>
+        <dt>types</dt>
+        <dd>No <code>any</code>. Parameters must be annotated. The only implicit conversion is <code>Int32</code> to <code>Float64</code>. Generics are monomorphized.</dd>
+      </div>
+      <div>
+        <dt>memory</dt>
+        <dd>Automatic reference counting. The compiler inserts retain and release. Interned string literals are immortal.</dd>
+      </div>
+      <div>
+        <dt>async</dt>
+        <dd><code>async</code>/<code>await</code> lowers to promise state machines, resumed on a worker pool. Servers run on <code>poll(2)</code>.</dd>
+      </div>
+      <div>
+        <dt>wave</dt>
+        <dd><code>init</code>, <code>add</code>, <code>check</code>, <code>build</code>, <code>run</code>. Packages live in one global registry, not a <code>node_modules</code> tree.</dd>
+      </div>
+      <div>
+        <dt>std</dt>
+        <dd><code>net</code>, <code>http</code>, <code>fs</code>, <code>crypto</code>, <code>sql</code> (SQLite), including an express-style server.</dd>
+      </div>
+    </dl>
+  </div>
+</section>
+
+<section class="block">
+  <div class="wrap">
+    <h2 class="sec">// hello-world.tsm</h2>
+    <p class="sec-sub">Files are <code>.tsm</code>, kebab-case. <code>wave run</code> compiles and runs.</p>
+    <div class="quickstart">
+      <div>
+        <div class="file"><span>hello-world.tsm</span></div>
+<pre><code><span class="k">async function</span> <span class="f">main</span>() {
+    <span class="k">let</span> name = <span class="s">"marina"</span>
+    <span class="k">let</span> todos = [<span class="s">"ship v0.2"</span>, <span class="s">"write docs"</span>]
+
+    <span class="k">const</span> MSG = <span class="s">`Hello from ${name}, ${todos.length} todos`</span>
+    <span class="f">console</span>.log(MSG)
+}</code></pre>
+      </div>
+      <div>
+        <div class="file"><span>terminal</span></div>
+<pre><code><span class="c">$ wave run hello-world.tsm</span>
+Hello from marina, 2 todos</code></pre>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section class="block">
+  <div class="wrap">
+    <h2 class="sec">// same todos api, one vcpu</h2>
+    <p class="sec-sub">
+      HTTP + SQLite, <code>wrk</code> on loopback.
+      <a href="/benchmark">numbers and method</a>
+    </p>
+
+    <div class="bench-card">
+      <h3>GET <span class="note">req/s · wrk -t4 -c64 · 30s</span></h3>
+      {% set rows = benchmarks.throughputGet.rows %}
+      {% set best = rows | maxBy('value') %}
+      {% for r in rows %}
+      <div class="bar-row">
+        <div class="bar-name {% if 'Marina' in r.name %}marina{% endif %}">{{ r.name }}</div>
+        <div class="bar-track"><div class="bar-fill {% if 'Marina' in r.name %}marina{% endif %}" style="width: {{ (r.value / best * 100) | round(1) }}%"></div></div>
+        <div class="bar-val"><strong>{{ r.value | numberFormat }}</strong></div>
+      </div>
+      {% endfor %}
+    </div>
+
+    <div class="bench-card">
+      <h3>peak rss <span class="note">MB · lower is better</span></h3>
+      {% set mems = benchmarks.memory.rows %}
+      {% set worst = mems | maxBy('peak') %}
+      {% for r in mems %}
+      <div class="bar-row">
+        <div class="bar-name {% if 'Marina' in r.name %}marina{% endif %}">{{ r.name }}</div>
+        <div class="bar-track"><div class="bar-fill {% if 'Marina' in r.name %}marina{% endif %}" style="width: {{ (r.peak / worst * 100) | round(1) }}%"></div></div>
+        <div class="bar-val"><strong>{{ r.peak }} MB</strong></div>
+      </div>
+      {% endfor %}
+    </div>
+  </div>
+</section>
+
+<section class="block">
+  <div class="wrap">
+    <h2 class="sec">// three commands</h2>
+    <div class="file"><span>shell</span></div>
+<pre><code>$ wave init     <span class="c"># package.json + src/main.tsm</span>
+$ wave run
+$ wave build    <span class="c"># native binary in ./.marina/</span></code></pre>
+  </div>
+</section>

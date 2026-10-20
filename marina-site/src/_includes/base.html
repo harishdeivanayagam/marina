@@ -1,0 +1,40 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{% if title %}{{ title }} · Marina{% else %}Marina — a strictly-typed, AOT-compiled subset of TypeScript{% endif %}</title>
+  <meta name="description" content="{{ description or 'Marina is a strictly-typed, ahead-of-time compiled subset of TypeScript that emits LLVM IR and links against a custom C++ runtime.' }}">
+  <link rel="icon" href="/mark.svg" type="image/svg+xml">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Fira+Code:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="/site.css">
+</head>
+<body>
+  <div class="sea" aria-hidden="true"><span></span><span></span><span></span></div>
+  <header class="nav">
+    <div class="wrap nav-inner">
+      <a class="brand" href="/"><img class="brand-mark" src="/mark.svg" alt=""> Marina</a>
+      <nav>
+        <a href="/" {% if page.url == "/" %}class="active"{% endif %}>Home</a>
+        <a href="/docs/language" {% if page.url == "/docs/language" %}class="active"{% endif %}>Language</a>
+        <a href="/docs/wave" {% if page.url == "/docs/wave" %}class="active"{% endif %}>Wave</a>
+        <a href="/docs/packages" {% if page.url == "/docs/packages" %}class="active"{% endif %}>Packages</a>
+        <a href="/benchmark" {% if page.url == "/benchmark" %}class="active"{% endif %}>Benchmarks</a>
+        <a href="https://github.com/marina-lang-hq/marina">GitHub</a>
+      </nav>
+    </div>
+  </header>
+  <p class="banner">Experimental. Do not use in production.</p>
+
+  <main>{{ content | safe }}</main>
+
+  <footer class="footer">
+    <div class="wrap foot">
+      <p>marina v0.2.0 · experimental</p>
+      <p><a href="https://marina-lang.org">marina-lang.org</a></p>
+    </div>
+  </footer>
+</body>
+</html>

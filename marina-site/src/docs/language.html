@@ -1,0 +1,139 @@
+---
+layout: base.html
+title: Language Features
+description: The Marina language — types and inference, let/const, arrays, objects and classes, generics, interfaces, async/await, control flow and std modules.
+---
+
+<div class="wrap doc-layout">
+  <aside class="doc-toc">
+    <div class="toc-title">On this page</div>
+    <a href="#types">Types &amp; inference</a>
+    <a href="#letconst">let vs const</a>
+    <a href="#arrays">Arrays</a>
+    <a href="#objects">Objects &amp; classes</a>
+    <a href="#generics">Generics</a>
+    <a href="#interfaces">Interfaces</a>
+    <a href="#async">Async / await</a>
+    <a href="#controlflow">Control flow</a>
+    <a href="#stdlib">Standard libraries</a>
+    <a href="#pipeline">How it compiles</a>
+  </aside>
+
+  <div class="doc">
+    <h1>Language Features</h1>
+    <p class="muted">Marina is a strictly-typed subset of TypeScript, compiled ahead of time to LLVM IR. Programs use the <code>.tsm</code> extension and file names must be <strong>kebab-case</strong>.</p>
+
+    <h2 id="types">Types &amp; inference</h2>
+    <table>
+      <tr><th>Type</th><th>Example</th></tr>
+      <tr><td>Int32</td><td><code>let a = 10</code></td></tr>
+      <tr><td>Float64</td><td><code>let b = 20.5</code></td></tr>
+      <tr><td>string</td><td><code>let s = "hi"</code></td></tr>
+      <tr><td>bool</td><td><code>let ok = true</code></td></tr>
+      <tr><td>Promise&lt;T&gt;</td><td>return value of an <code>async function</code></td></tr>
+      <tr><td>Array&lt;T&gt;</td><td><code>let xs = [1, 2, 3]</code></td></tr>
+      <tr><td>interface</td><td>structural data contracts</td></tr>
+      <tr><td>generic T</td><td>type parameters on functions and classes</td></tr>
+    </table>
+    <p>Annotations are available (<code>let a: Int32 = 10</code>) and <strong>required for function parameters</strong>. There is no <code>any</code>. The only implicit conversion is <code>Int32 → Float64</code> in mixed arithmetic. String arithmetic is rejected — use template literals:</p>
+<pre><code><span class="k">let</span> a = <span class="n">10</span>        <span class="c">// Int32</span>
+<span class="k">let</span> b = <span class="n">20.5</span>      <span class="c">// Float64</span>
+<span class="k">let</span> result = a + b  <span class="c">// Float64 (a is widened)</span>
+<span class="f">console</span>.log(<span class="s">`The result of ${a} + ${b} is ${result}`</span>)</code></pre>
+
+    <h2 id="letconst">Variables: let vs const</h2>
+    <p><code>let</code> declares a mutable variable; <code>const</code> declares an immutable one. Assigning to a <code>const</code> in any form (<code>=</code>, <code>++</code>, <code>--</code>, <code>+=</code>, <code>-=</code>) is a compile-time error, and <code>const</code> declarations must be initialized. <code>const</code> freezes the <em>binding</em>, not the object — array contents can still be mutated through it.</p>
+    <p>Top-level variables are globals: they live for the whole program and are visible inside every function and lambda. Lambdas capture them <em>by reference to the global</em> — reads see the current value, and writes update the shared global.</p>
+
+    <h2 id="arrays">Arrays</h2>
+    <p>Typed lists with bounds-checked indexing (out-of-bounds panics at runtime) and reference counting. Element types are inferred, or taken from an annotation on an empty literal.</p>
+<pre><code><span class="k">let</span> xs = [<span class="n">1</span>, <span class="n">2</span>, <span class="n">3</span>, <span class="n">4</span>, <span class="n">5</span>]          <span class="c">// Array&lt;Int32&gt;</span>
+xs.push(<span class="n">6</span>); xs.pop(); xs.unshift(<span class="n">0</span>); xs.splice(<span class="n">2</span>, <span class="n">1</span>)
+<span class="f">console</span>.log(xs.length)
+
+xs[<span class="n">0</span>] = <span class="n">10</span>                          <span class="c">// index assignment</span>
+<span class="k">let</span> strs: <span class="t">Array</span>&lt;<span class="t">string</span>&gt; = []
+strs.push(<span class="s">"hello"</span>); strs.push(<span class="s">"world"</span>)
+<span class="f">console</span>.log(strs.join(<span class="s">"-"</span>))          <span class="c">// hello-world</span>
+
+xs.<span class="f">forEach</span>((item) =&gt; { <span class="f">console</span>.log(item) })
+<span class="k">let</span> doubled = xs.<span class="f">map</span>((item) =&gt; { <span class="k">return</span> item * <span class="n">2</span> })
+<span class="k">let</span> big = xs.<span class="f">filter</span>((item) =&gt; { <span class="k">return</span> item &gt; <span class="n">3</span> })
+<span class="k">let</span> sum = xs.<span class="f">reduce</span>((acc, item) =&gt; { <span class="k">return</span> acc + item }, <span class="n">0</span>)</code></pre>
+    <p class="muted">Supported: <code>push</code>, <code>pop</code>, <code>shift</code>, <code>unshift</code>, <code>splice</code>, <code>slice</code>, <code>concat</code>, <code>join</code>, <code>reverse</code>, <code>sort</code>, <code>length</code>, plus the higher-order <code>forEach</code> / <code>map</code> / <code>filter</code> / <code>reduce</code>. Nested arrays work too.</p>
+
+    <h2 id="objects">Objects &amp; classes</h2>
+    <p>Objects are struct-of-fields values, ARC-managed. Two ways to get one:</p>
+    <p><strong>Ghost classes</strong> — an object literal infers its shape at compile time. The checker mints an anonymous class from the literal; field types come from the values. No class definition needed, and the shape is still fully static:</p>
+<pre><code><span class="k">let</span> abc = {
+    a: <span class="n">5</span>,          <span class="c">// Int32</span>
+    b: <span class="n">6</span>,          <span class="c">// Int32</span>
+    c: <span class="s">"Test"</span>      <span class="c">// string</span>
+}
+<span class="f">console</span>.log(abc.a)   <span class="c">// 5</span>
+abc.b = <span class="n">10</span>           <span class="c">// field write</span></code></pre>
+    <p>Accessing <code>abc.d</code> is a compile-time error. <strong>Declared classes</strong> define a named shape, instantiated with <code>new</code>. Fields are public by default; classes are pure data (no methods):</p>
+<pre><code><span class="k">class</span> <span class="t">Point</span> {
+    <span class="k">public</span> x: <span class="t">Float64</span>
+    <span class="k">public</span> y: <span class="t">Float64</span>
+    label: <span class="t">string</span>
+}
+<span class="k">let</span> origin = <span class="k">new</span> <span class="t">Point</span>()
+origin.x = <span class="n">0.0</span></code></pre>
+    <p>With a class annotation on a <code>let</code>, an object literal must match the class field-for-field.</p>
+
+    <h2 id="generics">Generics</h2>
+    <p>Functions and classes take type parameters, <strong>monomorphized at compile time</strong> — every distinct instantiation generates its own specialized copy, so generics cost nothing at runtime.</p>
+<pre><code><span class="k">function</span> <span class="f">pick</span>&lt;<span class="t">T</span>&gt;(a: <span class="t">T</span>, b: <span class="t">T</span>, takeFirst: <span class="t">bool</span>): <span class="t">T</span> {
+    <span class="k">if</span> takeFirst { <span class="k">return</span> a }
+    <span class="k">return</span> b
+}
+
+<span class="k">class</span> <span class="t">Box</span>&lt;<span class="t">T</span>&gt; { value: <span class="t">T</span>, label: <span class="t">string</span> }
+
+<span class="k">let</span> n = <span class="f">pick</span>(<span class="n">10</span>, <span class="n">20</span>, <span class="k">true</span>)              <span class="c">// inferred: Int32</span>
+<span class="k">let</span> box = <span class="k">new</span> <span class="t">Box</span>&lt;<span class="t">Int32</span>&gt;()            <span class="c">// explicit type argument</span></code></pre>
+
+    <h2 id="interfaces">Interfaces</h2>
+    <p><code>interface</code> declares a structural data contract: any object — a ghost class (object literal) or a declared class — that has the interface's fields with matching types conforms to it, and extra fields are allowed. Conformance is checked at compile time; interfaces are erased at runtime (field access is resolved by name through the runtime, so the same code works on any conforming shape).</p>
+<pre><code><span class="k">interface</span> <span class="t">Point</span> { x: <span class="t">Int32</span>, y: <span class="t">Int32</span>, name: <span class="t">string</span> }
+<span class="k">interface</span> <span class="t">Named</span> { name: <span class="t">string</span> }
+
+<span class="k">function</span> <span class="f">describe</span>(pt: <span class="t">Point</span>): <span class="t">string</span> {
+    <span class="k">return</span> <span class="s">`${pt.name}: ${pt.x}, ${pt.y}`</span>
+}
+
+<span class="k">let</span> p = { x: <span class="n">1</span>, y: <span class="n">2</span>, name: <span class="s">"origin"</span> }   <span class="c">// object literal conforms</span>
+<span class="k">let</span> shapes: <span class="t">Array</span>&lt;<span class="t">Named</span>&gt; = [p, q, car]    <span class="c">// different concrete shapes</span></code></pre>
+
+    <h2 id="async">Async / await</h2>
+    <p>JS-style promises. Each <code>async function</code> compiles to an entry function plus a <code>resume</code> <strong>state machine</strong> — one basic block per continuation segment. <code>await</code> registers the frame with the runtime; when the promise resolves, the runtime resumes it on a worker thread. The program exits when the event loop reaches quiescence.</p>
+<pre><code><span class="k">async function</span> <span class="f">fetchData</span>() {
+    <span class="k">return new</span> <span class="t">Promise</span>((resolve) =&gt; {
+        <span class="f">setTimeout</span>(() =&gt; { resolve(<span class="s">"Data fetched"</span>) }, <span class="n">1000</span>)
+    })
+}
+
+<span class="k">async function</span> <span class="f">main</span>() {
+    <span class="k">let</span> data = <span class="k">await</span> <span class="f">fetchData</span>()
+    <span class="f">console</span>.log(data)
+}</code></pre>
+
+    <h2 id="controlflow">Control flow</h2>
+    <p><code>if</code>/<code>else</code>, <code>while</code>, C-style <code>for</code>, with <code>++</code>, <code>--</code>, <code>+=</code>, <code>-=</code>. Loop conditions must be <code>bool</code> (no truthiness); the <code>for</code> init variable is scoped to the loop. Entry point: define <code>main</code> (sync or async).</p>
+
+    <h2 id="stdlib">Standard libraries</h2>
+    <p>Bring them in with a top-level <code>use</code> statement (<code>use http</code> — the JS-style <code>import</code> is not supported).</p>
+    <table>
+      <tr><th>Module</th><th>What it provides</th></tr>
+      <tr><td><code>net</code></td><td>raw TCP: <code>net.connect(host, port)</code> → <code>Stream</code> with <code>write</code> / <code>read_all</code> / <code>close</code></td></tr>
+      <tr><td><code>http</code></td><td>client (<code>http.get</code>/<code>http.post</code>), low-level <code>http.listen</code> server, and an express-style API: <code>new http.Server</code>, <code>server.router</code>, <code>router.get/post</code>, <code>http.JsonValidator</code> with chainable field validators</td></tr>
+      <tr><td><code>fs</code></td><td><code>readFile</code>, <code>writeFile</code>, <code>exists</code>, <code>readDir</code>, <code>mkdir</code>, <code>remove</code></td></tr>
+      <tr><td><code>crypto</code></td><td>pure-C++ <code>sha256</code>, <code>base64Encode</code>/<code>Decode</code>, <code>randomHex</code>, <code>uuid</code></td></tr>
+      <tr><td><code>sql</code></td><td>SQLite via prepared statements: <code>new sql.Connection</code>, <code>sql.stmt`...`</code> tagged templates, <code>db.execute</code> / <code>db.query</code> — values are always bound as parameters, never string-concatenated</td></tr>
+    </table>
+
+    <h2 id="pipeline">How a program compiles</h2>
+    <p>Lex &amp; parse → strict type check → LLVM IR codegen (with ARC retain/release insertion and async state machines) → <code>clang</code> links <code>libmarina_runtime.a</code> into a native binary. The runtime exposes a stable C ABI (<code>marina_retain</code>, <code>marina_release</code>, <code>marina_promise_create</code>, <code>marina_await</code>, …) that the generated IR calls directly.</p>
+  </div>
+</div>

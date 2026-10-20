@@ -1,0 +1,16 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="250" height="80" viewBox="0 0 250 80" role="img" aria-label="Marina">
+  <defs>
+    <linearGradient id="w1" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#38BDF8"/><stop offset="1" stop-color="#0EA5E9"/>
+    </linearGradient>
+    <linearGradient id="w2" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#0EA5E9"/><stop offset="1" stop-color="#0284C7"/>
+    </linearGradient>
+  </defs>
+  <g transform="translate(6 21) scale(1.9)" fill="none" stroke-linecap="round">
+    <path stroke="url(#w1)" stroke-width="1.7" d="M1 6c1.8-2.6 3.7-2.6 5.5 0s3.7 2.6 5.5 0c.7-1 1.6-1.4 3-1"/>
+    <path stroke="url(#w2)" stroke-width="1.7" d="M1 10.5c1.8-2.6 3.7-2.6 5.5 0s3.7 2.6 5.5 0c.7-1 1.6-1.4 3-1"/>
+  </g>
+  <text x="46" y="53" font-family="system-ui, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif"
+        font-size="42" font-weight="700" fill="#0B1220" letter-spacing=".5">Marina</text>
+</svg>

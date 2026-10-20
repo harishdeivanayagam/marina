@@ -1,0 +1,118 @@
+---
+layout: base.html
+title: Benchmarks
+description: Marina HTTP + SQLite benchmarks vs Bun, Go and Node.js — throughput, latency and memory with progress bars.
+---
+
+<section class="doc">
+  <div class="wrap page">
+    <h1>Benchmarks</h1>
+    <p class="muted">
+      Workload: the <strong>todos REST API</strong> (HTTP + SQLite) — <code>examples/todos-http-sqlite.tsm</code> —
+      with the identical API implemented for Node.js, Bun and Go. Load generated with <code>wrk</code> on
+      loopback on a Vultr <code>vc2-1c-1gb</code> instance (1 vCPU Xeon Cascadelake, Ubuntu 24.04).
+      Marina v0.2.0 evented build, AOT binary 2.5&nbsp;MB. Benchmarked 2026-10-19.
+    </p>
+    <blockquote>
+      Per runtime: fresh SQLite DB (10 seeded rows) → 10&nbsp;s warmup → 30&nbsp;s <code>wrk -t4 -c64</code> GET →
+      20&nbsp;s <code>wrk -t4 -c64</code> POST. RSS sampled every 50–100&nbsp;ms.
+    </blockquote>
+
+    <div class="bench-card">
+      <h3>GET <span class="note">req/s · higher is better</span></h3>
+      <p class="bench-sub">wrk -t4 -c64 · 30 seconds — bars scaled to the fastest runtime</p>
+      {% set rows = benchmarks.throughputGet.rows %}
+      {% set best = rows | maxBy('value') %}
+      {% for r in rows %}
+      <div class="bar-row">
+        <div class="bar-name {% if 'Marina' in r.name %}marina{% endif %}">{{ r.name }}</div>
+        <div class="bar-track"><div class="bar-fill {% if 'Marina' in r.name %}marina{% endif %}" style="width: {{ (r.value / best * 100) | round(1) }}%"></div></div>
+        <div class="bar-val"><strong>{{ r.value | numberFormat }}</strong> req/s</div>
+      </div>
+      {% endfor %}
+      <p class="muted">
+        Total requests in 30&nbsp;s — Marina: {{ benchmarks.throughputGet.rows[0].total | numberFormat }},
+        Bun: {{ benchmarks.throughputGet.rows[1].total | numberFormat }},
+        Go: {{ benchmarks.throughputGet.rows[2].total | numberFormat }},
+        Node: {{ benchmarks.throughputGet.rows[3].total | numberFormat }}
+      </p>
+    </div>
+
+    <div class="bench-card">
+      <h3>POST <span class="note">req/s · higher is better</span></h3>
+      <p class="bench-sub">wrk -t4 -c64 · 20 seconds — each request inserts a row into SQLite, with JSON body validation</p>
+      {% set rows = benchmarks.throughputPost.rows %}
+      {% set best = rows | maxBy('value') %}
+      {% for r in rows %}
+      <div class="bar-row">
+        <div class="bar-name {% if 'Marina' in r.name %}marina{% endif %}">{{ r.name }}</div>
+        <div class="bar-track"><div class="bar-fill {% if 'Marina' in r.name %}marina{% endif %}" style="width: {{ (r.value / best * 100) | round(1) }}%"></div></div>
+        <div class="bar-val"><strong>{{ r.value | numberFormat }}</strong> req/s</div>
+      </div>
+      {% endfor %}
+    </div>
+
+    <div class="bench-card">
+      <h3>resident set <span class="note">lower is better</span></h3>
+      <p class="bench-sub">Idle RSS at startup and peak RSS under the c=64 load — bars scaled to the heaviest runtime</p>
+      {% set mems = benchmarks.memory.rows %}
+      {% set worst = mems | maxBy('peak') %}
+      {% set bestMem = mems | minBy('peak') %}
+      {% for r in mems %}
+      <div class="bar-row">
+        <div class="bar-name {% if 'Marina' in r.name %}marina{% endif %}">{{ r.name }}</div>
+        <div class="bar-track"><div class="bar-fill {% if 'Marina' in r.name %}marina{% endif %}" style="width: {{ (r.peak / worst * 100) | round(1) }}%"></div></div>
+        <div class="bar-val"><strong>{{ r.peak }} MB</strong> peak · {{ r.idle }} MB idle</div>
+      </div>
+      {% endfor %}
+    </div>
+
+    <div class="bench-card">
+      <h3>Latency (GET, c=64)</h3>
+      <p class="bench-sub">p50 / p99 in milliseconds — Marina's p99 beats both Go and Node.js</p>
+      <table>
+        <thead><tr>
+          <th>Runtime</th>
+          <th>p50</th>
+          <th>p99</th>
+        </tr></thead>
+        <tbody>
+          {% for r in benchmarks.throughputGet.rows %}
+          <tr>
+            <td class="{% if 'Marina' in r.name %}marina{% endif %}">{{ r.name }}</td>
+            <td>{{ r.p50 }} ms</td>
+            <td>{{ r.p99 }} ms</td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+
+    <div class="bench-card">
+      <h3>concurrency sweep <span class="note">flat, no collapse</span></h3>
+      <p class="bench-sub">GET /todos — 5&nbsp;s per point, req/s at each connection level</p>
+      {% set sw = benchmarks.sweep %}
+      {% set swMax = sw.reqs | maxOf %}
+      {% for v in sw.reqs %}
+      <div class="bar-row slim">
+        <div class="bar-name muted">c={{ sw.connections[loop.index0] }}</div>
+        <div class="bar-track"><div class="bar-fill marina" style="width: {{ (v / swMax * 100) | round(1) }}%"></div></div>
+        <div class="bar-val"><strong>{{ v | numberFormat }}</strong> req/s</div>
+      </div>
+      {% endfor %}
+    </div>
+
+    <div>
+      <h3>Takeaways</h3>
+      <p>
+        Bun wins raw GET throughput (~19.9k req/s), but the evented Marina build sits in the same league as Go and Node —
+        <strong>11.1k req/s</strong> at c=64 with a tighter p99 than both, and <strong>1,400 POST req/s</strong> (write + validation),
+        beating Bun and Node on writes.
+      </p>
+      <p>
+        The headline is memory: Marina's AOT binary idles at <strong>4.2&nbsp;MB</strong> and peaks at
+        <strong>7.1&nbsp;MB</strong> — a third of Go's peak, and roughly <strong>12× lighter than Node.js</strong>.
+      </p>
+    </div>
+  </div>
+</section>

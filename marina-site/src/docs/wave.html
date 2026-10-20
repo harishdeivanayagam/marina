@@ -1,0 +1,71 @@
+---
+layout: base.html
+title: Wave — the CLI
+description: wave is the cargo of Marina — the single CLI for the compiler and package manager. init, add, remove, check, build, run.
+---
+
+<div class="wrap doc-layout">
+  <aside class="doc-toc">
+    <div class="toc-title">On this page</div>
+    <a href="#install">Build &amp; install</a>
+    <a href="#commands">Commands</a>
+    <a href="#projects">Projects</a>
+    <a href="#oneoff">One-off files</a>
+    <a href="#compiler">The compiler pipeline</a>
+    <a href="#editor">Editor support</a>
+  </aside>
+
+  <div class="doc">
+    <h1>Wave</h1>
+    <p class="muted"><strong>wave</strong> is the cargo of Marina — one CLI for the compiler, the runtime, and the package manager. Build it from the repo root:</p>
+
+    <h2 id="install">Build &amp; install</h2>
+    <p>Requirements: CMake ≥ 3.20, a C++20 compiler, <code>clang</code>, and <code>libsqlite3</code>.</p>
+<pre><code><span class="c"># build the compiler, runtime, and wave</span>
+$ cmake -S . -B build &amp;&amp; cmake --build build -j
+<span class="c"># binaries: build/wave, build/marina-lsp</span></code></pre>
+
+    <h2 id="commands">Commands</h2>
+    <table>
+      <tr><th>Command</th><th>What it does</th></tr>
+      <tr><td><code>wave init</code></td><td>create <code>package.json</code> + <code>src/main.tsm</code> in the current directory</td></tr>
+      <tr><td><code>wave add &lt;path|git-url&gt;</code></td><td>install a package into the global registry + record it in <code>package.json</code></td></tr>
+      <tr><td><code>wave remove &lt;pkg&gt;</code></td><td>remove a dependency from <code>package.json</code></td></tr>
+      <tr><td><code>wave check [file]</code></td><td>validate <code>package.json</code> + type-check the entry point (no codegen)</td></tr>
+      <tr><td><code>wave build [file]</code></td><td>compile to a native binary in <code>./.marina/</code></td></tr>
+      <tr><td><code>wave run [file]</code></td><td>compile + execute (binary and IR go to a temp dir)</td></tr>
+    </table>
+    <p>Without <code>[file]</code>, wave uses the project entry point: the <code>"main"</code> field of <code>package.json</code>, defaulting to <code>src/main.tsm</code>. With a <code>[file]</code> argument, wave works anywhere — even outside a project (<code>wave run examples/objects.tsm</code>).</p>
+
+    <h2 id="projects">Projects</h2>
+    <p>Projects are described by a <code>package.json</code> in the project root:</p>
+<pre><code>{
+    <span class="s">"name"</span>: <span class="s">"&lt;project-name&gt;"</span>,
+    <span class="s">"version"</span>: <span class="s">"0.0.1"</span>,
+    <span class="s">"dependencies"</span>: {
+        <span class="s">"my-pkg"</span>: <span class="s">"0.3.0"</span>
+    }
+}</code></pre>
+
+    <h2 id="oneoff">One-off files</h2>
+    <p><code>wave run</code> and <code>wave build</code> work on any <code>.tsm</code> file, even outside a project:</p>
+<pre><code><span class="c"># compile + run in one step</span>
+$ wave run examples/hello-world.tsm
+
+<span class="c"># compile to a native binary in ./.marina/</span>
+$ wave build examples/hello-world.tsm
+$ ./.marina/hello-world</code></pre>
+    <p><code>build</code> also writes the textual LLVM IR next to the binary (<code>./.marina/&lt;name&gt;.ll</code>) so you can inspect what your program compiles to.</p>
+
+    <h2 id="compiler">The compiler pipeline</h2>
+    <p>Wave drives a four-stage pipeline: <strong>lex &amp; parse</strong> → AST, <strong>type check</strong> (strict, with inference — a type error aborts compilation), <strong>codegen</strong> to textual LLVM IR including ARC retain/release insertion and async state machines, then <strong>link</strong> with <code>clang</code> against <code>libmarina_runtime.a</code> — ARC, promises, the poll(2) event loop, and the net/http/fs/crypto/sql std modules.</p>
+
+    <h2 id="editor">Editor support</h2>
+    <p>Marina ships its own language server (<code>marina-lsp</code>) — a dependency-free JSON-RPC implementation over stdio that reuses the compiler's lexer/parser/checker. Install it on your <code>PATH</code>, then load the <code>editors/marina-lsp/marina-lsp-0.2.2.vsix</code> extension in Cursor/VS Code for:</p>
+    <ul>
+      <li>Live strict diagnostics on open, keystroke and save</li>
+      <li>Syntax highlighting via a TextMate grammar, and 🌊 wave file icons</li>
+      <li>Hover on declared class names → field shapes (including ghost classes)</li>
+    </ul>
+  </div>
+</div>
