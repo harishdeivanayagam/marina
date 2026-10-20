@@ -1922,6 +1922,40 @@ struct Gen {
                  num(n) + ")");
             return CgVal{CgTy::Object, obj, true};
         }
+        if (auto* x = std::get_if<CNewClassCtor>(&e.v)) {
+            size_t n = c->classes[x->class_id].fields.size();
+            std::string obj = fresh("obj");
+            emit(obj + " = call ptr @marina_object_new(i32 " + num(x->class_id) + ", i64 " +
+                 num(n) + ")");
+            auto it = fn_sigs.find(x->fn);
+            if (it == fn_sigs.end()) cg_unreachable("missing ctor sig for " + x->fn);
+            const Sig& sig = it->second;
+            // the constructor consumes its `this` argument (like any owned
+            // parameter), so pass a retained reference — the fresh instance
+            // stays owned by the caller
+            CgVal self{CgTy::Object, obj, false};
+            self = to_owned(self);
+            std::vector<std::string> call_args;
+            call_args.push_back(std::string(cg_ir(CgTy::Object)) + " " + self.ir);
+            for (size_t i = 0; i < x->args.size(); ++i) {
+                CgVal v = cg_expr(x->args[i]);
+                CgTy pt = i + 1 < sig.params.size() ? sig.params[i + 1] : sig.ret;
+                v = coerce_val(v, pt);
+                v = to_owned(v);
+                call_args.push_back(std::string(cg_ir(pt)) + " " + v.ir);
+            }
+            std::string args = call_args.empty() ? std::string() : call_args[0];
+            for (size_t i = 1; i < call_args.size(); ++i) args += ", " + call_args[i];
+            if (sig.ret == CgTy::Void) {
+                emit("call void @fn." + x->fn + "(" + args + ")");
+            } else {
+                std::string r = fresh("ctor");
+                emit(r + " = call " + std::string(cg_ir(sig.ret)) + " @fn." + x->fn + "(" +
+                     args + ")");
+                discard(CgVal{sig.ret, r, true});
+            }
+            return CgVal{CgTy::Object, obj, true};
+        }
         if (auto* x = std::get_if<CFieldGet>(&e.v)) {
             CgVal o = cg_expr(*x->obj);
             std::string p = borrow(o);

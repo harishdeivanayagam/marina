@@ -52,14 +52,18 @@ struct Artifact {
 std::optional<std::string> validate_path(const std::string& path);
 
 // Type-check a source string without generating code (`wave check`).
+// `base_dir` is the directory local folder modules resolve against (the
+// entry file's directory); empty disables local module resolution.
 // Returns diagnostics in source order; nullopt means the program passes.
-std::optional<std::vector<SrcDiag>> check_source(const std::string& src);
+std::optional<std::vector<SrcDiag>> check_source(const std::string& src,
+                                                 const std::string& base_dir = "");
 
 // Full pipeline: lex → parse → check → LLVM IR → clang link with the runtime.
 // Writes `<stem>.ll` and the `<stem>` binary into `out_dir` (created if
 // needed).
 Artifact compile_source(const std::string& src, const std::string& stem,
-                        const std::string& out_dir, Fail& fail);
+                        const std::string& out_dir, Fail& fail,
+                        const std::string& base_dir = "");
 
 // Run a compiled binary, returning its exit code.
 int run_binary(const std::string& bin);
@@ -72,10 +76,11 @@ void print_diags(const std::string& file, const std::vector<SrcDiag>& diags);
 // the crates.io registry, not like node_modules.
 std::string registry_root();
 
-// Resolve `use <pkg>` statements in place (mutates the program: merges
-// registry packages' functions/classes under `<pkg>__<name>` names).
+// Resolve `use <module>` statements in place (mutates the program: merges
+// modules' functions/classes under mangled names). `base_dir` enables local
+// folder modules (`use sample_mod/sub` → `<base_dir>/sample_mod/sub`).
 // Returns diagnostics; empty means success.
-std::vector<SrcDiag> resolve_uses(ast::Program& program);
+std::vector<SrcDiag> resolve_uses(ast::Program& program, const std::string& base_dir = "");
 
 // Cheap stable hash for cache dir naming (not cryptographic).
 uint64_t md5ish(const std::string& s);

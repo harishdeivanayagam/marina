@@ -399,9 +399,9 @@ int main(int argc, char** argv) {
             out.push_back("  TYPEPARAM " + esc(t));
         }
         for (const auto& f : c.fields) {
-            out.push_back("  FIELDFLD " + esc(f.first) + " : " + ty(f.second) + " @" +
-                          std::to_string(f.second.span.line) + ":" +
-                          std::to_string(f.second.span.col));
+            out.push_back("  FIELDFLD " + esc(f.name) + " : " + ty(f.ty) + " @" +
+                          std::to_string(f.ty.span.line) + ":" +
+                          std::to_string(f.ty.span.col));
         }
     }
     for (const auto& f : program.fns) {

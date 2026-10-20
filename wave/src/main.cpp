@@ -885,6 +885,9 @@ struct LoadedSource {
     std::string src;
     std::string file;
     std::string stem;
+    // directory of the source file — the root local folder modules
+    // (`use sample_mod/sub`) resolve against
+    std::string base_dir;
 };
 
 std::string stem_of(const fs::path& p) {
@@ -908,6 +911,7 @@ std::optional<LoadedSource> load_source(const fs::path& path) {
     r.src = std::move(*src);
     r.file = disp(path);
     r.stem = stem_of(path);
+    r.base_dir = fs::path(path).parent_path().string();
     return r;
 }
 
@@ -1245,7 +1249,7 @@ int cmd_check(const std::vector<std::string>& rest) {
     }
     auto loaded = load_source(*entry);
     if (!loaded) return 1;
-    auto diags = pipeline::check_source(loaded->src);
+    auto diags = pipeline::check_source(loaded->src, loaded->base_dir);
     if (!diags) {
         std::cout << "check passed: " << loaded->file << "\n";
         return 0;
@@ -1282,7 +1286,7 @@ int cmd_build(const std::vector<std::string>& rest) {
     fs::path out_dir = cwd_unwrap() / ".marina";
     pipeline::Fail fail;
     pipeline::Artifact a =
-        pipeline::compile_source(loaded->src, loaded->stem, disp(out_dir), fail);
+        pipeline::compile_source(loaded->src, loaded->stem, disp(out_dir), fail, loaded->base_dir);
     if (fail_is_default(fail)) {
         std::cout << "built " << a.bin_path << "\n";
         std::cout << "llvm ir: " << a.ll_path << "\n";
@@ -1318,7 +1322,7 @@ int cmd_run(const std::vector<std::string>& rest) {
     fs::path out_dir = temp_dir() / ("marina-run-" + h);
     pipeline::Fail fail;
     pipeline::Artifact a =
-        pipeline::compile_source(loaded->src, loaded->stem, disp(out_dir), fail);
+        pipeline::compile_source(loaded->src, loaded->stem, disp(out_dir), fail, loaded->base_dir);
     if (fail_is_default(fail)) {
         return pipeline::run_binary(a.bin_path);
     }

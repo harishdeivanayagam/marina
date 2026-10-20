@@ -99,6 +99,12 @@ private:
             } else if (is_kw(peek(), Kw::Import)) {
                 return error<Program>(
                     "`import` statements are not supported — declare modules with `use <module>`");
+            } else if (auto* w = std::get_if<TIdent>(&peek());
+                       w && w->name == "export" &&
+                       (is_kw(peek_at(1), Kw::Class) || is_kw(peek_at(1), Kw::Function) ||
+                        is_kw(peek_at(1), Kw::Async))) {
+                bump(); // `export` before a declaration is accepted and ignored
+                        // (module publishing comes later)
             } else {
                 prog.stmts.push_back(stmt());
             }
@@ -106,13 +112,22 @@ private:
         return prog;
     }
 
-    // `use <module>` (optionally with a trailing `;`)
+    // `use <module>` (optionally with a trailing `;`). The module is a path:
+    // a std module name (`http`), a local folder relative to the entry
+    // file's directory (`sample_mod`, `sample_mod/sub`), or a registry
+    // package name.
     std::pair<std::string, Span> use_decl() {
         Span sp = span();
         bump(); // use
         auto name = expect_ident();
+        std::string full = name.first;
+        while (is_p(peek(), P::Slash)) {
+            bump();
+            auto seg = expect_ident();
+            full += "/" + seg.first;
+        }
         eat_punct(P::Semi);
-        return {name.first, sp};
+        return {full, sp};
     }
 
     // `interface Name { field: Type, ... }` — a structural object shape.
@@ -152,18 +167,60 @@ private:
         auto name = expect_ident();
         auto type_params = type_param_list();
         expect_punct(P::LBrace, "{");
-        std::vector<std::pair<std::string, TyAnn>> fields;
+        std::vector<ClassField> fields;
+        std::optional<FnDecl> ctor;
+        std::vector<FnDecl> methods;
         while (!is_p(peek(), P::RBrace)) {
             if (is_eof(peek()))
                 error<int>("expected '}' before end of file");
-            // optional `public` modifier (accepted and ignored)
+            // access modifiers: `public` (accepted and ignored) / `private`
+            bool is_private = false;
             if (auto* w = std::get_if<TIdent>(&peek())) {
-                if (w->name == "public") bump();
+                if (w->name == "public") {
+                    bump();
+                } else if (w->name == "private") {
+                    is_private = true;
+                    bump();
+                }
             }
             auto fname = expect_ident();
+            // method / constructor: `name(params) { ... }` (no `async`)
+            if (is_p(peek(), P::LParen)) {
+                FnDecl m;
+                m.span = span();
+                m.name = fname.first;
+                m.params = param_list();
+                if (is_p(peek(), P::Colon)) {
+                    bump();
+                    m.ret_ann = ty_ann();
+                }
+                m.body = block();
+                if (fname.first == "constructor") {
+                    if (ctor) {
+                        // merge nothing: a second ctor body is an error
+                        error<int>("class '" + name.first +
+                                   "' has more than one constructor");
+                    }
+                    ctor = std::move(m);
+                } else {
+                    for (const auto& ex : methods) {
+                        if (ex.name == fname.first) {
+                            error<int>("duplicate method '" + fname.first +
+                                       "' in class '" + name.first + "'");
+                        }
+                    }
+                    methods.push_back(std::move(m));
+                }
+                continue;
+            }
+            // field: `name: Type` (optional `,`/`;`)
             expect_punct(P::Colon, ":");
-            TyAnn ty = ty_ann();
-            fields.emplace_back(fname.first, std::move(ty));
+            ClassField f;
+            f.name = fname.first;
+            f.is_private = is_private;
+            f.ty = ty_ann();
+            f.span = fname.second;
+            fields.push_back(std::move(f));
             eat_punct(P::Comma);
             eat_punct(P::Semi);
         }
@@ -172,8 +229,33 @@ private:
         d.name = name.first;
         d.type_params = std::move(type_params);
         d.fields = std::move(fields);
+        d.ctor = std::move(ctor);
+        d.methods = std::move(methods);
         d.span = sp;
         return d;
+    }
+
+    // `(p: T, q: U)` — parameter list shared by functions and methods.
+    std::vector<Param> param_list() {
+        std::vector<Param> ps;
+        expect_punct(P::LParen, "(");
+        if (!eat_punct(P::RParen)) {
+            for (;;) {
+                Span pspan = span();
+                auto pname = expect_ident();
+                Param p;
+                p.name = pname.first;
+                p.span = pspan;
+                if (is_p(peek(), P::Colon)) {
+                    bump();
+                    p.ann = ty_ann();
+                }
+                ps.push_back(std::move(p));
+                if (!eat_punct(P::Comma)) break;
+            }
+            expect_punct(P::RParen, ")");
+        }
+        return ps;
     }
 
     FnDecl fn_decl() {
@@ -190,23 +272,7 @@ private:
         f.name = name.first;
         // generic type parameters: `function f<T, U>(...)`
         f.type_params = type_param_list();
-        expect_punct(P::LParen, "(");
-        if (!eat_punct(P::RParen)) {
-            for (;;) {
-                Span pspan = span();
-                auto pname = expect_ident();
-                Param p;
-                p.name = pname.first;
-                p.span = pspan;
-                if (is_p(peek(), P::Colon)) {
-                    bump();
-                    p.ann = ty_ann();
-                }
-                f.params.push_back(std::move(p));
-                if (!eat_punct(P::Comma)) break;
-            }
-            expect_punct(P::RParen, ")");
-        }
+        f.params = param_list();
         if (is_p(peek(), P::Colon)) {
             bump();
             f.ret_ann = ty_ann();
@@ -984,21 +1050,25 @@ private:
                     expect_punct(P::RParen, ")");
                 }
             }
-            if (path.size() == 1) {
-                if (args.empty()) {
-                    // `new ClassName()` — no constructor args in marina
-                    ExprPtr e = mk(Expr{});
-                    e->span = sp;
-                    e->v = ENewClass{path[0], std::move(type_args)};
-                    return e;
-                }
+            if (!type_args.empty() && !args.empty()) {
                 return error<ExprPtr>(
-                    "classes take no constructor arguments (use `new ClassName()`)");
+                    "generic classes do not support constructor arguments "
+                    "(use `new Name<T>()` and assign fields)");
             }
-            ExprPtr e = mk(Expr{});
-            e->span = sp;
-            e->v = ENewCtor{std::move(path), std::move(args)};
-            return e;
+            if (!args.empty() || path.size() > 1) {
+                // `new Class(args)` / `new mod.Class(args)` — constructor call
+                ExprPtr e = mk(Expr{});
+                e->span = sp;
+                e->v = ENewCtor{std::move(path), std::move(args)};
+                return e;
+            }
+            // `new ClassName()` — no constructor args in marina
+            {
+                ExprPtr e = mk(Expr{});
+                e->span = sp;
+                e->v = ENewClass{path[0], std::move(type_args)};
+                return e;
+            }
         }
         if (is_p(peek(), P::LBracket)) {
             bump();

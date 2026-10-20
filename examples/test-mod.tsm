@@ -1,0 +1,18 @@
+use sample_mod
+use sample_mod_another/sub_another
+
+async function main() {
+    let calc = new sample_mod.Calc(10, 20)
+    console.log(calc.add())
+    console.log(calc.sub())
+    console.log(calc.mul())
+    console.log(calc.div())
+
+
+    let sub = sample_mod.sub.sub(10, 20)
+    console.log(sub)
+
+
+    let accessSub = sub_another.access_sub(10, 20)
+    console.log(accessSub)
+}

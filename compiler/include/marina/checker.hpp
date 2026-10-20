@@ -99,6 +99,15 @@ struct ClassDef {
     std::string name;
     std::vector<std::pair<std::string, CTy>> fields;
     bool is_ghost = false;
+    // Names of `private` fields (accessible only inside the class's own
+    // methods/constructor).
+    std::vector<std::string> private_fields;
+
+    bool field_is_private(const std::string& n) const {
+        for (const auto& f : private_fields)
+            if (f == n) return true;
+        return false;
+    }
 };
 
 struct Diag {
@@ -347,6 +356,14 @@ struct CObjectLit {
 struct CNewClass {
     size_t class_id = 0;
 };
+// `new ClassName(args)` / `new mod.Class(args)` — fresh instance, then run
+// the class constructor (`ClassName__new`) on it. `this` is retained for the
+// call so the callee's consume leaves the instance owned by the caller.
+struct CNewClassCtor {
+    size_t class_id = 0;
+    std::string fn; // mangled constructor function (`ClassName__new`)
+    std::vector<CExpr> args;
+};
 // `obj.field` read; ty is the field type.
 struct CFieldGet {
     CExprPtr obj;
@@ -521,9 +538,9 @@ struct CExpr {
                  CBinary, CCallFn, CCallResolver, CAwait, CNewPromise,
                  CConsoleLog, CSetTimeout, CArrayLit, CIndex, CArrayOp,
                  CArrayHof, CLambdaVal, CStrLen, CStrMethod, CFsArgs,
-                 CObjectLit, CNewClass, CFieldGet, CNetConnect, CNetWrite,
-                 CNetReadAll, CNetClose, CHttpCall, CHttpListen, CResSend,
-                 CHttpNewServer, CHttpRouter, CHttpRouteAdd,
+                 CObjectLit, CNewClass, CNewClassCtor, CFieldGet, CNetConnect,
+                 CNetWrite, CNetReadAll, CNetClose, CHttpCall, CHttpListen,
+                 CResSend, CHttpNewServer, CHttpRouter, CHttpRouteAdd,
                  CHttpServerListen, CHttpValidatorNew, CHttpFieldNew,
                  CHttpFieldOp, CHttpValidate, CIfaceGet, CIfaceSetExpr,
                  CFsReadFile, CFsWriteFile, CFsExists, CFsReadDir, CFsMkdir,

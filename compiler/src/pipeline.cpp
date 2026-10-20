@@ -5,6 +5,7 @@
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
+#include <functional>
 #include <iostream>
 #include <set>
 #include <sstream>
@@ -45,6 +46,17 @@ std::optional<std::string> read_file(const fs::path& p) {
     return ss.str();
 }
 
+/// Mangled-name prefix for module path segments: {sample_mod, sub} →
+/// `sample_mod__sub`.
+std::string prefix_of(const std::vector<std::string>& segs) {
+    std::string p;
+    for (size_t i = 0; i < segs.size(); ++i) {
+        if (i) p += "__";
+        p += segs[i];
+    }
+    return p;
+}
+
 } // namespace
 
 std::optional<std::string> validate_path(const std::string& path) {
@@ -63,7 +75,8 @@ std::optional<std::string> validate_path(const std::string& path) {
            "' (ext: \"" + ext + "\")";
 }
 
-std::optional<std::vector<SrcDiag>> check_source(const std::string& src) {
+std::optional<std::vector<SrcDiag>> check_source(const std::string& src,
+                                                 const std::string& base_dir) {
     std::vector<lex::Token> tokens;
     try {
         tokens = lex::lex(src);
@@ -76,7 +89,7 @@ std::optional<std::vector<SrcDiag>> check_source(const std::string& src) {
     } catch (const ast::ParseError& e) {
         return std::vector<SrcDiag>{diag_from(e.msg, e.span)};
     }
-    auto use_diags = resolve_uses(program);
+    auto use_diags = resolve_uses(program, base_dir);
     if (!use_diags.empty()) return use_diags;
     try {
         ir::check(program);
@@ -176,7 +189,8 @@ bool build_runtime() {
 } // namespace
 
 Artifact compile_source(const std::string& src, const std::string& stem,
-                        const std::string& out_dir, Fail& fail) {
+                        const std::string& out_dir, Fail& fail,
+                        const std::string& base_dir) {
     std::vector<lex::Token> tokens;
     try {
         tokens = lex::lex(src);
@@ -191,7 +205,7 @@ Artifact compile_source(const std::string& src, const std::string& stem,
         fail = fail_diags({diag_from(e.msg, e.span)});
         return {};
     }
-    auto use_diags = resolve_uses(program);
+    auto use_diags = resolve_uses(program, base_dir);
     if (!use_diags.empty()) {
         fail = fail_diags(std::move(use_diags));
         return {};
@@ -446,15 +460,102 @@ bool load_registry_package(const std::string& name, std::string& out_src,
 
 } // namespace
 
-std::vector<SrcDiag> resolve_uses(ast::Program& program) {
+std::vector<SrcDiag> resolve_uses(ast::Program& program, const std::string& base_dir_str) {
     std::vector<SrcDiag> diags;
     std::vector<std::pair<std::string, lex::Span>> kept;
+    // hoisted module declarations, merged in front of the program's own
+    // functions so their (inferred) return types are known first
     std::vector<ast::FnDecl> extra_fns;
     std::vector<ast::ClassDecl> extra_classes;
     std::set<std::string> merged;
-
-    // worklist seeded with the program's own uses (registry order)
+    std::set<std::string> seen_aliases;
+    // module files already merged (a module can be reached through several
+    // use paths: `use sample_mod` and `use sample_mod/sub`)
+    std::set<std::string> loaded_files;
+    fs::path base_dir(base_dir_str);
+    // worklist seeded with the program's own uses
     std::vector<std::pair<std::string, lex::Span>> queue = std::move(program.uses);
+
+    // Load a local folder module: every .tsm file directly inside the folder
+    // is part of the module, and each subfolder becomes a nested namespace
+    // (`use sample_mod` exposes calc.tsm's class `Calc` as `sample_mod.Calc`
+    // and sub/sub.tsm's function `sub` as `sample_mod.sub.sub`). Functions
+    // are renamed to their `__`-joined path from base_dir, and the use alias
+    // maps to that prefix via program.use_prefixes.
+    std::function<void(const fs::path&, const std::vector<std::string>&)> load_dir =
+        [&](const fs::path& dir, const std::vector<std::string>& segs) {
+            std::error_code ec;
+            std::vector<fs::path> files;
+            std::vector<fs::path> subdirs;
+            for (const auto& entry : fs::directory_iterator(dir, ec)) {
+                if (entry.is_directory()) {
+                    // skip hidden/build directories
+                    const std::string fn = entry.path().filename().string();
+                    if (!fn.empty() && fn[0] != '.') subdirs.push_back(entry.path());
+                } else if (entry.path().extension() == ".tsm") {
+                    files.push_back(entry.path());
+                }
+            }
+            std::sort(files.begin(), files.end());
+            std::sort(subdirs.begin(), subdirs.end());
+            std::string prefix = prefix_of(segs);
+            for (const auto& file : files) {
+                std::string canon = fs::weakly_canonical(file, ec).string();
+                if (!canon.empty() && !loaded_files.insert(canon).second) continue; // already merged
+                auto src = read_file(file);
+                if (!src) {
+                    diags.push_back(diag_from("cannot read module file '" + file.string() + "'",
+                                              lex::Span{}));
+                    continue;
+                }
+                std::string rel = fs::relative(file, base_dir, ec).string();
+                try {
+                    auto tokens = lex::lex(*src);
+                    ast::Program mod = ast::parse(std::move(tokens));
+                    if (!mod.stmts.empty()) {
+                        diags.push_back(diag_from(
+                            "module file '" + rel +
+                                "' cannot have top-level statements (functions and classes only)",
+                            ast::stmt_span(mod.stmts[0])));
+                    }
+                    for (const auto& f : mod.fns) {
+                        if (f.name == "main") {
+                            diags.push_back(diag_from(
+                                "module file '" + rel + "' must not define main (it is a library)",
+                                f.span));
+                        }
+                    }
+                    // rewrite unqualified intra-module calls to their mangled
+                    // names (module functions are renamed on merge)
+                    {
+                        std::set<std::string> local;
+                        for (const auto& f : mod.fns) local.insert(f.name);
+                        for (auto& f : mod.fns) {
+                            for (auto& s : f.body) qual_stmt(s, local, prefix);
+                        }
+                    }
+                    // the module's own `use` statements are resolved against
+                    // the same base directory
+                    for (auto& u : mod.uses) queue.push_back(std::move(u));
+                    mod.uses.clear();
+                    for (auto& f : mod.fns) {
+                        f.name = prefix + "__" + f.name;
+                        extra_fns.push_back(std::move(f));
+                    }
+                    for (auto& c : mod.classes) extra_classes.push_back(std::move(c));
+                } catch (const lex::LexError& e) {
+                    diags.push_back(diag_from("module file '" + rel + "': " + e.msg, e.span));
+                } catch (const ast::ParseError& e) {
+                    diags.push_back(diag_from("module file '" + rel + "': " + e.msg, e.span));
+                }
+            }
+            for (const auto& sub : subdirs) {
+                std::vector<std::string> sub_segs = segs;
+                sub_segs.push_back(sub.filename().string());
+                load_dir(sub, sub_segs);
+            }
+        };
+
     size_t qi = 0;
     while (qi < queue.size()) {
         auto [name, span] = queue[qi];
@@ -470,6 +571,51 @@ std::vector<SrcDiag> resolve_uses(ast::Program& program) {
         if (merged.count(name)) {
             if (!already_kept) kept.emplace_back(name, span);
             continue;
+        }
+        // local folder module: a directory relative to the entry file's
+        // directory (`use sample_mod`, `use sample_mod/sub`)
+        std::vector<std::string> segs;
+        bool path_ok = !name.empty();
+        {
+            size_t start = 0;
+            while (path_ok) {
+                size_t slash = name.find('/', start);
+                std::string seg = name.substr(start, slash == std::string::npos
+                                                         ? std::string::npos
+                                                         : slash - start);
+                if (seg.empty() || seg.find("__") != std::string::npos) path_ok = false;
+                segs.push_back(seg);
+                if (slash == std::string::npos) break;
+                start = slash + 1;
+            }
+        }
+        if (!path_ok || segs.empty() || segs.back().empty()) {
+            diags.push_back(diag_from("invalid module name '" + name + "'", span));
+            continue;
+        }
+        std::string alias = segs.back();
+        if (!base_dir_str.empty()) {
+            fs::path dir = base_dir;
+            for (const auto& s : segs) dir /= s;
+            std::error_code ec;
+            if (fs::is_directory(dir, ec)) {
+                if (seen_aliases.count(alias)) {
+                    diags.push_back(diag_from("duplicate module alias '" + alias + "'", span));
+                    continue;
+                }
+                merged.insert(name);
+                seen_aliases.insert(alias);
+                load_dir(dir, segs);
+                kept.emplace_back(alias, span);
+                program.use_prefixes.emplace_back(alias, prefix_of(segs));
+                continue;
+            }
+            if (name.find('/') != std::string::npos) {
+                diags.push_back(diag_from("module '" + name + "' not found: no directory '" +
+                                              dir.string() + "'",
+                                          span));
+                continue;
+            }
         }
         std::string pkg_src, pkg_err;
         if (!load_registry_package(name, pkg_src, pkg_err)) {
@@ -495,6 +641,11 @@ std::vector<SrcDiag> resolve_uses(ast::Program& program) {
             }
             // mark merged before walking dependencies (cycle guard)
             merged.insert(name);
+            if (seen_aliases.count(name)) {
+                diags.push_back(diag_from("duplicate module alias '" + name + "'", span));
+                continue;
+            }
+            seen_aliases.insert(name);
             // rewrite unqualified intra-package calls to their mangled
             // names (package functions are renamed on merge)
             {
@@ -522,8 +673,13 @@ std::vector<SrcDiag> resolve_uses(ast::Program& program) {
     }
 
     program.uses = std::move(kept);
-    for (auto& f : extra_fns) program.fns.push_back(std::move(f));
-    for (auto& c : extra_classes) program.classes.push_back(std::move(c));
+    // module declarations merge in FRONT of the program's own functions so
+    // their (inferred) return types are known by the time the program's
+    // functions are checked
+    program.fns.insert(program.fns.begin(), std::make_move_iterator(extra_fns.begin()),
+                       std::make_move_iterator(extra_fns.end()));
+    program.classes.insert(program.classes.begin(), std::make_move_iterator(extra_classes.begin()),
+                           std::make_move_iterator(extra_classes.end()));
     return diags;
 }
 
