@@ -115,6 +115,51 @@ strong { font-weight: 600; }
 .nav nav a:hover::after, .nav nav a.active::after { transform: scaleX(1); }
 .nav nav a.active { color: var(--ink); }
 
+/* docs dropdown */
+.nav-drop { position: relative; }
+.nav-drop .caret {
+  font-size: 9px; margin-left: 2px; opacity: .7;
+  display: inline-block; transition: transform .25s ease;
+}
+.drop-menu {
+  position: absolute; top: calc(100% + 6px); left: 0;
+  min-width: 168px; padding: 6px;
+  background: rgba(8, 12, 20, 0.97);
+  border: 1px solid var(--line); border-radius: 10px;
+  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.55);
+  opacity: 0; visibility: hidden; transform: translateY(-4px);
+  transition: opacity .2s ease, transform .2s ease, visibility .2s;
+}
+.nav-drop:hover .drop-menu, .nav-drop:focus-within .drop-menu {
+  opacity: 1; visibility: visible; transform: translateY(0);
+}
+.nav-drop:hover .caret, .nav-drop:focus-within .caret { transform: rotate(180deg); }
+.drop-menu a {
+  display: block; padding: 7px 10px; border-radius: 6px;
+  color: var(--muted); text-decoration: none; font-size: 13px;
+  transition: background .15s ease, color .15s ease;
+}
+.drop-menu a::after { display: none; }
+.drop-menu a:hover { color: #fff; background: rgba(125, 211, 252, 0.08); }
+.drop-menu a.current { color: var(--ink); background: rgba(125, 211, 252, 0.06); }
+
+/* github button */
+.gh-btn {
+  display: inline-flex; align-items: center; gap: 7px;
+  margin-left: 8px; padding: 6px 13px;
+  border: 1px solid var(--line); border-radius: 8px;
+  background: rgba(255, 255, 255, 0.04);
+  color: var(--ink); text-decoration: none; font-size: 13px; line-height: 1.2;
+  transition: border-color .2s ease, background .2s ease, color .2s ease, transform .2s ease;
+}
+.gh-btn svg { flex: 0 0 auto; }
+.gh-btn:hover {
+  color: #fff; border-color: rgba(125, 211, 252, 0.45);
+  background: rgba(125, 211, 252, 0.08);
+  transform: translateY(-1px);
+}
+.gh-btn::after { display: none; }
+
 .banner {
   position: relative; z-index: 1;
   margin: 0; padding: 8px 16px; text-align: center;
