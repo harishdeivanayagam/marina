@@ -19,10 +19,12 @@ description: wave is the cargo of Marina — the single CLI for the compiler and
     <h1>Wave</h1>
     <p class="muted"><strong>wave</strong> is the cargo of Marina — one CLI for the compiler, the runtime, and the package manager. Build it from the repo root:</p>
 
-    <h2 id="install">Build &amp; install</h2>
-    <p>Requirements: CMake ≥ 3.20, a C++20 compiler, <code>clang</code>, and <code>libsqlite3</code>.</p>
-<pre><code><span class="c"># build the compiler, runtime, and wave</span>
-$ cmake -S . -B build &amp;&amp; cmake --build build -j
+    <h2 id="install">Install</h2>
+    <p>The installer clones the repo, builds <code>wave</code> and <code>marina-lsp</code>, and links them into <code>~/.local/bin</code>. The checkout stays at <code>~/.marina/src</code> because <code>wave</code> links its runtime from there.</p>
+    <p>Requirements: git, CMake ≥ 3.20, a C++20 compiler, <code>clang</code>, and <code>libsqlite3</code>.</p>
+    {% include "install.html" %}
+    <p>From a checkout, the same binaries are:</p>
+<pre><code>$ cmake -S . -B build &amp;&amp; cmake --build build -j
 <span class="c"># binaries: build/wave, build/marina-lsp</span></code></pre>
 
     <h2 id="commands">Commands</h2>
