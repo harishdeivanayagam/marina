@@ -16,6 +16,7 @@
 
 #include <cmath>
 #include <cstdint>
+#include <cstdio>
 #include <cstdlib>
 #include <optional>
 #include <stdexcept>
@@ -41,8 +42,16 @@ namespace {
 
 enum class CgTy {
     Void,
-    Int,
-    Float,
+    I8,
+    I16,
+    I32,
+    I64,
+    U8,
+    U16,
+    U32,
+    U64,
+    F32,
+    F64,
     Bool,
     Str,
     Promise,
@@ -52,13 +61,65 @@ enum class CgTy {
     Stream,
 };
 
+bool is_int(CgTy t) {
+    switch (t) {
+        case CgTy::I8:
+        case CgTy::I16:
+        case CgTy::I32:
+        case CgTy::I64:
+        case CgTy::U8:
+        case CgTy::U16:
+        case CgTy::U32:
+        case CgTy::U64: return true;
+        default: return false;
+    }
+}
+
+bool is_uint(CgTy t) {
+    return t == CgTy::U8 || t == CgTy::U16 || t == CgTy::U32 || t == CgTy::U64;
+}
+
+bool is_float(CgTy t) { return t == CgTy::F32 || t == CgTy::F64; }
+
+int bits_of(CgTy t) {
+    switch (t) {
+        case CgTy::I8:
+        case CgTy::U8: return 8;
+        case CgTy::I16:
+        case CgTy::U16: return 16;
+        case CgTy::I32:
+        case CgTy::U32:
+        case CgTy::F32: return 32;
+        case CgTy::I64:
+        case CgTy::U64:
+        case CgTy::F64: return 64;
+        default: return 0;
+    }
+}
+
+// MValue.pad: bit width, with 0x100 set for unsigned integers.
+// Float32 is 32, Float64 is 64. Other tags stay 0.
+int32_t num_pad(CgTy t) {
+    if (is_uint(t)) return bits_of(t) | 0x100;
+    if (is_int(t) || is_float(t)) return bits_of(t);
+    return 0;
+}
+
 const char* cg_ir(CgTy t) {
     switch (t) {
         case CgTy::Void: return "void";
-        case CgTy::Int: return "i32";
-        case CgTy::Float: return "double";
-        case CgTy::Bool: return "i1";
+        case CgTy::I8:
+        case CgTy::U8: return "i8";
+        case CgTy::I16:
+        case CgTy::U16: return "i16";
+        case CgTy::I32:
+        case CgTy::U32: return "i32";
+        case CgTy::I64:
+        case CgTy::U64:
         case CgTy::Stream: return "i64";
+        case CgTy::F32: return "float";
+        case CgTy::F64: return "double";
+        case CgTy::Bool: return "i1";
         case CgTy::Str:
         case CgTy::Promise:
         case CgTy::Resolver:
@@ -85,11 +146,24 @@ bool cg_is_ptr(CgTy t) {
     }
 }
 
+CgTy cg_int(uint8_t bits, bool unsign) {
+    if (unsign) {
+        if (bits == 8) return CgTy::U8;
+        if (bits == 16) return CgTy::U16;
+        if (bits == 64) return CgTy::U64;
+        return CgTy::U32;
+    }
+    if (bits == 8) return CgTy::I8;
+    if (bits == 16) return CgTy::I16;
+    if (bits == 64) return CgTy::I64;
+    return CgTy::I32;
+}
+
 CgTy cg_of(const CTy& t) {
     switch (t.tag) {
         case CTy::Tag::Void: return CgTy::Void;
-        case CTy::Tag::Int: return CgTy::Int;
-        case CTy::Tag::Float: return CgTy::Float;
+        case CTy::Tag::Int: return cg_int(t.bits, t.unsign);
+        case CTy::Tag::Float: return t.bits == 32 ? CgTy::F32 : CgTy::F64;
         case CTy::Tag::Bool: return CgTy::Bool;
         case CTy::Tag::Str: return CgTy::Str;
         case CTy::Tag::Promise: return CgTy::Promise;
@@ -104,9 +178,10 @@ CgTy cg_of(const CTy& t) {
 
 // MValue tag for a checked type (used when creating arrays / map results).
 int32_t mv_tag_of(const CTy& t) {
-    switch (cg_of(t)) {
-        case CgTy::Int: return 1;
-        case CgTy::Float: return 2;
+    CgTy c = cg_of(t);
+    if (is_int(c)) return 1;
+    if (is_float(c)) return 2;
+    switch (c) {
         case CgTy::Str: return 3;
         case CgTy::Bool: return 4;
         case CgTy::Array: return 5;
@@ -118,10 +193,10 @@ int32_t mv_tag_of(const CTy& t) {
 
 // MValue tag for a codegen value (Void -> 0; promise values are not stored).
 int32_t cg_tag(CgTy t) {
+    if (is_int(t)) return 1;
+    if (is_float(t)) return 2;
     switch (t) {
         case CgTy::Void: return 0;
-        case CgTy::Int: return 1;
-        case CgTy::Float: return 2;
         case CgTy::Str: return 3;
         case CgTy::Bool: return 4;
         case CgTy::Array: return 5;
@@ -130,6 +205,7 @@ int32_t cg_tag(CgTy t) {
         case CgTy::Promise:
         case CgTy::Resolver:
             cg_unreachable("promise values are not printable");
+        default: return 0;
     }
 }
 
@@ -238,9 +314,9 @@ struct Segment {
 };
 
 const char* default_value(CgTy t) {
+    if (is_int(t)) return "0";
+    if (is_float(t)) return "0.0";
     switch (t) {
-        case CgTy::Int: return "0";
-        case CgTy::Float: return "0.0";
         case CgTy::Bool: return "false";
         case CgTy::Stream: return "0";
         case CgTy::Str:
@@ -249,8 +325,8 @@ const char* default_value(CgTy t) {
         case CgTy::Array:
         case CgTy::Object: return "null";
         case CgTy::Void: return "void";
+        default: return "";
     }
-    return "";
 }
 
 std::string escape_ir_string(const std::string& bytes) {
@@ -700,21 +776,59 @@ struct Gen {
     // ------------------------------------------------------------------
 
     CgVal coerce_val(CgVal v, CgTy to) {
-        if (v.ty == CgTy::Int && to == CgTy::Float) {
+        if (v.ty == to) return v;
+        if (is_int(v.ty) && is_float(to)) {
             std::string r = fresh("cf");
-            emit(r + " = sitofp i32 " + v.ir + " to double");
+            const char* op = is_uint(v.ty) ? "uitofp" : "sitofp";
+            emit(r + " = " + std::string(op) + " " + cg_ir(v.ty) + " " + v.ir + " to " + cg_ir(to));
             CgVal out;
-            out.ty = CgTy::Float;
+            out.ty = to;
             out.ir = r;
             out.owned = v.owned;
             return out;
         }
+        if (v.ty == CgTy::F32 && to == CgTy::F64) {
+            std::string r = fresh("cf");
+            emit(r + " = fpext float " + v.ir + " to double");
+            return CgVal{CgTy::F64, r, v.owned};
+        }
+        if (v.ty == CgTy::F64 && to == CgTy::F32) {
+            std::string r = fresh("cf");
+            emit(r + " = fptrunc double " + v.ir + " to float");
+            return CgVal{CgTy::F32, r, v.owned};
+        }
         return v;
     }
 
-    std::string sext_i64(const CgVal& v) {
+    // Sign- or zero-extend an integer to the i64 slot of an MValue.
+    std::string as_i64(CgTy ty, const std::string& ir) {
+        if (!is_int(ty) || bits_of(ty) == 64) return ir;
         std::string r = fresh("w");
-        emit(r + " = sext i32 " + v.ir + " to i64");
+        const char* op = is_uint(ty) ? "zext" : "sext";
+        emit(r + " = " + std::string(op) + " " + cg_ir(ty) + " " + ir + " to i64");
+        return r;
+    }
+
+    std::string sext_i64(const CgVal& v) { return as_i64(v.ty, v.ir); }
+
+    std::string from_i64(CgTy ty, const std::string& ir) {
+        if (!is_int(ty) || bits_of(ty) == 64) return ir;
+        std::string r = fresh("mt");
+        emit(r + " = trunc i64 " + ir + " to " + cg_ir(ty));
+        return r;
+    }
+
+    std::string as_f64(CgTy ty, const std::string& ir) {
+        if (ty != CgTy::F32) return ir;
+        std::string r = fresh("fx");
+        emit(r + " = fpext float " + ir + " to double");
+        return r;
+    }
+
+    std::string from_f64(CgTy ty, const std::string& ir) {
+        if (ty != CgTy::F32) return ir;
+        std::string r = fresh("ft");
+        emit(r + " = fptrunc double " + ir + " to float");
         return r;
     }
 
@@ -744,23 +858,24 @@ struct Gen {
         emit("store i32 " + num(static_cast<size_t>(tag)) + ", ptr " + a);
         {
             std::string g = mv_field(a, 1);
-            emit("store i32 0, ptr " + g);
+            emit("store i32 " + std::to_string(num_pad(v.ty)) + ", ptr " + g);
+        }
+        if (is_int(v.ty)) {
+            std::string x = as_i64(v.ty, v.ir);
+            std::string g = mv_field(a, 2);
+            emit("store i64 " + x + ", ptr " + g);
+            return a;
+        }
+        if (is_float(v.ty)) {
+            std::string x = as_f64(v.ty, v.ir);
+            std::string g = mv_field(a, 3);
+            emit("store double " + x + ", ptr " + g);
+            return a;
         }
         switch (v.ty) {
-            case CgTy::Int: {
-                std::string x = sext_i64(v);
-                std::string g = mv_field(a, 2);
-                emit("store i64 " + x + ", ptr " + g);
-                break;
-            }
             case CgTy::Stream: {
                 std::string g = mv_field(a, 2);
                 emit("store i64 " + v.ir + ", ptr " + g);
-                break;
-            }
-            case CgTy::Float: {
-                std::string g = mv_field(a, 3);
-                emit("store double " + v.ir + ", ptr " + g);
                 break;
             }
             case CgTy::Bool: {
@@ -789,21 +904,19 @@ struct Gen {
     // Load a typed value out of an MValue struct (alloca'd). Ptr payloads are
     // owned by the caller (the runtime retains them before handing them over).
     CgVal mv_load(const std::string& a, CgTy ct) {
+        if (is_int(ct)) {
+            std::string g = mv_field(a, 2);
+            std::string l = fresh("ml");
+            emit(l + " = load i64, ptr " + g);
+            return CgVal{ct, from_i64(ct, l), false};
+        }
+        if (is_float(ct)) {
+            std::string g = mv_field(a, 3);
+            std::string l = fresh("ml");
+            emit(l + " = load double, ptr " + g);
+            return CgVal{ct, from_f64(ct, l), false};
+        }
         switch (ct) {
-            case CgTy::Int: {
-                std::string g = mv_field(a, 2);
-                std::string l = fresh("ml");
-                emit(l + " = load i64, ptr " + g);
-                std::string t = fresh("mt");
-                emit(t + " = trunc i64 " + l + " to i32");
-                return CgVal{CgTy::Int, t, false};
-            }
-            case CgTy::Float: {
-                std::string g = mv_field(a, 3);
-                std::string l = fresh("ml");
-                emit(l + " = load double, ptr " + g);
-                return CgVal{CgTy::Float, l, false};
-            }
             case CgTy::Bool: {
                 std::string g = mv_field(a, 2);
                 std::string l = fresh("ml");
@@ -838,23 +951,24 @@ struct Gen {
         emit("store i32 " + num(static_cast<size_t>(tag)) + ", ptr " + dst);
         {
             std::string g = mv_field(dst, 1);
-            emit("store i32 0, ptr " + g);
+            emit("store i32 " + std::to_string(num_pad(v.ty)) + ", ptr " + g);
+        }
+        if (is_int(v.ty)) {
+            std::string x = as_i64(v.ty, v.ir);
+            std::string g = mv_field(dst, 2);
+            emit("store i64 " + x + ", ptr " + g);
+            return;
+        }
+        if (is_float(v.ty)) {
+            std::string x = as_f64(v.ty, v.ir);
+            std::string g = mv_field(dst, 3);
+            emit("store double " + x + ", ptr " + g);
+            return;
         }
         switch (v.ty) {
-            case CgTy::Int: {
-                std::string x = sext_i64(v);
-                std::string g = mv_field(dst, 2);
-                emit("store i64 " + x + ", ptr " + g);
-                break;
-            }
             case CgTy::Stream: {
                 std::string g = mv_field(dst, 2);
                 emit("store i64 " + v.ir + ", ptr " + g);
-                break;
-            }
-            case CgTy::Float: {
-                std::string g = mv_field(dst, 3);
-                emit("store double " + v.ir + ", ptr " + g);
                 break;
             }
             case CgTy::Bool: {
@@ -877,21 +991,27 @@ struct Gen {
 
     // Unpack an MValue argument (from the runtime) into a typed alloca.
     void store_from_mv(const std::string& src, CgTy ct, const std::string& dst) {
+        if (is_int(ct)) {
+            std::string g = mv_field(src, 2);
+            std::string l = fresh("pm");
+            emit(l + " = load i64, ptr " + g);
+            emit("store " + std::string(cg_ir(ct)) + " " + from_i64(ct, l) + ", ptr " + dst);
+            return;
+        }
+        if (is_float(ct)) {
+            std::string g = mv_field(src, 3);
+            std::string l = fresh("pm");
+            emit(l + " = load double, ptr " + g);
+            emit("store " + std::string(cg_ir(ct)) + " " + from_f64(ct, l) + ", ptr " + dst);
+            return;
+        }
         std::string v;
         switch (ct) {
-            case CgTy::Int:
             case CgTy::Bool:
             case CgTy::Stream: {
                 std::string g = mv_field(src, 2);
                 std::string l = fresh("pm");
                 emit(l + " = load i64, ptr " + g);
-                v = l;
-                break;
-            }
-            case CgTy::Float: {
-                std::string g = mv_field(src, 3);
-                std::string l = fresh("pm");
-                emit(l + " = load double, ptr " + g);
                 v = l;
                 break;
             }
@@ -909,12 +1029,6 @@ struct Gen {
                 break;
         }
         switch (ct) {
-            case CgTy::Int: {
-                std::string t = fresh("pt");
-                emit(t + " = trunc i64 " + v + " to i32");
-                emit("store i32 " + t + ", ptr " + dst);
-                break;
-            }
             case CgTy::Bool: {
                 std::string t = fresh("pt");
                 emit(t + " = trunc i64 " + v + " to i1");
@@ -1217,21 +1331,25 @@ struct Gen {
     }
 
     void copy_mv(const std::string& val, CgTy ty, const std::string& a) {
+        {
+            std::string g = mv_field(a, 1);
+            emit("store i32 " + std::to_string(num_pad(ty)) + ", ptr " + g);
+        }
+        if (is_int(ty)) {
+            std::string x = as_i64(ty, val);
+            std::string g = mv_field(a, 2);
+            emit("store i64 " + x + ", ptr " + g);
+            emit("store i32 1, ptr " + a);
+            return;
+        }
+        if (is_float(ty)) {
+            std::string x = as_f64(ty, val);
+            std::string g = mv_field(a, 3);
+            emit("store double " + x + ", ptr " + g);
+            emit("store i32 2, ptr " + a);
+            return;
+        }
         switch (ty) {
-            case CgTy::Int: {
-                CgVal iv{CgTy::Int, val, false};
-                std::string x = sext_i64(iv);
-                std::string g = mv_field(a, 2);
-                emit("store i64 " + x + ", ptr " + g);
-                emit("store i32 1, ptr " + a);
-                break;
-            }
-            case CgTy::Float: {
-                std::string g = mv_field(a, 3);
-                emit("store double " + val + ", ptr " + g);
-                emit("store i32 2, ptr " + a);
-                break;
-            }
             case CgTy::Bool: {
                 std::string x = fresh("bw");
                 emit(x + " = zext i1 " + val + " to i64");
@@ -1273,10 +1391,24 @@ struct Gen {
 
     CgVal cg_expr(const CExpr& e) {
         if (auto* x = std::get_if<CInt>(&e.v)) {
-            return CgVal{CgTy::Int, std::to_string(x->value), false};
+            CgTy ty = cg_int(x->bits, x->unsign);
+            std::string ir;
+            if (x->neg && x->bits == 64 && x->value == (1ULL << 63)) {
+                ir = "-9223372036854775808";
+            } else if (x->neg) {
+                ir = "-" + std::to_string(x->value);
+            } else if (x->unsign && x->bits == 64 && x->value > static_cast<uint64_t>(INT64_MAX)) {
+                char buf[40];
+                std::snprintf(buf, sizeof buf, "u0x%llX", static_cast<unsigned long long>(x->value));
+                ir = buf;
+            } else {
+                ir = std::to_string(x->value);
+            }
+            return CgVal{ty, ir, false};
         }
         if (auto* x = std::get_if<CFloat>(&e.v)) {
-            return CgVal{CgTy::Float, format_f64(x->value), false};
+            CgTy ty = x->bits == 32 ? CgTy::F32 : CgTy::F64;
+            return CgVal{ty, format_f64(x->value), false};
         }
         if (auto* x = std::get_if<CBool>(&e.v)) {
             return CgVal{CgTy::Bool, std::string(x->value ? "1" : "0"), false};
@@ -1333,13 +1465,14 @@ struct Gen {
         if (auto* x = std::get_if<CUnary>(&e.v)) {
             CgVal v = cg_expr(*x->operand);
             std::string r = fresh("un");
-            if (x->op == UnOpC::Neg && cg_of(x->ty) == CgTy::Int) {
-                emit(r + " = sub i32 0, " + v.ir);
-                return CgVal{CgTy::Int, r, false};
+            CgTy nt = cg_of(x->ty);
+            if (x->op == UnOpC::Neg && is_int(nt)) {
+                emit(r + " = sub " + std::string(cg_ir(nt)) + " 0, " + v.ir);
+                return CgVal{nt, r, false};
             }
-            if (x->op == UnOpC::Neg && cg_of(x->ty) == CgTy::Float) {
-                emit(r + " = fneg double " + v.ir);
-                return CgVal{CgTy::Float, r, false};
+            if (x->op == UnOpC::Neg && is_float(nt)) {
+                emit(r + " = fneg " + std::string(cg_ir(nt)) + " " + v.ir);
+                return CgVal{nt, r, false};
             }
             if (x->op == UnOpC::Not) {
                 emit(r + " = xor i1 " + v.ir + ", true");
@@ -1383,37 +1516,50 @@ struct Gen {
             }
             if (op == BinOpC::Lt || op == BinOpC::Gt || op == BinOpC::Le ||
                 op == BinOpC::Ge || op == BinOpC::Eq || op == BinOpC::Neq) {
-                // operands must share a numeric type: widen Int to
-                // Float when either side is Float (the comparison's
-                // own CgTy is Bool, so `res` cannot drive this)
-                CgTy cmp_cg = (lv.ty == CgTy::Float || rv.ty == CgTy::Float) ? CgTy::Float
-                                                                             : CgTy::Int;
+                // Widen an integer to the float it is compared with. Two
+                // floats compare as Float64 unless both are Float32.
+                // Same-width integers compare with signed or unsigned icmp.
+                CgTy cmp_cg;
+                if (is_float(lv.ty) || is_float(rv.ty)) {
+                    bool both32 = (lv.ty == CgTy::F32 || is_int(lv.ty)) &&
+                                  (rv.ty == CgTy::F32 || is_int(rv.ty)) &&
+                                  (lv.ty == CgTy::F32 || rv.ty == CgTy::F32);
+                    cmp_cg = both32 ? CgTy::F32 : CgTy::F64;
+                } else {
+                    cmp_cg = is_int(lv.ty) ? lv.ty : CgTy::I32;
+                }
                 lv = coerce_val(lv, cmp_cg);
                 rv = coerce_val(rv, cmp_cg);
-                const char* cmp_ty = cmp_cg == CgTy::Float ? "double" : "i32";
+                bool fp = is_float(cmp_cg);
+                bool un = is_uint(cmp_cg);
                 const char* pred;
-                if (op == BinOpC::Lt) pred = cmp_cg == CgTy::Int ? "slt" : "olt";
-                else if (op == BinOpC::Gt) pred = cmp_cg == CgTy::Int ? "sgt" : "ogt";
-                else if (op == BinOpC::Le) pred = cmp_cg == CgTy::Int ? "sle" : "ole";
-                else if (op == BinOpC::Ge) pred = cmp_cg == CgTy::Int ? "sge" : "oge";
-                else if (op == BinOpC::Eq) pred = cmp_cg == CgTy::Int ? "eq" : "oeq";
-                else pred = cmp_cg == CgTy::Int ? "ne" : "one";
+                if (op == BinOpC::Lt) pred = fp ? "olt" : (un ? "ult" : "slt");
+                else if (op == BinOpC::Gt) pred = fp ? "ogt" : (un ? "ugt" : "sgt");
+                else if (op == BinOpC::Le) pred = fp ? "ole" : (un ? "ule" : "sle");
+                else if (op == BinOpC::Ge) pred = fp ? "oge" : (un ? "uge" : "sge");
+                else if (op == BinOpC::Eq) pred = fp ? "oeq" : "eq";
+                else pred = fp ? "one" : "ne";
                 std::string out = fresh("bc");
-                const char* mnemonic = cmp_cg == CgTy::Float ? "fcmp" : "icmp";
-                emit(out + " = " + mnemonic + " " + pred + " " + cmp_ty + " " + lv.ir +
+                const char* mnemonic = fp ? "fcmp" : "icmp";
+                emit(out + " = " + mnemonic + " " + pred + " " + cg_ir(cmp_cg) + " " + lv.ir +
                      ", " + rv.ir);
                 return CgVal{CgTy::Bool, out, false};
             }
             std::string out = fresh("ba");
-            if (res == CgTy::Int && op == BinOpC::Add) emit(out + " = add i32 " + lv.ir + ", " + rv.ir);
-            else if (res == CgTy::Int && op == BinOpC::Sub) emit(out + " = sub i32 " + lv.ir + ", " + rv.ir);
-            else if (res == CgTy::Int && op == BinOpC::Mul) emit(out + " = mul i32 " + lv.ir + ", " + rv.ir);
-            else if (res == CgTy::Int && op == BinOpC::Div) emit(out + " = sdiv i32 " + lv.ir + ", " + rv.ir);
-            else if (res == CgTy::Int && op == BinOpC::Mod) emit(out + " = srem i32 " + lv.ir + ", " + rv.ir);
-            else if (res == CgTy::Float && op == BinOpC::Add) emit(out + " = fadd double " + lv.ir + ", " + rv.ir);
-            else if (res == CgTy::Float && op == BinOpC::Sub) emit(out + " = fsub double " + lv.ir + ", " + rv.ir);
-            else if (res == CgTy::Float && op == BinOpC::Mul) emit(out + " = fmul double " + lv.ir + ", " + rv.ir);
-            else if (res == CgTy::Float && op == BinOpC::Div) emit(out + " = fdiv double " + lv.ir + ", " + rv.ir);
+            std::string irop = cg_ir(res);
+            if (is_int(res) && op == BinOpC::Add) emit(out + " = add " + irop + " " + lv.ir + ", " + rv.ir);
+            else if (is_int(res) && op == BinOpC::Sub) emit(out + " = sub " + irop + " " + lv.ir + ", " + rv.ir);
+            else if (is_int(res) && op == BinOpC::Mul) emit(out + " = mul " + irop + " " + lv.ir + ", " + rv.ir);
+            else if (is_int(res) && op == BinOpC::Div)
+                emit(out + " = " + std::string(is_uint(res) ? "udiv" : "sdiv") + " " + irop + " " +
+                     lv.ir + ", " + rv.ir);
+            else if (is_int(res) && op == BinOpC::Mod)
+                emit(out + " = " + std::string(is_uint(res) ? "urem" : "srem") + " " + irop + " " +
+                     lv.ir + ", " + rv.ir);
+            else if (is_float(res) && op == BinOpC::Add) emit(out + " = fadd " + irop + " " + lv.ir + ", " + rv.ir);
+            else if (is_float(res) && op == BinOpC::Sub) emit(out + " = fsub " + irop + " " + lv.ir + ", " + rv.ir);
+            else if (is_float(res) && op == BinOpC::Mul) emit(out + " = fmul " + irop + " " + lv.ir + ", " + rv.ir);
+            else if (is_float(res) && op == BinOpC::Div) emit(out + " = fdiv " + irop + " " + lv.ir + ", " + rv.ir);
             else cg_unreachable("unreachable binary op");
             return CgVal{res, out, false};
         }
@@ -1718,7 +1864,7 @@ struct Gen {
                     emit(n + " = call i64 @marina_array_len(ptr " + p + ")");
                     std::string t = fresh("al");
                     emit(t + " = trunc i64 " + n + " to i32");
-                    v = CgVal{CgTy::Int, t, false};
+                    v = CgVal{CgTy::I32, t, false};
                     break;
                 }
                 case ArrayOpKind::Push:
@@ -1743,7 +1889,7 @@ struct Gen {
                     std::string t = fresh("al");
                     emit(t + " = trunc i64 " + n + " to i32");
                     discard(av);
-                    v = CgVal{CgTy::Int, t, false};
+                    v = CgVal{CgTy::I32, t, false};
                     break;
                 }
                 case ArrayOpKind::Pop:
@@ -1862,7 +2008,7 @@ struct Gen {
             std::string t = fresh("slt");
             emit(t + " = trunc i64 " + n + " to i32");
             discard(s);
-            return CgVal{CgTy::Int, t, false};
+            return CgVal{CgTy::I32, t, false};
         }
         if (auto* x = std::get_if<CStrMethod>(&e.v)) {
             CgVal s = cg_expr(*x->obj);
@@ -1876,7 +2022,7 @@ struct Gen {
                      ")");
                 std::string t = fresh("sct");
                 emit(t + " = trunc i64 " + n + " to i32");
-                v = CgVal{CgTy::Int, t, false};
+                v = CgVal{CgTy::I32, t, false};
             } else {
                 CgVal av = cg_expr(x->args[0]);
                 std::string a64 = sext_i64(av);
@@ -2913,21 +3059,19 @@ struct Gen {
         std::string vgep2 = mv_field("%val", 2);
         std::string vgep3 = mv_field("%val", 3);
         std::string vgep4 = mv_field("%val", 4);
+        if (is_int(ct)) {
+            std::string l = fresh("aw");
+            emit(l + " = load i64, ptr " + vgep2);
+            emit("store " + std::string(cg_ir(ct)) + " " + from_i64(ct, l) + ", ptr " + gep);
+            return;
+        }
+        if (is_float(ct)) {
+            std::string l = fresh("aw");
+            emit(l + " = load double, ptr " + vgep3);
+            emit("store " + std::string(cg_ir(ct)) + " " + from_f64(ct, l) + ", ptr " + gep);
+            return;
+        }
         switch (ct) {
-            case CgTy::Int: {
-                std::string l = fresh("aw");
-                emit(l + " = load i64, ptr " + vgep2);
-                std::string t = fresh("at");
-                emit(t + " = trunc i64 " + l + " to i32");
-                emit("store i32 " + t + ", ptr " + gep);
-                break;
-            }
-            case CgTy::Float: {
-                std::string l = fresh("aw");
-                emit(l + " = load double, ptr " + vgep3);
-                emit("store double " + l + ", ptr " + gep);
-                break;
-            }
             case CgTy::Str: {
                 std::string l = fresh("aw");
                 emit(l + " = load ptr, ptr " + vgep4);

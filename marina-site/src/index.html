@@ -36,7 +36,7 @@ description: Marina is a strictly-typed, ahead-of-time compiled subset of TypeSc
       </div>
       <div>
         <dt>types</dt>
-        <dd>No <code>any</code>. Parameters must be annotated. The only implicit conversion is <code>Int32</code> to <code>Float64</code>. Generics are monomorphized.</dd>
+        <dd>No <code>any</code>. Parameters must be annotated. Integers are <code>Int8</code>–<code>Int64</code> and <code>UInt8</code>–<code>UInt64</code> (default <code>Int32</code>); floats are <code>Float32</code> and <code>Float64</code> (default <code>Float64</code>). An integer widens to a float, and <code>Float32</code> widens to <code>Float64</code>. Generics are monomorphized.</dd>
       </div>
       <div>
         <dt>memory</dt>

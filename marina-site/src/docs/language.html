@@ -26,8 +26,9 @@ description: The Marina language — types and inference, let/const, arrays, obj
     <h2 id="types">Types &amp; inference</h2>
     <table>
       <tr><th>Type</th><th>Example</th></tr>
-      <tr><td>Int32</td><td><code>let a = 10</code></td></tr>
-      <tr><td>Float64</td><td><code>let b = 20.5</code></td></tr>
+      <tr><td>Int8, Int16, Int32, Int64</td><td><code>let a = 10</code> is Int32; <code>let b: Int8 = -12</code></td></tr>
+      <tr><td>UInt8, UInt16, UInt32, UInt64</td><td><code>let n: UInt8 = 255</code></td></tr>
+      <tr><td>Float32, Float64</td><td><code>let x = 20.5</code> is Float64; <code>let y: Float32 = 1.5</code></td></tr>
       <tr><td>string</td><td><code>let s = "hi"</code></td></tr>
       <tr><td>bool</td><td><code>let ok = true</code></td></tr>
       <tr><td>Promise&lt;T&gt;</td><td>return value of an <code>async function</code></td></tr>
@@ -35,11 +36,16 @@ description: The Marina language — types and inference, let/const, arrays, obj
       <tr><td>interface</td><td>structural data contracts</td></tr>
       <tr><td>generic T</td><td>type parameters on functions and classes</td></tr>
     </table>
-    <p>Annotations are available (<code>let a: Int32 = 10</code>) and <strong>required for function parameters</strong>. There is no <code>any</code>. The only implicit conversion is <code>Int32 → Float64</code> in mixed arithmetic. String arithmetic is rejected — use template literals:</p>
-<pre><code><span class="k">let</span> a = <span class="n">10</span>        <span class="c">// Int32</span>
-<span class="k">let</span> b = <span class="n">20.5</span>      <span class="c">// Float64</span>
-<span class="k">let</span> result = a + b  <span class="c">// Float64 (a is widened)</span>
+    <p>Annotations are available (<code>let a: Int32 = 10</code>, <code>function f(x: Int8): void {}</code>) and <strong>required for function parameters</strong>. There is no <code>any</code>.</p>
+    <p>Unsuffixed integer literals are <code>Int32</code> when they fit, <code>Int64</code> when they only fit in 64 bits, and <code>UInt64</code> otherwise. A literal may be used as any integer or float type it fits in. Integer widths do not convert to each other, and signed does not convert to unsigned. Any integer widens to <code>Float32</code> or <code>Float64</code>; <code>Float32</code> widens to <code>Float64</code>. Arithmetic on two integers requires the same type (a literal adopts the other operand). If either operand is <code>Float64</code> the result is <code>Float64</code>; a <code>Float32</code> operand otherwise keeps the result <code>Float32</code>. Unary <code>-</code> is signed-only. String arithmetic is rejected — use template literals:</p>
+<pre><code><span class="k">let</span> a = <span class="n">10</span>              <span class="c">// Int32</span>
+<span class="k">let</span> b = <span class="n">20.5</span>            <span class="c">// Float64</span>
+<span class="k">let</span> result = a + b      <span class="c">// Float64 (a is widened)</span>
+<span class="k">let</span> s: <span class="t">Int8</span> = <span class="n">-12</span>
+<span class="k">let</span> w: <span class="t">Float32</span> = <span class="n">1.5</span>
+<span class="k">let</span> z = s + w           <span class="c">// Float32</span>
 <span class="f">console</span>.log(<span class="s">`The result of ${a} + ${b} is ${result}`</span>)</code></pre>
+    <p class="muted">Aliases: <code>i8</code>/<code>int8</code>, <code>i16</code>/<code>int16</code>, <code>i32</code>/<code>int</code>/<code>int32</code>, <code>i64</code>/<code>int64</code>, <code>u8</code>/<code>uint8</code> … <code>u64</code>/<code>uint64</code>, <code>f32</code>/<code>float32</code>, <code>f64</code>/<code>float</code>/<code>float64</code>/<code>double</code>.</p>
 
     <h2 id="letconst">Variables: let vs const</h2>
     <p><code>let</code> declares a mutable variable; <code>const</code> declares an immutable one. Assigning to a <code>const</code> in any form (<code>=</code>, <code>++</code>, <code>--</code>, <code>+=</code>, <code>-=</code>) is a compile-time error, and <code>const</code> declarations must be initialized. <code>const</code> freezes the <em>binding</em>, not the object — array contents can still be mutated through it.</p>

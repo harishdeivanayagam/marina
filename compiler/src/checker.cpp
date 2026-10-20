@@ -6,8 +6,12 @@
 // Rules (v0.1):
 //   * Function parameters REQUIRE type annotations (strict mode).
 //   * No `any`, no implicit truthiness, no string arithmetic.
-//   * Int32 -> Float64 widening is the only implicit conversion
-//     (so `10 + 20.5` is `Float64`, matching the examples).
+//   * Numeric types are Int8/16/32/64, UInt8/16/32/64, Float32 and Float64.
+//     Unsuffixed integers default to Int32 (Int64 / UInt64 when the literal
+//     does not fit). Unsuffixed floats default to Float64.
+//   * Implicit conversions: any integer widens to Float32 or Float64, and
+//     Float32 widens to Float64. A numeric literal may also be used as any
+//     integer or float type it fits in. Integer widths do not convert.
 //   * `await` is allowed only at statement level:
 //       `let x = await e`, `await e`, or `return await e`.
 //   * Lambdas are only allowed as arguments to `setTimeout` / `new Promise`.
@@ -33,8 +37,9 @@ namespace marina::ir {
 std::string CTy::name() const {
     switch (tag) {
         case Tag::Void: return "void";
-        case Tag::Int: return "Int32";
-        case Tag::Float: return "Float64";
+        case Tag::Int:
+            return (unsign ? "UInt" : "Int") + std::to_string(bits == 0 ? 32 : bits);
+        case Tag::Float: return bits == 32 ? "Float32" : "Float64";
         case Tag::Bool: return "bool";
         case Tag::Str: return "string";
         case Tag::Promise:
@@ -60,21 +65,26 @@ bool CTy::operator==(const CTy& o) const {
             return !inner || *inner == *o.inner;
         case Tag::Object: return object == o.object; // identity by id
         case Tag::Interface: return iface == o.iface;
-        default: return true; // Void/Int/Float/Bool/Str/Stream
+        case Tag::Int: return bits == o.bits && unsign == o.unsign;
+        case Tag::Float: return bits == o.bits;
+        default: return true; // Void/Bool/Str/Stream
     }
 }
 
 CTy cty_void() { return CTy{}; }
 
-CTy cty_int() {
+CTy cty_int(uint8_t bits, bool unsign) {
     CTy t;
     t.tag = CTy::Tag::Int;
+    t.bits = bits;
+    t.unsign = unsign;
     return t;
 }
 
-CTy cty_float() {
+CTy cty_float(uint8_t bits) {
     CTy t;
     t.tag = CTy::Tag::Float;
+    t.bits = bits == 32 ? 32 : 64;
     return t;
 }
 
@@ -308,8 +318,8 @@ FieldKind validator_kind_of(const CExpr& c) {
 std::string mangle_ty(const CTy& t) {
     switch (t.tag) {
         case CTy::Tag::Void: return "Void";
-        case CTy::Tag::Int: return "Int32";
-        case CTy::Tag::Float: return "Float64";
+        case CTy::Tag::Int: return t.name();
+        case CTy::Tag::Float: return t.name();
         case CTy::Tag::Bool: return "Bool";
         case CTy::Tag::Str: return "string";
         case CTy::Tag::Stream: return "Stream";
@@ -527,6 +537,59 @@ struct VarEntry {
 
 namespace {
 
+bool lit_fits(uint64_t mag, bool neg, uint8_t bits, bool unsign) {
+    if (bits != 8 && bits != 16 && bits != 32 && bits != 64) return false;
+    if (neg) {
+        if (unsign) return false;
+        if (bits == 64) return mag <= (1ULL << 63);
+        return mag <= (1ULL << (bits - 1));
+    }
+    if (unsign) {
+        if (bits == 64) return true;
+        return mag < (1ULL << bits);
+    }
+    if (bits == 64) return mag <= static_cast<uint64_t>(INT64_MAX);
+    return mag < (1ULL << (bits - 1));
+}
+
+CTy default_int_ty(uint64_t v) {
+    if (v <= 2147483647ULL) return cty_int(32, false);
+    if (v <= 9223372036854775807ULL) return cty_int(64, false);
+    return cty_int(64, true);
+}
+
+bool is_i32(const CTy& t) {
+    return t.tag == CTy::Tag::Int && !t.unsign && (t.bits == 0 || t.bits == 32);
+}
+
+bool is_num_lit(const CExpr& e) {
+    return std::holds_alternative<CInt>(e.v) || std::holds_alternative<CFloat>(e.v);
+}
+
+// Any integer widens to either float; Float32 widens to Float64.
+bool num_widens(const CTy& from, const CTy& to) {
+    if (from.tag == CTy::Tag::Int && to.tag == CTy::Tag::Float) return true;
+    if (from.tag == CTy::Tag::Float && to.tag == CTy::Tag::Float && from.bits == 32 && to.bits != 32)
+        return true;
+    return false;
+}
+
+std::optional<CTy> numeric_alias(const std::string& name) {
+    if (name == "int8" || name == "Int8" || name == "i8") return cty_int(8, false);
+    if (name == "int16" || name == "Int16" || name == "i16") return cty_int(16, false);
+    if (name == "int" || name == "int32" || name == "Int32" || name == "i32") return cty_int(32, false);
+    if (name == "int64" || name == "Int64" || name == "i64") return cty_int(64, false);
+    if (name == "uint8" || name == "UInt8" || name == "u8") return cty_int(8, true);
+    if (name == "uint16" || name == "UInt16" || name == "u16") return cty_int(16, true);
+    if (name == "uint32" || name == "UInt32" || name == "u32") return cty_int(32, true);
+    if (name == "uint64" || name == "UInt64" || name == "u64") return cty_int(64, true);
+    if (name == "float32" || name == "Float32" || name == "f32") return cty_float(32);
+    if (name == "float" || name == "float64" || name == "Float64" || name == "f64" || name == "double" ||
+        name == "number")
+        return cty_float(64);
+    return std::nullopt;
+}
+
 class Checker {
 public:
     std::unordered_map<std::string, FnSig> sigs;
@@ -539,6 +602,11 @@ public:
     bool is_async_ctx = false;
     std::optional<CTy> ret_ty;
     bool saw_float_ret = false;
+    // Width of a float return seen alongside an integer return (32 or 64).
+    uint8_t ret_float_bits = 0;
+    // When a function or callback has an annotated/expected return type,
+    // numeric literals in `return` adapt to it.
+    std::optional<CTy> ret_literal_target;
     // inferred return type of the most recently checked function
     std::optional<CTy> last_fn_ret;
     // current promise-executor inference: (T, saw_float)
@@ -735,15 +803,45 @@ public:
     // Types
     // ------------------------------------------------------------------
 
+    void adapt_literal(CExpr& e, const CTy& to) {
+        if (auto* x = std::get_if<CInt>(&e.v)) {
+            if (to.tag == CTy::Tag::Int && lit_fits(x->value, x->neg, to.bits, to.unsign)) {
+                x->bits = to.bits;
+                x->unsign = to.unsign;
+            }
+            return;
+        }
+        if (auto* x = std::get_if<CFloat>(&e.v)) {
+            if (to.tag == CTy::Tag::Float) x->bits = to.bits;
+        }
+    }
+
+    void adapt_peers(CExpr& a, CExpr& b) {
+        bool la = is_num_lit(a);
+        bool lb = is_num_lit(b);
+        if (la && !lb) adapt_literal(a, expr_ty(b));
+        else if (lb && !la) adapt_literal(b, expr_ty(a));
+    }
+
+    void note_float_ret(const CTy& t) {
+        if (t.tag != CTy::Tag::Float) return;
+        saw_float_ret = true;
+        uint8_t b = t.bits == 32 ? 32 : 64;
+        if (b > ret_float_bits) ret_float_bits = b;
+    }
+
+    CTy apply_float_ret(CTy ret) const {
+        if (saw_float_ret && ret.tag == CTy::Tag::Int)
+            return cty_float(ret_float_bits == 32 ? 32 : 64);
+        return ret;
+    }
+
     CTy ty_of(const ast::TyAnn& ann) {
         const std::string& name = ann.name;
         bool has_args = !ann.args.empty();
         CTy t;
-        if (name == "int" || name == "Int32" || name == "i32") {
-            t = cty_int();
-        } else if (name == "float" || name == "Float64" || name == "f64" || name == "double" ||
-                   name == "number") {
-            t = cty_float();
+        if (auto num = numeric_alias(name)) {
+            t = *num;
         } else if (name == "string" || name == "String") {
             t = cty_str();
         } else if (name == "bool" || name == "boolean" || name == "Boolean") {
@@ -795,8 +893,10 @@ public:
         return t;
     }
 
-    /// The only implicit conversion: Int32 widens to Float64. Interface
-    /// conformance is checked structurally.
+    /// Implicit numeric conversions: any integer widens to Float32 or
+    /// Float64, and Float32 widens to Float64. Interface conformance is
+    /// checked structurally. Integer widths do not convert here — literals
+    /// are retargeted by `adapt_literal` before this is called.
     bool coerce(const CTy& from, const CTy& to, Span span) {
         if (from == to) return true;
         // a fieldless interface (e.g. sql_Row) accepts any shape: its
@@ -805,7 +905,7 @@ public:
             auto it = interfaces.find(from.iface);
             if (it != interfaces.end() && it->second.empty()) return true;
         }
-        if (from.tag == CTy::Tag::Int && to.tag == CTy::Tag::Float) return true;
+        if (num_widens(from, to)) return true;
         // element-wise coercion: Array<T> accepts Array<U> when U coerces to T
         if (from.tag == CTy::Tag::Array && to.tag == CTy::Tag::Array) {
             // no diagnostics for the element check
@@ -829,7 +929,7 @@ public:
             auto it = interfaces.find(from.iface);
             if (it != interfaces.end() && it->second.empty()) return true;
         }
-        if (from.tag == CTy::Tag::Int && to.tag == CTy::Tag::Float) return true;
+        if (num_widens(from, to)) return true;
         if (to.tag == CTy::Tag::Interface && from.tag == CTy::Tag::Object)
             return iface_conform_quiet(from.object, to.iface);
         if (from.tag == CTy::Tag::Interface && to.tag == CTy::Tag::Object)
@@ -855,7 +955,7 @@ public:
                 }
             if (found) {
                 const CTy& t = found->second;
-                if (!(t == fty) && !(t.tag == CTy::Tag::Int && fty.tag == CTy::Tag::Float)) {
+                if (!(t == fty) && !num_widens(t, fty)) {
                     diag("interface '" + iname + "': field '" + fname + "' has type " + t.name() +
                              ", expected " + fty.name(),
                          span);
@@ -888,7 +988,7 @@ public:
                     break;
                 }
             if (!t) return false;
-            if (!(*t == fty) && !(t->tag == CTy::Tag::Int && fty.tag == CTy::Tag::Float)) return false;
+            if (!(*t == fty) && !num_widens(*t, fty)) return false;
         }
         return true;
     }
@@ -942,6 +1042,13 @@ public:
         in_toplevel = false;
         ret_ty.reset();
         saw_float_ret = false;
+        ret_float_bits = 0;
+        std::optional<CTy> saved_target = std::move(ret_literal_target);
+        if (f.ret_ann) {
+            CTy at = ty_of(*f.ret_ann);
+            if (f.is_async && at.tag == CTy::Tag::Promise) ret_literal_target = deref(at.inner);
+            else if (!f.is_async) ret_literal_target = at;
+        }
         scopes.emplace_back();
         std::vector<std::pair<size_t, CTy>> params;
         for (const auto& p : f.params) {
@@ -950,10 +1057,10 @@ public:
             params.emplace_back(id, ty);
         }
         std::vector<CStmt> body = check_stmts(f.body);
+        ret_literal_target = std::move(saved_target);
 
         // finalize inferred return type
-        CTy ret = ret_ty ? *ret_ty : cty_void();
-        if (saw_float_ret && ret.tag == CTy::Tag::Int) ret = cty_float();
+        CTy ret = apply_float_ret(ret_ty ? *ret_ty : cty_void());
         if (f.is_async) ret = cty_promise(std::move(ret));
         if (f.ret_ann) {
             CTy at = ty_of(*f.ret_ann);
@@ -1129,6 +1236,8 @@ public:
             CTy ty = init_ty;
             if (ann) {
                 CTy at = ty_of(*ann);
+                adapt_literal(init_c, at);
+                init_ty = expr_ty(init_c);
                 coerce(init_ty, at, span);
                 ty = at;
             }
@@ -1167,6 +1276,7 @@ public:
             }
             if (is_const) diag("cannot assign to 'const " + x->name + "'", span);
             CExpr v = check_expr(*x->value, false);
+            adapt_literal(v, ty);
             coerce(expr_ty(v), ty, span);
             CAssign a;
             a.id = id;
@@ -1190,10 +1300,11 @@ public:
             if (ty.tag == CTy::Tag::Array) {
                 CTy elem = deref(ty.inner);
                 CExpr ic = check_expr(*x->index, false);
-                if (expr_ty(ic).tag != CTy::Tag::Int) {
+                if (!is_i32(expr_ty(ic))) {
                     diag("array index must be Int32, found " + expr_ty(ic).name(), span);
                 }
                 CExpr vc = check_expr(*x->value, false);
+                adapt_literal(vc, elem);
                 coerce(expr_ty(vc), elem, span);
                 CIndexSet is;
                 is.id = id;
@@ -1240,6 +1351,7 @@ public:
                 }
                 CTy elem_c = *elem;
                 CExpr vc = check_expr(*x->value, false);
+                adapt_literal(vc, elem_c);
                 coerce(expr_ty(vc), elem_c, span);
                 CIfaceSet is;
                 is.id = id;
@@ -1274,6 +1386,7 @@ public:
                 }
                 CTy elem = def.fields[idx].second;
                 CExpr vc = check_expr(*x->value, false);
+                adapt_literal(vc, elem);
                 coerce(expr_ty(vc), elem, span);
                 CFieldSet fs;
                 fs.id = id;
@@ -1310,6 +1423,7 @@ public:
                 return ret_stmt(std::move(r.first), ReturnKindKind::Plain);
             }
             CExpr v = check_expr(val, false);
+            if (ret_literal_target) adapt_literal(v, *ret_literal_target);
             CTy t = expr_ty(v);
             if (is_async_ctx) {
                 if (t.tag == CTy::Tag::Promise) {
@@ -1462,10 +1576,18 @@ public:
             CTy prev = *ret_ty;
             if (prev == t) return;
             if (prev.tag == CTy::Tag::Int && t.tag == CTy::Tag::Float) {
-                saw_float_ret = true;
+                note_float_ret(t);
                 return;
             }
-            if (prev.tag == CTy::Tag::Float && t.tag == CTy::Tag::Int) return; // int widens to float
+            if (prev.tag == CTy::Tag::Float && t.tag == CTy::Tag::Int) {
+                note_float_ret(prev);
+                return; // int widens to float
+            }
+            if (prev.tag == CTy::Tag::Float && t.tag == CTy::Tag::Float && prev.bits != t.bits) {
+                ret_ty = cty_float(64);
+                note_float_ret(*ret_ty);
+                return;
+            }
             diag("inconsistent return types: expected " + prev.name() + ", found " + t.name(), span);
         } else {
             ret_ty = t;
@@ -1487,8 +1609,8 @@ public:
     }
 
     CTy expr_ty(const CExpr& e) const {
-        if (std::holds_alternative<CInt>(e.v)) return cty_int();
-        if (std::holds_alternative<CFloat>(e.v)) return cty_float();
+        if (auto* x = std::get_if<CInt>(&e.v)) return cty_int(x->bits, x->unsign);
+        if (auto* x = std::get_if<CFloat>(&e.v)) return cty_float(x->bits);
         if (std::holds_alternative<CBool>(e.v)) return cty_bool();
         if (std::holds_alternative<CStr>(e.v)) return cty_str();
         if (std::holds_alternative<CTemplate>(e.v)) return cty_str();
@@ -1556,8 +1678,15 @@ public:
     }
 
     CExpr check_expr(const ast::Expr& e, bool allow_await_top) {
-        if (auto* x = std::get_if<ast::EInt>(&e.v)) return ce(CInt{x->value});
-        if (auto* x = std::get_if<ast::EFloat>(&e.v)) return ce(CFloat{x->value});
+        if (auto* x = std::get_if<ast::EInt>(&e.v)) {
+            CTy dt = default_int_ty(x->value);
+            CInt n;
+            n.value = x->value;
+            n.bits = dt.bits;
+            n.unsign = dt.unsign;
+            return ce(std::move(n));
+        }
+        if (auto* x = std::get_if<ast::EFloat>(&e.v)) return ce(CFloat{x->value, 64});
         if (auto* x = std::get_if<ast::EBool>(&e.v)) return ce(CBool{x->value});
         if (auto* x = std::get_if<ast::EStr>(&e.v)) return ce(CStr{x->value});
         if (auto* x = std::get_if<ast::ETemplate>(&e.v)) {
@@ -1604,6 +1733,26 @@ public:
             if (x->op == ast::UnOp::Neg) {
                 if (!is_numeric(t)) {
                     diag("unary '-' requires a number, found " + t.name(), e.span);
+                }
+                if (auto* lit = std::get_if<CInt>(&c.v)) {
+                    if (lit->value == 0) return c;
+                    if (lit->neg || lit->value > (1ULL << 63)) {
+                        diag("integer literal does not fit in Int64", e.span);
+                        return c;
+                    }
+                    CInt n = *lit;
+                    n.neg = true;
+                    n.unsign = false;
+                    if (lit_fits(n.value, true, 32, false)) n.bits = 32;
+                    else n.bits = 64;
+                    return ce(std::move(n));
+                }
+                if (auto* fl = std::get_if<CFloat>(&c.v)) {
+                    fl->value = -fl->value;
+                    return c;
+                }
+                if (t.tag == CTy::Tag::Int && t.unsign) {
+                    diag("unary '-' is not allowed on " + t.name(), e.span);
                 }
                 CUnary u;
                 u.op = UnOpC::Neg;
@@ -1794,6 +1943,7 @@ public:
                 for (size_t i = 0; i < x->args.size(); ++i) {
                     CExpr c = check_expr(*x->args[i], false);
                     if (i < params.size()) {
+                        adapt_literal(c, params[i]);
                         coerce(expr_ty(c), params[i], x->args[i]->span);
                     }
                     cargs.push_back(std::move(c));
@@ -1813,7 +1963,7 @@ public:
             CTy ot = expr_ty(oc);
             CExpr ic = check_expr(*x->index, false);
             CTy it = expr_ty(ic);
-            if (it.tag != CTy::Tag::Int) {
+            if (!is_i32(it)) {
                 diag("array index must be Int32, found " + it.name(), e.span);
             }
             if (ot.tag == CTy::Tag::Array) {
@@ -1923,6 +2073,7 @@ public:
     CExpr check_binary(ast::BinOp op, const ast::Expr& l, const ast::Expr& r, Span span) {
         CExpr lc = check_expr(l, false);
         CExpr rc = check_expr(r, false);
+        adapt_peers(lc, rc);
         CTy lt = expr_ty(lc);
         CTy rt = expr_ty(rc);
         BinOpC opc;
@@ -1961,6 +2112,10 @@ public:
             case BinOpC::Ge: {
                 if (!is_numeric(lt) || !is_numeric(rt)) {
                     diag("comparison requires numbers, found " + lt.name() + " and " + rt.name(), span);
+                } else if (lt.tag == CTy::Tag::Int && rt.tag == CTy::Tag::Int && !(lt == rt)) {
+                    diag("comparison requires the same integer type, found " + lt.name() + " and " +
+                             rt.name(),
+                         span);
                 }
                 CBinary b;
                 b.op = opc;
@@ -1978,6 +2133,11 @@ public:
                         diag("'=='/'!=' requires numbers or bools, found " + lt.name(), span);
                     if (!is_numeric(rt) && rt.tag != CTy::Tag::Bool)
                         diag("'=='/'!=' requires numbers or bools, found " + rt.name(), span);
+                    if (lt.tag == CTy::Tag::Int && rt.tag == CTy::Tag::Int && !(lt == rt)) {
+                        diag("'=='/'!=' requires the same integer type, found " + lt.name() + " and " +
+                                 rt.name(),
+                             span);
+                    }
                 }
                 CBinary b;
                 b.op = opc;
@@ -1993,14 +2153,19 @@ public:
                 return arith(opc, std::move(lc), std::move(rc), lt, rt, span);
             }
             case BinOpC::Mod: {
-                if (lt.tag != CTy::Tag::Int || rt.tag != CTy::Tag::Int) {
-                    diag("operator '%' requires Int32 operands", span);
+                adapt_peers(lc, rc);
+                lt = expr_ty(lc);
+                rt = expr_ty(rc);
+                if (lt.tag != CTy::Tag::Int || rt.tag != CTy::Tag::Int || !(lt == rt)) {
+                    diag("operator '%' requires integer operands of the same type, found " +
+                             lt.name() + " and " + rt.name(),
+                         span);
                 }
                 CBinary b;
                 b.op = opc;
                 b.lhs = exptr(std::move(lc));
                 b.rhs = exptr(std::move(rc));
-                b.ty = cty_int();
+                b.ty = lt.tag == CTy::Tag::Int ? lt : cty_int();
                 return ce(std::move(b));
             }
             case BinOpC::Sub:
@@ -2011,13 +2176,28 @@ public:
         }
     }
 
-    CExpr arith(BinOpC opc, CExpr lc, CExpr rc, const CTy& lt, const CTy& rt, Span span) {
+    CExpr arith(BinOpC opc, CExpr lc, CExpr rc, CTy lt, CTy rt, Span span) {
+        adapt_peers(lc, rc);
+        lt = expr_ty(lc);
+        rt = expr_ty(rc);
         if (!is_numeric(lt) || !is_numeric(rt)) {
             diag("arithmetic requires numbers, found " + lt.name() + " and " + rt.name(), span);
         }
-        // If either operand is Float64, both are computed as Float64
-        // (`a + b` in calculate.ts: Int32 a is cast to Float64).
-        CTy result = (lt.tag == CTy::Tag::Float || rt.tag == CTy::Tag::Float) ? cty_float() : cty_int();
+        CTy result = cty_int();
+        if (lt.tag == CTy::Tag::Int && rt.tag == CTy::Tag::Int) {
+            if (!(lt == rt)) {
+                diag("arithmetic requires the same integer type, found " + lt.name() + " and " +
+                         rt.name(),
+                     span);
+            }
+            result = lt.tag == CTy::Tag::Int ? lt : cty_int();
+        } else if (lt.tag == CTy::Tag::Float && rt.tag == CTy::Tag::Float) {
+            result = (lt.bits == 32 && rt.bits == 32) ? cty_float(32) : cty_float(64);
+        } else if (lt.tag == CTy::Tag::Float) {
+            result = lt;
+        } else if (rt.tag == CTy::Tag::Float) {
+            result = rt;
+        }
         CBinary b;
         b.op = opc;
         b.lhs = exptr(std::move(lc));
@@ -2242,7 +2422,7 @@ public:
                     diag("cannot bind a void value in sql.stmt", te->expr->span);
                 } else {
                     diag("cannot bind a " + t.name() +
-                             " value in sql.stmt (bind Int32, Float64, string or bool)",
+                             " value in sql.stmt (bind an integer, float, string or bool)",
                          te->expr->span);
                 }
                 sql += '?';
@@ -2679,8 +2859,11 @@ public:
             std::vector<CTy> sig_params = sit->second.params;
             std::optional<CTy> sig_ret = sit->second.ret;
             bool sig_async = sit->second.is_async;
-            for (size_t i = 0; i < arg_tys.size(); ++i) {
-                if (i < sig_params.size()) coerce(arg_tys[i], sig_params[i], args[i]->span);
+            for (size_t i = 0; i < cargs.size(); ++i) {
+                if (i < sig_params.size()) {
+                    adapt_literal(cargs[i], sig_params[i]);
+                    coerce(expr_ty(cargs[i]), sig_params[i], args[i]->span);
+                }
             }
             CCallFn f;
             f.name = mangled;
@@ -2723,6 +2906,7 @@ public:
         std::optional<CTy> saved_ret_ty = std::move(ret_ty);
         ret_ty.reset();
         bool saved_float = saw_float_ret;
+        uint8_t saved_float_bits = ret_float_bits;
         bool saved_async = is_async_ctx;
         bool saved_toplevel = in_toplevel;
         std::optional<std::pair<CTy, bool>> saved_promise_infer = std::move(promise_infer);
@@ -2730,10 +2914,15 @@ public:
         CFn cf = check_fn(subst);
         ret_ty = std::move(saved_ret_ty);
         saw_float_ret = saved_float;
+        ret_float_bits = saved_float_bits;
         is_async_ctx = saved_async;
         in_toplevel = saved_toplevel;
         promise_infer = std::move(saved_promise_infer);
         CTy ret = cf.ret;
+        for (size_t i = 0; i < cargs.size() && i < params.size(); ++i) {
+            adapt_literal(cargs[i], params[i]);
+            coerce(expr_ty(cargs[i]), params[i], args[i]->span);
+        }
         mono_fns.push_back(std::move(cf));
         if (!pre_ret) {
             FnSig sig;
@@ -2768,7 +2957,8 @@ public:
                         b = actual;
                     } else {
                         const CTy& prev = *b;
-                        if (!(prev == actual) && !(prev.tag == CTy::Tag::Int && actual.tag == CTy::Tag::Float)) {
+                        if (!(prev == actual) && !(prev.tag == CTy::Tag::Int && actual.tag == CTy::Tag::Float) &&
+                            !(prev.tag == CTy::Tag::Float && actual.tag == CTy::Tag::Float)) {
                             diag("type parameter '" + n + "' is bound to " + actual.name() +
                                      " here but " + prev.name() + " elsewhere",
                                  span);
@@ -2983,6 +3173,7 @@ public:
         for (size_t i = 0; i < args.size(); ++i) {
             CExpr c = check_expr(*args[i], false);
             if (i < params.size()) {
+                adapt_literal(c, params[i]);
                 coerce(expr_ty(c), params[i], args[i]->span);
             }
             cargs.push_back(std::move(c));
@@ -3128,7 +3319,7 @@ public:
                 }
                 size_t idx = check_plain_lambda(*lam->lambda);
                 CExpr ms = check_expr(*args[1], false);
-                if (expr_ty(ms).tag != CTy::Tag::Int) {
+                if (!is_i32(expr_ty(ms))) {
                     diag("setTimeout's delay must be an Int32", args[1]->span);
                 }
                 CSetTimeout st;
@@ -3154,8 +3345,8 @@ public:
                 for (size_t i = 0; i < args.size(); ++i) {
                     CExpr c = check_expr(*args[i], false);
                     if (i < params.size()) {
-                        CTy at = expr_ty(c);
-                        coerce(at, params[i], args[i]->span);
+                        adapt_literal(c, params[i]);
+                        coerce(expr_ty(c), params[i], args[i]->span);
                     }
                     cargs.push_back(std::move(c));
                 }
@@ -3214,9 +3405,17 @@ public:
         }
         auto& [cur, saw_float] = *promise_infer;
         if (cur == arg) return;
-        if ((cur.tag == CTy::Tag::Int && arg.tag == CTy::Tag::Float) ||
-            (cur.tag == CTy::Tag::Float && arg.tag == CTy::Tag::Int)) {
-            cur = cty_float();
+        if (cur.tag == CTy::Tag::Float && arg.tag == CTy::Tag::Float) {
+            cur = cty_float(cur.bits == 32 && arg.bits == 32 ? 32 : 64);
+            saw_float = true;
+            return;
+        }
+        if (cur.tag == CTy::Tag::Int && arg.tag == CTy::Tag::Float) {
+            cur = arg;
+            saw_float = true;
+            return;
+        }
+        if (cur.tag == CTy::Tag::Float && arg.tag == CTy::Tag::Int) {
             saw_float = true;
             return;
         }
@@ -3261,6 +3460,7 @@ public:
         enter_lambda_scope(idx);
         ret_ty.reset();
         saw_float_ret = false;
+        ret_float_bits = 0;
         std::vector<CStmt> body = check_stmts(l.body);
         CTy r = ret_ty ? *ret_ty : cty_void();
         if (r.tag != CTy::Tag::Void) {
@@ -3310,6 +3510,7 @@ public:
 
         ret_ty.reset();
         saw_float_ret = false;
+        ret_float_bits = 0;
         std::vector<CStmt> body = check_stmts(l.body);
         CTy r = ret_ty ? *ret_ty : cty_void();
         if (r.tag != CTy::Tag::Void) {
@@ -3320,7 +3521,7 @@ public:
         if (promise_infer) {
             auto [ty, saw_float] = *promise_infer;
             promise_infer.reset();
-            t = (saw_float && ty.tag == CTy::Tag::Int) ? cty_float() : ty;
+            t = (saw_float && ty.tag == CTy::Tag::Int) ? cty_float(64) : ty;
         } else {
             promise_infer.reset();
             diag("cannot infer the promise value type: the executor never calls resolve (write "
@@ -3378,12 +3579,15 @@ public:
         }
         ret_ty.reset();
         saw_float_ret = false;
+        ret_float_bits = 0;
+        std::optional<CTy> saved_target = std::move(ret_literal_target);
+        ret_literal_target = expect_ret;
         bool saved_async = is_async_ctx;
         is_async_ctx = l.is_async;
         std::vector<CStmt> body = check_stmts(l.body);
         is_async_ctx = saved_async;
-        CTy ret = ret_ty ? *ret_ty : cty_void();
-        if (saw_float_ret && ret.tag == CTy::Tag::Int) ret = cty_float();
+        ret_literal_target = std::move(saved_target);
+        CTy ret = apply_float_ret(ret_ty ? *ret_ty : cty_void());
         if (expect_ret) {
             coerce(ret, *expect_ret, l.span);
             ret = *expect_ret;
@@ -3433,13 +3637,14 @@ public:
             std::vector<std::pair<std::string, CTy>> def_fields = classes[id].fields;
             std::string def_name = classes[id].name;
             for (const auto& [fname, fty] : def_fields) {
-                const CExpr* c = nullptr;
-                for (const auto& [n, ce2] : cs)
+                CExpr* c = nullptr;
+                for (auto& [n, ce2] : cs)
                     if (n == fname) {
                         c = &ce2;
                         break;
                     }
                 if (c) {
+                    adapt_literal(*c, fty);
                     coerce(expr_ty(*c), fty, span);
                 } else {
                     diag("missing field '" + fname + "' for class '" + def_name + "'", span);
@@ -3500,7 +3705,8 @@ public:
                 CExpr c = check_expr(*el, false);
                 CTy t = expr_ty(c);
                 if (t.tag != CTy::Tag::Void) {
-                    coerce(t, *expected, el->span);
+                    adapt_literal(c, *expected);
+                    coerce(expr_ty(c), *expected, el->span);
                 }
                 cs.push_back(std::move(c));
             }
@@ -3511,6 +3717,19 @@ public:
         }
         std::vector<CExpr> cs;
         for (const auto& el : elems) cs.push_back(check_expr(*el, false));
+        std::optional<CTy> anchor;
+        for (const auto& c : cs) {
+            if (is_num_lit(c)) continue;
+            CTy t = expr_ty(c);
+            if (is_numeric(t)) {
+                anchor = t;
+                break;
+            }
+        }
+        if (anchor) {
+            for (auto& c : cs)
+                if (is_num_lit(c)) adapt_literal(c, *anchor);
+        }
         std::optional<CTy> ty;
         bool saw_float = false;
         for (const auto& c : cs) {
@@ -3525,9 +3744,11 @@ public:
             } else if (*ty == t) {
                 ty = t;
             } else if (ty->tag == CTy::Tag::Int && t.tag == CTy::Tag::Float) {
-                ty = cty_float();
+                ty = t;
             } else if (ty->tag == CTy::Tag::Float && t.tag == CTy::Tag::Int) {
-                ty = cty_float();
+                // keep the float
+            } else if (ty->tag == CTy::Tag::Float && t.tag == CTy::Tag::Float) {
+                ty = cty_float(64);
             } else {
                 diag("inconsistent array element types: " + ty->name() + " and " + t.name(), span);
                 // keep prev
@@ -3535,7 +3756,7 @@ public:
         }
         CTy elem_ty;
         if (ty && ty->tag == CTy::Tag::Int && saw_float) {
-            elem_ty = cty_float();
+            elem_ty = cty_float(64);
         } else if (ty) {
             elem_ty = *ty;
         } else if (expected) {
@@ -3562,7 +3783,7 @@ public:
                 return cbool(false);
             }
             CExpr i = check_expr(*args[0], false);
-            if (expr_ty(i).tag != CTy::Tag::Int) {
+            if (!is_i32(expr_ty(i))) {
                 diag("string.charAt index must be Int32", span);
             }
             CStrMethod m;
@@ -3580,7 +3801,7 @@ public:
             std::vector<CExpr> cargs;
             for (const auto& a : args) {
                 CExpr c = check_expr(*a, false);
-                if (expr_ty(c).tag != CTy::Tag::Int) {
+                if (!is_i32(expr_ty(c))) {
                     diag("string.substring indices must be Int32", span);
                 }
                 cargs.push_back(std::move(c));
@@ -3609,6 +3830,7 @@ public:
             expect_count(1);
             if (args.empty()) return cbool(false); // Rust would panic here; bail out instead
             CExpr a = check_expr(*args[0], false);
+            adapt_literal(a, elem);
             coerce(expr_ty(a), elem, span);
             CArrayOp ao;
             ao.op = name == "push" ? ArrayOpKind::Push : ArrayOpKind::Unshift;
@@ -3630,7 +3852,7 @@ public:
             std::vector<CExpr> cargs;
             for (const auto& a : args) {
                 CExpr c = check_expr(*a, false);
-                if (expr_ty(c).tag != CTy::Tag::Int) {
+                if (!is_i32(expr_ty(c))) {
                     diag("array." + name + " indices must be Int32", span);
                 }
                 cargs.push_back(std::move(c));
@@ -3914,6 +4136,7 @@ Checked check_with_diags(const ast::Program& program_in, std::vector<Diag>& diag
         c.in_toplevel = true;
         c.ret_ty.reset();
         c.saw_float_ret = false;
+        c.ret_float_bits = 0;
         c.scopes.emplace_back();
         std::vector<std::optional<CStmt>> slots;
         slots.reserve(program.stmts.size());
@@ -3966,6 +4189,7 @@ Checked check_with_diags(const ast::Program& program_in, std::vector<Diag>& diag
         c.in_toplevel = true;
         c.ret_ty.reset();
         c.saw_float_ret = false;
+        c.ret_float_bits = 0;
         std::vector<std::optional<CStmt>> slots = std::move(*toplevel_slots);
         for (size_t i = 0; i < program.stmts.size(); ++i) {
             if (!slots[i]) slots[i] = c.check_stmt(program.stmts[i]);

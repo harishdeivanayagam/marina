@@ -100,7 +100,7 @@
     },
     "types": {
       "name": "support.type.marina",
-      "match": "\\b(Int32|Float64|Bool|String|Void|Promise|Array|Resolver)\\b"
+      "match": "\\b(Int8|Int16|Int32|Int64|UInt8|UInt16|UInt32|UInt64|Float32|Float64|int8|int16|int32|int64|uint8|uint16|uint32|uint64|float32|float64|i8|i16|i32|i64|u8|u16|u32|u64|f32|f64|Bool|String|Void|Promise|Array|Resolver)\\b"
     },
     "declarations": {
       "patterns": [

@@ -289,9 +289,9 @@ std::string json_value(const MValue& v) {
         case TAG_STRING:
             return json_escape(mv_to_string(v));
         case TAG_INT:
-            return std::to_string((int32_t)v.i);
+            return fmt_tagged_int(v);
         case TAG_FLOAT:
-            return fmt_float(v.f);
+            return fmt_tagged_float(v);
         case TAG_BOOL:
             return v.i != 0 ? "true" : "false";
         case TAG_ARRAY: {

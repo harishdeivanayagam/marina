@@ -118,6 +118,15 @@ std::string value_to_string(const MValue& v);
 std::string mv_to_string(const MValue& v);
 // Rust f64 Display formatting (never scientific notation).
 std::string fmt_float(double f);
+// Integer / float display that honors MValue.pad (width + unsigned bit).
+inline std::string fmt_tagged_int(const MValue& v) {
+    if ((v.pad & 0x100) != 0) return std::to_string(static_cast<uint64_t>(v.i));
+    return std::to_string(static_cast<int64_t>(v.i));
+}
+inline std::string fmt_tagged_float(const MValue& v) {
+    if (v.pad == 32) return fmt_float(static_cast<double>(static_cast<float>(v.f)));
+    return fmt_float(v.f);
+}
 // Strict Rust-style i64 parsing (used for HTTP status lines).
 bool parse_i64_strict(const std::string& s, int64_t* out);
 // Strict Rust-style usize parsing (accepts a leading '+').

@@ -41,7 +41,7 @@ struct Lambda {
 // --- expression payloads ---------------------------------------------------
 
 struct EInt {
-    int32_t value = 0;
+    uint64_t value = 0;
 };
 struct EFloat {
     double value = 0.0;

@@ -3,8 +3,12 @@
 // Rules (v0.1):
 //   * Function parameters REQUIRE type annotations (strict mode).
 //   * No `any`, no implicit truthiness, no string arithmetic.
-//   * Int32 -> Float64 widening is the only implicit conversion
-//     (so `10 + 20.5` is `Float64`, matching the examples).
+//   * Numeric types are Int8/16/32/64, UInt8/16/32/64, Float32 and Float64.
+//     Unsuffixed integers default to Int32 (Int64 / UInt64 when the literal
+//     does not fit). Unsuffixed floats default to Float64.
+//   * Implicit conversions: any integer widens to Float32 or Float64, and
+//     Float32 widens to Float64. Integer widths do not convert, except that
+//     a numeric literal may be used as any integer or float type it fits in.
 //   * `await` is allowed only at statement level:
 //       `let x = await e`, `await e`, or `return await e`.
 //   * Lambdas are only allowed as arguments to `setTimeout` / `new Promise`.
@@ -72,6 +76,10 @@ struct CTy {
     ObjectTy object;
     // Payload of Interface.
     std::string iface;
+    // Int: 8/16/32/64. Float: 32/64. Ignored for every other tag.
+    uint8_t bits = 32;
+    // Int only: true for UInt8..UInt64.
+    bool unsign = false;
 
     // Display name: "void", "Int32", "Promise<string>", ...
     std::string name() const;
@@ -82,8 +90,8 @@ struct CTy {
 
 // Factories.
 CTy cty_void();
-CTy cty_int();
-CTy cty_float();
+CTy cty_int(uint8_t bits = 32, bool unsign = false);
+CTy cty_float(uint8_t bits = 64);
 CTy cty_bool();
 CTy cty_str();
 CTy cty_stream();
@@ -240,10 +248,16 @@ struct CExpr;
 using CExprPtr = std::shared_ptr<CExpr>;
 
 struct CInt {
-    int32_t value = 0;
+    // Magnitude. `neg` means the mathematical value is `-value`
+    // (signed types only; `value == 2^63` is Int64::MIN).
+    uint64_t value = 0;
+    bool neg = false;
+    uint8_t bits = 32;
+    bool unsign = false;
 };
 struct CFloat {
     double value = 0.0;
+    uint8_t bits = 64;
 };
 struct CBool {
     bool value = false;

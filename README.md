@@ -112,8 +112,9 @@ Marina is a **subset** of TypeScript, compiled ahead-of-time. What it does have:
 
 | Type | Example |
 |---|---|
-| `Int32` | `let a = 10` |
-| `Float64` | `let b = 20.5` |
+| `Int8` `Int16` `Int32` `Int64` | `let a = 10` is `Int32`; `let b: Int8 = -12` |
+| `UInt8` `UInt16` `UInt32` `UInt64` | `let n: UInt8 = 255` |
+| `Float32` `Float64` | `let x = 20.5` is `Float64`; `let y: Float32 = 1.5` |
 | `string` | `let s = "hi"` |
 | `bool` | `let ok = true` |
 | `Promise<T>` | return value of an `async function` |
@@ -121,13 +122,22 @@ Marina is a **subset** of TypeScript, compiled ahead-of-time. What it does have:
 | `interface` | user-defined structural data contracts (see below) |
 | generic `T` | type parameters on functions and classes (see below) |
 
-Type annotations are available (`let a: Int32 = 10`, `function f(x: Int32): void {}`) and **required for function parameters** (strict mode). There is no `any`. The only implicit conversion is `Int32 → Float64` in mixed arithmetic:
+Type annotations are available (`let a: Int32 = 10`, `function f(x: Int8): void {}`) and **required for function parameters** (strict mode). There is no `any`.
+
+**Integers.** `Int8` through `Int64` are signed; `UInt8` through `UInt64` are unsigned. An unsuffixed integer literal is `Int32` when it fits, `Int64` when it fits only in 64 bits, and `UInt64` otherwise. A literal may be used as any integer type it fits in (`let b: Int8 = -12`, `let n: UInt64 = 10`). Different integer widths do not convert: `Int8` and `Int32` are different types, and signed does not convert to unsigned. Arithmetic, `%`, and comparisons require both operands to be the same integer type (a literal adopts the other operand's type when it fits). Division and remainder are truncating; unsigned operations wrap modulo 2^bits. Unary `-` is only allowed on signed integers.
+
+**Floats.** Unsuffixed float literals are `Float64`. `Float32` is available as an annotation (`let y: Float32 = 1.5`); a float literal adopts `Float32` when that is the expected type. `Float32` widens to `Float64`. Any integer widens to `Float32` or `Float64` in mixed arithmetic and assignment — if either operand is `Float64` the result is `Float64`, otherwise a `Float32` operand keeps the result `Float32`:
 
 ```ts
-let a = 10       // Int32
-let b = 20.5     // Float64
-let result = a + b  // Float64 (a is widened)
+let a = 10              // Int32
+let b = 20.5            // Float64
+let result = a + b      // Float64 (a is widened)
+let s: Int8 = -12
+let w: Float32 = 1.5
+let z = s + w           // Float32
 ```
+
+Short aliases are accepted too: `i8`/`int8`, `i16`/`int16`, `i32`/`int`/`int32`, `i64`/`int64`, `u8`/`uint8`, `u16`/`uint16`, `u32`/`uint32`, `u64`/`uint64`, `f32`/`float32`, `f64`/`float`/`float64`/`double`.
 
 String arithmetic is rejected — use template literals:
 
@@ -533,7 +543,7 @@ db.close()
 - `db.execute(sql.stmt\`...\`)` — runs a statement that returns no rows (CREATE/INSERT/UPDATE/DELETE) and returns a `sql_Result` object with `lastInsertId: Int32` and `rowsAffected: Int32`; executing a statement that returns rows is a runtime panic (use `query`)
 - `db.query(sql.stmt\`...\`)` — runs a statement and returns `Array<sql_Row>`; each row is an object whose fields are the SELECT's column names (integers → `Int32`, floats → `Float64`, text → `string`, NULL → void). Annotate the result with your own interface to get a typed result: `let rows: Array<Todo> = db.query(...)` — the checker accepts it because `sql_Row` is a fieldless interface that coerces to anything
 - `db.close()` — closes the connection; using it afterwards is a runtime panic
-- Binds accept `Int32`, `Float64`, `string`, `bool` and null; anything else is rejected by the checker
+- Binds accept any integer (`Int8`–`Int64`, `UInt8`–`UInt64`), any float (`Float32`, `Float64`), `string`, `bool` and null; anything else is rejected by the checker. Values are passed to SQLite as a 64-bit integer or a 64-bit float (`UInt64` above 2^63−1 does not round-trip through SQLite's signed integer)
 - Values interpolated into `sql.stmt\`...\`` are always bound as parameters (prepared statements) — never string-concatenated, so no SQL injection
 
 ## How a program is compiled
@@ -576,6 +586,7 @@ Marina ships its own language server (`marina-lsp`, in `compiler/lsp/main.cpp`) 
 |---|---|
 | `examples/hello-world.tsm` | variables, strings, `console.log` |
 | `examples/calculate.tsm` | Int32/Float64 inference, Int→Float widening, template literals |
+| `examples/numeric-types.tsm` | Int8–Int64, UInt8–UInt64, Float32; literal fitting, same-width arithmetic, integer→float widening |
 | `examples/for-loop.tsm` | C-style `for` loops, `++`, loop scoping |
 | `examples/const-test.tsm` | `let` vs `const`: mutable bindings, immutable bindings, naming rules |
 | `examples/array-list.tsm` | array literals, mutation methods, `forEach`/`map`/`filter`, `console.log` of arrays |

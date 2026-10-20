@@ -90,7 +90,7 @@ struct TIdent {
     std::string name;
 };
 struct TInt {
-    int32_t value = 0;
+    uint64_t value = 0;
 };
 struct TFloat {
     double value = 0.0;
