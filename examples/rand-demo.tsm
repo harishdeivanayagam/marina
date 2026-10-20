@@ -1,0 +1,46 @@
+import rand
+
+// rand — the std random number generator, written in Marina itself
+// (stdlib/rand/main.tsm). A 64-bit LCG advanced with multiply/add; the
+// array helpers draw from an independent 32-bit stream.
+
+function main() {
+    // 1. a clock-seeded generator — the usual way to get one
+    let r = rand.newSeeded()
+
+    // 2. raw values: full signed Int64 state
+    console.log(r.next())
+    console.log(r.next())
+
+    // 3. bounded integers — below(n) is [0, n), range(lo, hi) is [lo, hi)
+    console.log(r.below(100))           // 0..99
+    console.log(r.range(1, 7))          // dice roll
+    console.log(r.range(1000000, 2000000))
+
+    // 4. floats and bools
+    console.log(r.float())              // 0.0..<1.0, 48 bits of precision
+    console.log(r.float() * 10.0)       // 0.0..<10.0
+    console.log(r.bool())
+
+    // 5. Int32 values for array indexing
+    console.log(r.int(10))
+
+    // 6. pick from an array (give it the element type explicitly)
+    let fruits: Array<string> = ["apple", "banana", "cherry", "date"]
+    console.log(rand.pick<string>(r, fruits))
+    console.log(rand.pick<string>(r, fruits))
+
+    // 7. shuffle — returns a shuffled copy, the original is untouched
+    let dealt = rand.shuffle<Int32>(r, [1, 2, 3, 4, 5, 6, 7, 8])
+    console.log(dealt)
+
+    // 8. reproducible sequences: same seed, same values
+    let a = rand.newRand(42)
+    let b = rand.newRand(42)
+    console.log(a.below(1000) == b.below(1000))  // true
+    console.log(a.below(1000) == b.below(1000))  // true
+
+    // 9. panic paths (uncomment to try):
+    // console.log(r.below(0))               // throw: rand.below: n must be positive
+    // console.log(rand.pick<string>(r, [])) // throw: rand.pick: empty array
+}

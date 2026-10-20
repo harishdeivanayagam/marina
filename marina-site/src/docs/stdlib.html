@@ -13,7 +13,10 @@ description: Marina's built-in globals (console, setTimeout, Promise) and the st
     <a href="#http">http — client &amp; server</a>
     <a href="#fs">fs — filesystem</a>
     <a href="#crypto">crypto — hashing &amp; encoding</a>
+    <a href="#time">time — clocks &amp; sleep</a>
+    <a href="#os">os — platform &amp; process</a>
     <a href="#sql">sql — SQLite</a>
+    <a href="#rand">rand — randomness</a>
     <a href="#arrays">Array methods</a>
     <a href="#strings">String members</a>
   </aside>
@@ -132,6 +135,48 @@ description: Marina's built-in globals (console, setTimeout, Promise) and the st
 <span class="f">console</span>.log(<span class="f">crypto</span>.base64Encode(<span class="s">"marina"</span>))
 <span class="f">console</span>.log(<span class="f">crypto</span>.uuid())</code></pre>
 
+    <h2 id="time">time — clocks &amp; sleep</h2>
+    <p>All values are <code>Int64</code>. <code>now</code>-family clocks read the wall clock; <code>mono</code> is unaffected by system clock changes and meant for measuring elapsed time.</p>
+    <table>
+      <tr><th>Function</th><th>Description</th></tr>
+      <tr><td><code>time.now()</code></td><td>Unix epoch milliseconds (wall clock).</td></tr>
+      <tr><td><code>time.nowSecs()</code></td><td>Unix epoch seconds (wall clock).</td></tr>
+      <tr><td><code>time.nowNanos()</code></td><td>Unix epoch nanoseconds (wall clock).</td></tr>
+      <tr><td><code>time.mono()</code></td><td>Monotonic milliseconds since an arbitrary fixed point.</td></tr>
+      <tr><td><code>time.sleep(ms)</code></td><td>Block the calling thread for <code>ms</code> milliseconds (negatives are 0).</td></tr>
+      <tr><td><code>time.format(ms)</code></td><td>ISO-8601 UTC string for epoch milliseconds, e.g. <code>2026-10-20T15:04:05.123Z</code>.</td></tr>
+    </table>
+<pre><code><span class="k">import</span> time
+
+<span class="k">let</span> start = <span class="t">time</span>.mono()
+<span class="t">time</span>.sleep(50)
+<span class="f">console</span>.log(<span class="s">`slept ${</span><span class="t">time</span>.mono() - start<span class="s">}ms`</span>)
+<span class="f">console</span>.log(<span class="t">time</span>.format(<span class="t">time</span>.now()))</code></pre>
+
+    <h2 id="os">os — platform &amp; process</h2>
+    <p>Platform info, environment variables and process ops. Failures panic (catchable with <code>try</code>/<code>catch</code>); <code>os.env</code> panics on an unset name — use <code>os.envOr</code> for a fallback.</p>
+    <table>
+      <tr><th>Function</th><th>Description</th></tr>
+      <tr><td><code>os.platform()</code></td><td><code>"macos"</code>, <code>"linux"</code> or <code>"windows"</code>.</td></tr>
+      <tr><td><code>os.arch()</code></td><td>Machine architecture, e.g. <code>"arm64"</code>, <code>"x86_64"</code>.</td></tr>
+      <tr><td><code>os.hostname()</code></td><td>The machine's host name.</td></tr>
+      <tr><td><code>os.cwd()</code></td><td>Current working directory.</td></tr>
+      <tr><td><code>os.tmpdir()</code></td><td><code>$TMPDIR</code>, falling back to <code>"/tmp"</code>.</td></tr>
+      <tr><td><code>os.pid()</code></td><td>Process id (<code>Int64</code>).</td></tr>
+      <tr><td><code>os.env(name)</code></td><td>Environment variable; panics when unset.</td></tr>
+      <tr><td><code>os.envOr(name, fallback)</code></td><td>Environment variable or the fallback when unset.</td></tr>
+      <tr><td><code>os.setEnv(name, value)</code> / <code>os.unsetEnv(name)</code></td><td>Set (overwriting) / remove an environment variable.</td></tr>
+      <tr><td><code>os.exec(command)</code></td><td>Run via <code>/bin/sh</code> and capture stdout; stderr passes through; panics on a non-zero exit status.</td></tr>
+      <tr><td><code>os.exit(code)</code></td><td>Terminate the process with the given exit status.</td></tr>
+    </table>
+<pre><code><span class="k">import</span> os
+
+<span class="f">console</span>.log(<span class="t">os</span>.platform())  <span class="c">// macos</span>
+<span class="f">console</span>.log(<span class="t">os</span>.arch())
+<span class="t">os</span>.setEnv(<span class="s">"GREETING"</span>, <span class="s">"hi"</span>)
+<span class="f">console</span>.log(<span class="t">os</span>.env(<span class="s">"GREETING"</span>))
+<span class="f">console</span>.log(<span class="t">os</span>.exec(<span class="s">"echo rendered by /bin/sh"</span>))</code></pre>
+
     <h2 id="sql">sql — SQLite</h2>
     <p>SQLite via the system <code>libsqlite3</code> (MySQL/Postgres drivers are not available yet). Values are always bound as prepared-statement parameters — never string-concatenated — through the <code>sql.stmt</code> tagged template: <code>${expr}</code> binds a value; only integers, floats, strings and bools can be bound.</p>
     <table>
@@ -151,6 +196,31 @@ description: Marina's built-in globals (console, setTimeout, Promise) and the st
     <span class="k">let</span> rows = <span class="k">await</span> db.query(<span class="t">sql</span>.stmt<span class="s">`SELECT id, name FROM t`</span>)
     <span class="f">console</span>.log(rows)
 }</code></pre>
+
+    <h2 id="rand">rand — randomness</h2>
+    <p>Written in Marina itself (<code>stdlib/rand/main.tsm</code>, merged like a package). A <code>Rand</code> holds a 64-bit linear congruential state advanced with multiply/add; array helpers draw from an independent 32-bit stream (integer widths do not convert to each other, so <code>Int32</code> indices need their own sequence).</p>
+    <table>
+      <tr><th>Member</th><th>Description</th></tr>
+      <tr><td><code>rand.newSeeded()</code></td><td>A generator seeded from the wall clock and the monotonic clock.</td></tr>
+      <tr><td><code>rand.newRand(seed)</code></td><td>A generator from an explicit <code>Int64</code> seed (same seed → same sequence).</td></tr>
+      <tr><td><code>r.next()</code></td><td>The raw next value — the full signed <code>Int64</code> state.</td></tr>
+      <tr><td><code>r.below(n)</code></td><td>Uniform <code>Int64</code> in <code>[0, n)</code>.</td></tr>
+      <tr><td><code>r.range(lo, hi)</code></td><td>Uniform <code>Int64</code> in <code>[lo, hi)</code>.</td></tr>
+      <tr><td><code>r.float()</code></td><td>Uniform <code>Float64</code> in <code>[0, 1)</code> with 48 bits of precision.</td></tr>
+      <tr><td><code>r.bool()</code></td><td>Uniform <code>bool</code>.</td></tr>
+      <tr><td><code>r.int(max)</code></td><td>Uniform <code>Int32</code> in <code>[0, max)</code> — sized for array indexing.</td></tr>
+      <tr><td><code>rand.pick&lt;T&gt;(r, items)</code></td><td>A random element of a non-empty array.</td></tr>
+      <tr><td><code>rand.shuffle&lt;T&gt;(r, items)</code></td><td>Fisher–Yates shuffle — returns a new array, the input is untouched.</td></tr>
+    </table>
+    <p>Invalid inputs (empty arrays, non-positive bounds) throw and are catchable with <code>try</code>/<code>catch</code>.</p>
+<pre><code><span class="k">import</span> rand
+
+<span class="k">let</span> r = <span class="t">rand</span>.newSeeded()
+<span class="f">console</span>.log(r.below(100))      <span class="c">// 0..99</span>
+<span class="f">console</span>.log(r.range(1, 7))     <span class="c">// dice roll</span>
+<span class="f">console</span>.log(r.float())         <span class="c">// 0.0..&lt;1.0</span>
+<span class="f">console</span>.log(<span class="t">rand</span>.pick&lt;<span class="t">string</span>&gt;(r, [<span class="s">"apple"</span>, <span class="s">"banana"</span>, <span class="s">"cherry"</span>]))
+<span class="f">console</span>.log(<span class="t">rand</span>.shuffle&lt;<span class="t">Int32</span>&gt;(r, [1, 2, 3, 4, 5]))</code></pre>
 
     <h2 id="arrays">Array methods</h2>
     <p>Every array value carries these members (callbacks run synchronously):</p>

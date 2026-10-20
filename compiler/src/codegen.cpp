@@ -451,6 +451,24 @@ const char* DECLARES =
     "declare void @marina_crypto_base64(i1, ptr, ptr)\n"
     "declare void @marina_crypto_random_hex(i64, ptr)\n"
     "declare void @marina_crypto_uuid(ptr)\n"
+    "declare void @marina_time_now(ptr)\n"
+    "declare void @marina_time_now_secs(ptr)\n"
+    "declare void @marina_time_now_nanos(ptr)\n"
+    "declare void @marina_time_mono(ptr)\n"
+    "declare void @marina_time_sleep(i64)\n"
+    "declare void @marina_time_format(i64, ptr)\n"
+    "declare void @marina_os_platform(ptr)\n"
+    "declare void @marina_os_arch(ptr)\n"
+    "declare void @marina_os_hostname(ptr)\n"
+    "declare void @marina_os_cwd(ptr)\n"
+    "declare void @marina_os_tmpdir(ptr)\n"
+    "declare void @marina_os_pid(ptr)\n"
+    "declare void @marina_os_env(ptr, ptr)\n"
+    "declare void @marina_os_env_or(ptr, ptr, ptr)\n"
+    "declare void @marina_os_set_env(ptr, ptr)\n"
+    "declare void @marina_os_unset_env(ptr)\n"
+    "declare void @marina_os_exec(ptr, ptr)\n"
+    "declare void @marina_os_exit(i64)\n"
     "declare void @marina_net_connect(ptr, ptr, ptr)\n"
     "declare void @marina_net_write(ptr, ptr)\n"
     "declare void @marina_net_read_all(ptr, ptr)\n"
@@ -2432,6 +2450,103 @@ struct Gen {
             std::string out = alloca("%mv");
             emit("call void @marina_crypto_uuid(ptr " + out + ")");
             return mv_load(out, CgTy::Str);
+        }
+        if (auto* x = std::get_if<CTimeCall>(&e.v)) {
+            switch (x->kind) {
+                case TimeKind::Now:
+                case TimeKind::NowSecs:
+                case TimeKind::NowNanos:
+                case TimeKind::Mono: {
+                    const char* f = x->kind == TimeKind::Now     ? "marina_time_now"
+                                    : x->kind == TimeKind::NowSecs ? "marina_time_now_secs"
+                                    : x->kind == TimeKind::NowNanos ? "marina_time_now_nanos"
+                                                                    : "marina_time_mono";
+                    std::string out = alloca("%mv");
+                    emit("call void @" + std::string(f) + "(ptr " + out + ")");
+                    return mv_load(out, CgTy::I64);
+                }
+                case TimeKind::Sleep: {
+                    CgVal v = cg_expr(*x->arg);
+                    emit("call void @marina_time_sleep(i64 " + sext_i64(v) + ")");
+                    discard(v);
+                    return CgVal{CgTy::Void, std::string(), false};
+                }
+                case TimeKind::Format: {
+                    CgVal v = cg_expr(*x->arg);
+                    std::string out = alloca("%mv");
+                    emit("call void @marina_time_format(i64 " + sext_i64(v) + ", ptr " + out + ")");
+                    discard(v);
+                    return mv_load(out, CgTy::Str);
+                }
+            }
+            cg_unreachable("unhandled time kind in codegen");
+        }
+        if (auto* x = std::get_if<COsCall>(&e.v)) {
+            auto out_call = [&](const char* f, CgTy ret) {
+                std::string out = alloca("%mv");
+                emit("call void @" + std::string(f) + "(ptr " + out + ")");
+                return mv_load(out, ret);
+            };
+            switch (x->kind) {
+                case OsKind::Platform: return out_call("marina_os_platform", CgTy::Str);
+                case OsKind::Arch: return out_call("marina_os_arch", CgTy::Str);
+                case OsKind::Hostname: return out_call("marina_os_hostname", CgTy::Str);
+                case OsKind::Cwd: return out_call("marina_os_cwd", CgTy::Str);
+                case OsKind::Tmpdir: return out_call("marina_os_tmpdir", CgTy::Str);
+                case OsKind::Pid: return out_call("marina_os_pid", CgTy::I64);
+                case OsKind::EnvGet: {
+                    CgVal n = cg_expr(*x->a);
+                    std::string nmv = build_mv(n);
+                    std::string out = alloca("%mv");
+                    emit("call void @marina_os_env(ptr " + nmv + ", ptr " + out + ")");
+                    discard(n);
+                    return mv_load(out, CgTy::Str);
+                }
+                case OsKind::EnvGetOr: {
+                    CgVal n = cg_expr(*x->a);
+                    std::string nmv = build_mv(n);
+                    CgVal f = cg_expr(*x->b);
+                    std::string fmv = build_mv(f);
+                    std::string out = alloca("%mv");
+                    emit("call void @marina_os_env_or(ptr " + nmv + ", ptr " + fmv +
+                         ", ptr " + out + ")");
+                    discard(n);
+                    discard(f);
+                    return mv_load(out, CgTy::Str);
+                }
+                case OsKind::EnvSet: {
+                    CgVal n = cg_expr(*x->a);
+                    std::string nmv = build_mv(n);
+                    CgVal v = cg_expr(*x->b);
+                    std::string vmv = build_mv(v);
+                    emit("call void @marina_os_set_env(ptr " + nmv + ", ptr " + vmv + ")");
+                    discard(n);
+                    discard(v);
+                    return CgVal{CgTy::Void, std::string(), false};
+                }
+                case OsKind::EnvUnset: {
+                    CgVal n = cg_expr(*x->a);
+                    std::string nmv = build_mv(n);
+                    emit("call void @marina_os_unset_env(ptr " + nmv + ")");
+                    discard(n);
+                    return CgVal{CgTy::Void, std::string(), false};
+                }
+                case OsKind::Exec: {
+                    CgVal n = cg_expr(*x->a);
+                    std::string nmv = build_mv(n);
+                    std::string out = alloca("%mv");
+                    emit("call void @marina_os_exec(ptr " + nmv + ", ptr " + out + ")");
+                    discard(n);
+                    return mv_load(out, CgTy::Str);
+                }
+                case OsKind::Exit: {
+                    CgVal v = cg_expr(*x->a);
+                    emit("call void @marina_os_exit(i64 " + sext_i64(v) + ")");
+                    discard(v);
+                    return CgVal{CgTy::Void, std::string(), false};
+                }
+            }
+            cg_unreachable("unhandled os kind in codegen");
         }
         if (auto* x = std::get_if<CSqlOpen>(&e.v)) {
             CgVal d = cg_expr(*x->driver);

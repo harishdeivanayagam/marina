@@ -580,6 +580,25 @@ struct CCryptoRandomHex {
 };
 struct CCryptoUuid {};
 
+// ---- time std module ----
+enum class TimeKind { Now, NowSecs, NowNanos, Mono, Sleep, Format };
+struct CTimeCall {
+    TimeKind kind = TimeKind::Now;
+    CExprPtr arg; // Sleep: ms, Format: epoch ms
+};
+
+// ---- os std module ----
+enum class OsKind {
+    Platform, Arch, Hostname, Cwd, Tmpdir, Pid,
+    EnvGet, EnvGetOr, EnvSet, EnvUnset, Exec, Exit
+};
+struct COsCall {
+    OsKind kind = OsKind::Platform;
+    CExprPtr a; // EnvGet/EnvUnset/Exec/Exit: name/command/code
+    CExprPtr b; // EnvGetOr/EnvSet: fallback/value
+};
+
+
 // ---- sql std module ----
 // `new sql.Connection(driver, url)` — opens a database connection.
 struct CSqlOpen {
@@ -619,7 +638,8 @@ struct CExpr {
                  CHttpFieldOp, CHttpValidate, CIfaceGet, CIfaceSetExpr, CIfaceCall,
                  CFsReadFile, CFsWriteFile, CFsExists, CFsReadDir, CFsMkdir,
                  CFsRemove, CCryptoSha256, CCryptoBase64, CCryptoRandomHex,
-                 CCryptoUuid, CSqlOpen, CSqlExec, CSqlQuery, CSqlClose>
+                 CCryptoUuid, CTimeCall, COsCall,
+                 CSqlOpen, CSqlExec, CSqlQuery, CSqlClose>
         v;
 
     CExpr() : v(CInt{}) {}

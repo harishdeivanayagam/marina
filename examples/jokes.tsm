@@ -1,0 +1,18 @@
+import rand
+
+// jokes — a random joke teller. `rand.pick<T>(r, items)` grabs one
+// element of an array; `newSeeded()` means a different joke most runs,
+// while `newRand(seed)` would always tell the same one.
+
+let jokes: Array<string> = [
+    "Why do programmers prefer dark mode? Because light attracts bugs.",
+    "There are only two hard things in computer science: cache invalidation, naming things, and off-by-one errors.",
+    "A byte walked into a bar and lost its sign.",
+    "Why did the integer panic? It went out of bounds.",
+    "Recursion: see recursion.",
+]
+
+function main() {
+    let r = rand.newSeeded()
+    console.log(rand.pick<string>(r, jokes))
+}

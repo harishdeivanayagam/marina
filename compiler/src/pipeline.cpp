@@ -564,15 +564,19 @@ bool load_registry_package(const std::string& name, std::string& out_src,
     }
     // std modules implemented in Marina itself ship with the compiler as
     // plain .tsm sources under `stdlib/` and are merged like packages
-    if (name == "map") {
+    // (stdlib/map, stdlib/rand, ...)
+    {
         fs::path p = fs::path(workspace_root()) / "stdlib" / name / "main.tsm";
-        auto src = read_file(p);
-        if (!src) {
-            out_err = "std module '" + name + "' is missing its source (" + p.string() + ")";
-            return false;
+        std::error_code ec;
+        if (fs::is_regular_file(p, ec)) {
+            auto src = read_file(p);
+            if (!src) {
+                out_err = "std module '" + name + "' is missing its source (" + p.string() + ")";
+                return false;
+            }
+            out_src = *src;
+            return true;
         }
-        out_src = *src;
-        return true;
     }
     fs::path pkg_dir = fs::path(registry_root()) / name;
     std::error_code ec;
@@ -748,7 +752,8 @@ std::vector<SrcDiag> resolve_uses(ast::Program& program, const std::string& base
         auto [name, span] = queue[qi];
         qi += 1;
         bool is_std = name == "net" || name == "http" || name == "fs" ||
-                      name == "crypto" || name == "sql";
+                      name == "crypto" || name == "sql" || name == "time" ||
+                      name == "os";
         bool already_kept = std::any_of(kept.begin(), kept.end(),
                                         [&](const auto& k) { return k.first == name; });
         if (is_std) {

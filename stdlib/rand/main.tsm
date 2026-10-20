@@ -1,0 +1,138 @@
+// rand — the Marina std random number generator, implemented in Marina
+// itself.
+//
+//     import rand
+//
+//     let r = rand.newSeeded()
+//     console.log(r.next())          // raw Int64
+//     console.log(r.below(100))      // 0..99
+//     console.log(r.float())         // 0.0..<1.0
+//
+// A `Rand` holds a 64-bit linear congruential state (Knuth's MMIX
+// constants). Marina has no bit-shift operators, but an LCG only needs
+// multiply/add — which wrap at 64 bits, exactly what an LCG wants — so
+// the state advances with `state = state * 6364136223846793005 +
+// 1442695040888963407` and values are extracted with modulo arithmetic.
+//
+// Array helpers (`int`, `pick`, `shuffle`) need Int32 indices, and
+// integer widths do not convert to each other, so they draw from an
+// independent 32-bit LCG (`glibc`-style constants) kept alongside the
+// 64-bit state. Two `Rand`s created in the same millisecond share their
+// Int32 sequence — use `newRand(seed)` with distinct seeds when that
+// matters.
+//
+// All bounds are exclusive on the upper end and throw on invalid input
+// (empty arrays, non-positive bounds), following the language's
+// exception philosophy.
+
+import time
+
+export class Rand {
+    private state: Int64
+    private small: Int32
+
+    constructor(seed: Int64) {
+        this.state = seed
+        // scramble once so any seed (even 0) starts halfway through the cycle
+        let a: Int64 = 6364136223846793005
+        let c: Int64 = 1442695040888963407
+        this.state = this.state * a + c
+        this.small = 12345
+    }
+
+    // the raw next value: the full signed Int64 state
+    next(): Int64 {
+        let a: Int64 = 6364136223846793005
+        let c: Int64 = 1442695040888963407
+        this.state = this.state * a + c
+        return this.state
+    }
+
+    // uniform Int64 in [0, n); throws when n <= 0
+    below(n: Int64): Int64 {
+        if (n <= 0) {
+            throw "rand.below: n must be positive"
+        }
+        let v = this.next() % n
+        if (v < 0) {
+            v = v + n
+        }
+        return v
+    }
+
+    // uniform Int64 in [lo, hi); throws when hi <= lo
+    range(lo: Int64, hi: Int64): Int64 {
+        if (hi <= lo) {
+            throw "rand.range: hi must be greater than lo"
+        }
+        return lo + this.below(hi - lo)
+    }
+
+    // uniform Float64 in [0, 1) with 48 bits of precision
+    float(): Float64 {
+        let scale: Int64 = 16777216
+        let hi = this.below(scale)
+        let lo = this.below(scale)
+        let v = hi * scale + lo
+        return v / 281474976710656.0
+    }
+
+    // uniform bool
+    bool(): bool {
+        return this.below(2) == 1
+    }
+
+    // uniform Int32 in [0, max) — the Int32 stream, for array indexing;
+    // throws when max <= 0
+    int(max: Int32): Int32 {
+        if (max <= 0) {
+            throw "rand.int: max must be positive"
+        }
+        this.small = this.small * 1103515245 + 12345
+        let v = this.small % max
+        if (v < 0) {
+            v = v + max
+        }
+        return v
+    }
+}
+
+// create a Rand from an explicit seed (any Int64, including 0)
+export function newRand(seed: Int64): Rand {
+    let r = new Rand(seed)
+    return r
+}
+
+// create a Rand seeded from the wall clock and the monotonic clock
+// (the module's own `use time` provides the seeds; callers just
+// `import rand`)
+export function newSeeded(): Rand {
+    let a: Int64 = 6364136223846793005
+    let c: Int64 = 1442695040888963407
+    let seed = time.now() * a + time.mono() * c + 1
+    let r = new Rand(seed)
+    return r
+}
+
+// pick a random element; throws on an empty array
+//
+//     rand.pick<Int32>(r, numbers)
+//
+export function pick<T>(r: Rand, items: Array<T>): T {
+    if (items.length == 0) {
+        throw "rand.pick: empty array"
+    }
+    return items[r.int(items.length)]
+}
+
+// Fisher–Yates shuffle of a copy — the input array is left untouched
+export function shuffle<T>(r: Rand, items: Array<T>): Array<T> {
+    let out = items.slice(0, items.length)
+    for (let i = out.length - 1; i > 0; i--) {
+        let j = r.int(i + 1)
+        let tmp = out[i]
+        out[i] = out[j]
+        out[j] = tmp
+    }
+    return out
+}

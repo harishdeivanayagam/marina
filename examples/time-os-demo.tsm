@@ -1,0 +1,48 @@
+import time
+import os
+
+// time + os — the native std modules: wall/monotonic clocks, sleeping,
+// ISO-8601 formatting, platform info and environment access.
+
+function main() {
+    // 1. clocks — all Int64
+    console.log(time.now())        // epoch milliseconds
+    console.log(time.nowSecs())    // epoch seconds
+    console.log(time.nowNanos())   // epoch nanoseconds
+
+    // 2. measure elapsed time with the monotonic clock
+    let start = time.mono()
+    time.sleep(50)
+    let elapsed = time.mono() - start
+    console.log(`slept ~${elapsed}ms`)
+
+    // 3. ISO-8601 UTC formatting (epoch millis in, string out)
+    console.log(time.format(0))               // 1970-01-01T00:00:00.000Z
+    console.log(time.format(time.now()))
+
+    // 4. platform info
+    console.log(os.platform())     // macos / linux / windows
+    console.log(os.arch())         // arm64 / x86_64 / ...
+    console.log(os.hostname())
+    console.log(os.cwd())
+    console.log(os.tmpdir())
+    console.log(os.pid())
+
+    // 5. environment variables — os.env panics when unset, envOr doesn't
+    os.setEnv("MARINA_DEMO", "hello from the environment")
+    console.log(os.env("MARINA_DEMO"))
+    console.log(os.envOr("MARINA_DEMO_MISSING", "fallback"))
+    os.unsetEnv("MARINA_DEMO")
+    console.log(os.envOr("MARINA_DEMO", "gone"))
+
+    // 6. run a command and capture its stdout
+    console.log(os.exec("echo rendered by /bin/sh"))
+
+    // 7. panic paths (uncomment to try):
+    // console.log(os.env("DEFINITELY_NOT_SET"))   // panic: os.env '...': not set
+    // os.exec("exit 3")                           // panic: os.exec '...': exit status 3
+
+    // 8. exit code
+    console.log("done")
+    os.exit(0)
+}
