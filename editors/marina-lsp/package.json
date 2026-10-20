@@ -2,7 +2,7 @@
   "name": "marina-lsp",
   "displayName": "Marina Language Support",
   "description": "marina (.tsm) language support: syntax highlighting, wave file icons, live diagnostics, autocomplete and class/ghost-class hover via the marina-lsp language server",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "publisher": "marina",
   "license": "MIT",
   "icon": "./wave-logo.png",

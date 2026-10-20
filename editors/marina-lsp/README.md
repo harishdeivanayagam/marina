@@ -39,7 +39,7 @@ Language support for **marina** (`.tsm`) programs in Cursor / VS Code.
    ```
 
 2. Install the extension: Extensions panel → `…` menu →
-   **Install from VSIX…** → select `marina-lsp-0.3.0.vsix`
+   **Install from VSIX…** → select `marina-lsp-0.3.1.vsix`
    (build it with `editors/marina-lsp/build-vsix.sh`).
 
 3. Open any `.tsm` file. If the server is not on your `PATH`, point
@@ -50,5 +50,5 @@ Language support for **marina** (`.tsm`) programs in Cursor / VS Code.
 
 ```
 cd editors/marina-lsp
-./build-vsix.sh   # produces marina-lsp-0.3.0.vsix (uses zip only)
+./build-vsix.sh   # produces marina-lsp-0.3.1.vsix (uses zip only)
 ```
