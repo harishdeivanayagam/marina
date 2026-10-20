@@ -269,9 +269,10 @@ ages.set(<span class="s">"kim"</span>, 25)
     <table>
       <tr><th>Member</th><th>Description</th></tr>
       <tr><td><code>length</code></td><td>Length in bytes.</td></tr>
-      <tr><td><code>charAt(index)</code></td><td>Byte (code unit) at <code>index</code>, 0 when out of bounds.</td></tr>
+      <tr><td><code>charAt(index)</code></td><td>The 1-char string at byte <code>index</code> (<code>""</code> when out of bounds, like JavaScript).</td></tr>
+      <tr><td><code>charCodeAt(index)</code></td><td>Byte (code unit) at <code>index</code>, 0 when out of bounds.</td></tr>
       <tr><td><code>substring(start, end)</code></td><td>Substring over byte indices <code>[start, end)</code>, clamped; an end below start yields <code>""</code>.</td></tr>
     </table>
-    <p>String equality (<code>==</code>/<code>!=</code>) compares content, and any value can be interpolated into template literals: <code>`hello ${name}`</code>. <code>console.log</code> formats any value via its string form.</p>
+    <p><code>String.fromCharCode(code)</code> builds a 1-char string from a code unit: <code>String.fromCharCode(72)</code> is <code>"H"</code>. String equality (<code>==</code>/<code>!=</code>) compares content, and any value can be interpolated into template literals: <code>`hello ${name}`</code>. <code>console.log</code> formats any value via its string form.</p>
   </div>
 </div>

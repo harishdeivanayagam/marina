@@ -1023,6 +1023,9 @@ Json member_completions(const std::string& receiver, const ir::Checked& checked)
     if (receiver == "console") {
         add("log", 2, "console.log(value): Void",
             "Print a value (string form) to stdout with a trailing newline.");
+    } else if (receiver == "String") {
+        add("fromCharCode", 3, "String.fromCharCode(code: Int32): String",
+            "A 1-char string from a byte code unit (truncating, byte semantics).");
     } else if (receiver == "net") {
         add("connect", 3, "net.connect(host: String, port: Int32): Stream",
             "Open a TCP connection and return a `Stream` with `write`, `read_all` and `close`.");
@@ -1111,7 +1114,8 @@ Json member_completions(const std::string& receiver, const ir::Checked& checked)
                 add("reduce", 2, "arr.reduce((acc, item) => T, init: T): T", "Fold the array into a single value.");
             } else if (vt.tag == ir::CTy::Tag::Str) {
                 add("length", 10, "s.length: Int32", "Length of the string in bytes.");
-                add("charAt", 2, "s.charAt(index: Int32): Int32", "Byte (code unit) at `index`, 0 when out of bounds.");
+                add("charAt", 2, "s.charAt(index: Int32): String", "The 1-char string at byte `index` (\"\" when out of bounds, like JavaScript).");
+                add("charCodeAt", 2, "s.charCodeAt(index: Int32): Int32", "Byte (code unit) at `index`, 0 when out of bounds.");
                 add("substring", 2, "s.substring(start: Int32, end: Int32): String", "Substring over byte indices [start, end), clamped.");
             } else if (vt.tag == ir::CTy::Tag::Stream) {
                 add("write", 2, "stream.write(data: String): Void", "Send bytes over the TCP stream.");

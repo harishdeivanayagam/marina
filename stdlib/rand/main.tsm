@@ -50,7 +50,7 @@ export class Rand {
         let hex = crypto.randomHex(4)
         let v: Int32 = 0
         for (let i = 0; i < 8; i++) {
-            let c = hex.charAt(i)
+            let c = hex.charCodeAt(i)
             let nib: Int32 = 0
             if (c >= 48 && c <= 57) {
                 nib = c - 48
