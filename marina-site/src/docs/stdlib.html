@@ -1,0 +1,184 @@
+---
+layout: base.html
+title: The Standard Library
+description: Marina's built-in globals (console, setTimeout, Promise) and the std modules — net, http, fs, crypto and sql — with signatures and examples.
+---
+
+<div class="wrap doc-layout">
+  <aside class="doc-toc">
+    <div class="toc-title">On this page</div>
+    <a href="#overview">Overview</a>
+    <a href="#globals">Built-in globals</a>
+    <a href="#net">net — raw TCP</a>
+    <a href="#http">http — client &amp; server</a>
+    <a href="#fs">fs — filesystem</a>
+    <a href="#crypto">crypto — hashing &amp; encoding</a>
+    <a href="#sql">sql — SQLite</a>
+    <a href="#arrays">Array methods</a>
+    <a href="#strings">String members</a>
+  </aside>
+
+  <div class="doc">
+    <h1>The Standard Library</h1>
+    <p class="muted">Everything marina programs can call without installing a package: a handful of built-in globals, five <code>use</code>-able std modules, and the methods every array and string carries.</p>
+
+    <h2 id="overview">Overview</h2>
+    <p>Two kinds of library ship with the language:</p>
+    <ul>
+      <li><strong>Built-in globals</strong> — <code>console</code>, <code>setTimeout</code> and <code>Promise</code> are always available, no import needed.</li>
+      <li><strong>Std modules</strong> — <code>net</code>, <code>http</code>, <code>fs</code>, <code>crypto</code> and <code>sql</code> are brought in with a top-level <code>use</code> statement (the JS-style <code>import</code> is not supported):</li>
+    </ul>
+<pre><code><span class="k">use</span> http
+<span class="k">use</span> crypto</code></pre>
+    <p>Every std function has a synchronous form and an <code>async</code> form that returns a promise — <code>fs.readFile(path)</code> blocks, <code>await fs.readFile(path)</code> runs on the event loop's worker pool. Blocking I/O errors panic with the operation and OS error text.</p>
+
+    <h2 id="globals">Built-in globals</h2>
+    <table>
+      <tr><th>Global</th><th>Signature</th><th>Description</th></tr>
+      <tr><td><code>console.log</code></td><td><code>log(value)</code></td><td>Prints the value's string form plus a newline. The only <code>console</code> member.</td></tr>
+      <tr><td><code>setTimeout</code></td><td><code>setTimeout(fn, ms)</code></td><td>Runs <code>fn</code> on a worker thread after <code>ms</code> milliseconds (negative values are treated as 0).</td></tr>
+      <tr><td><code>Promise</code></td><td><code>new Promise((resolve, reject) =&gt; { ... })</code></td><td>Creates a promise; the executor runs synchronously (JS semantics). <code>await</code> the promise to resume after <code>resolve(value)</code>.</td></tr>
+    </table>
+<pre><code><span class="f">console</span>.log(<span class="s">"hello"</span>)
+
+<span class="f">setTimeout</span>(() <span class="k">=&gt;</span> {
+    <span class="f">console</span>.log(<span class="s">"2 seconds later"</span>)
+}, <span class="n">2000</span>)
+
+<span class="k">let</span> p = <span class="k">new</span> <span class="t">Promise</span>((resolve, reject) <span class="k">=&gt;</span> {
+    resolve(<span class="n">42</span>)
+})
+<span class="f">console</span>.log(<span class="k">await</span> p)  <span class="c">// 42</span></code></pre>
+
+    <h2 id="net">net — raw TCP</h2>
+    <p><code>net.connect(host, port)</code> opens a TCP connection and returns a <code>Stream</code>. Streams have three methods:</p>
+    <table>
+      <tr><th>Method</th><th>Description</th></tr>
+      <tr><td><code>stream.write(data)</code></td><td>Send bytes (a string) over the connection.</td></tr>
+      <tr><td><code>stream.read_all()</code></td><td>Read until EOF and return the payload as a string (30s read timeout).</td></tr>
+      <tr><td><code>stream.close()</code></td><td>Close the stream. Unclosed streams are closed when the process exits.</td></tr>
+    </table>
+    <p>All four operations (<code>connect</code> included) have async variants. I/O errors panic.</p>
+<pre><code><span class="k">use</span> net
+
+<span class="k">async function</span> <span class="f">main</span>() {
+    <span class="k">let</span> stream = <span class="k">await</span> <span class="f">net</span>.connect(<span class="s">"example.com"</span>, <span class="n">80</span>)
+    <span class="k">await</span> stream.write(<span class="s">"GET / HTTP/1.1\r\nHost: example.com\r\n\r\n"</span>)
+    <span class="f">console</span>.log(<span class="k">await</span> stream.read_all())
+    <span class="k">await</span> stream.close()
+}</code></pre>
+
+    <h2 id="http">http — client &amp; server</h2>
+    <p>The <code>http</code> module has a small client, a low-level server, and an express-style layer on top.</p>
+
+    <h3>Client</h3>
+    <table>
+      <tr><th>Function</th><th>Description</th></tr>
+      <tr><td><code>http.get(url)</code></td><td>HTTP GET; resolves to an <code>http.Response</code> object <code>{ status, body }</code>.</td></tr>
+      <tr><td><code>http.post(url, body)</code></td><td>HTTP POST with a string body; same response shape.</td></tr>
+    </table>
+<pre><code><span class="k">let</span> res = <span class="k">await</span> <span class="f">http</span>.get(<span class="s">"https://api.example.com/v1/ping"</span>)
+<span class="f">console</span>.log(res.status)  <span class="c">// 200</span>
+<span class="f">console</span>.log(res.body)</code></pre>
+
+    <h3>Low-level server</h3>
+    <p><code>http.listen(port, handler)</code> binds <code>0.0.0.0:port</code> and serves requests sequentially; the handler receives <code>(req, res)</code> and must be a lambda. <code>res.send(value)</code> replies with plain text, <code>res.json(value)</code> serializes arrays, objects, strings and numbers.</p>
+
+    <h3>Express-style server</h3>
+    <table>
+      <tr><th>Member</th><th>Description</th></tr>
+      <tr><td><code>new http.Server()</code></td><td>Create a server. Takes no arguments.</td></tr>
+      <tr><td><code>server.router({ path: "/x" })</code></td><td>Bind a router to a path prefix and register routes with <code>router.get(path, handler)</code> / <code>router.post(path, handler)</code>.</td></tr>
+      <tr><td><code>await server.listen(host, port)</code></td><td>Bind and start the poll(2)-multiplexed event loop — many concurrent connections.</td></tr>
+      <tr><td><code>req.body</code></td><td>The raw request body string on <code>http.Request</code>.</td></tr>
+      <tr><td><code>http.JsonValidator</code></td><td>Validate JSON bodies: <code>http.JsonValidator.string()</code> / <code>.number()</code> create field validators, chainable with <code>.required()</code>, <code>.min(n)</code>, <code>.max(n)</code>; <code>validator.validate(body)</code> returns a checked object.</td></tr>
+    </table>
+
+    <h2 id="fs">fs — filesystem</h2>
+    <table>
+      <tr><th>Function</th><th>Description</th></tr>
+      <tr><td><code>fs.args()</code></td><td>Process arguments (everything after the script name) as <code>Array&lt;String&gt;</code>.</td></tr>
+      <tr><td><code>fs.readFile(path)</code></td><td>Read a whole file into a string.</td></tr>
+      <tr><td><code>fs.writeFile(path, data)</code></td><td>Write a string to a file.</td></tr>
+      <tr><td><code>fs.exists(path)</code></td><td>Does the path exist?</td></tr>
+      <tr><td><code>fs.readDir(path)</code></td><td>Directory entry names, sorted.</td></tr>
+      <tr><td><code>fs.mkdir(path)</code></td><td>Create a directory (recursive).</td></tr>
+      <tr><td><code>fs.remove(path)</code></td><td>Remove a file or directory (recursive for dirs).</td></tr>
+    </table>
+    <p>Every function except <code>args</code> also has an async variant. Errors panic with <code>fs.&lt;op&gt; '&lt;path&gt;': &lt;os error&gt;</code>.</p>
+<pre><code><span class="k">use</span> fs
+
+<span class="k">async function</span> <span class="f">main</span>() {
+    <span class="k">await</span> <span class="f">fs</span>.writeFile(<span class="s">"notes.txt"</span>, <span class="s">"hello"</span>)
+    <span class="f">console</span>.log(<span class="k">await</span> <span class="f">fs</span>.readFile(<span class="s">"notes.txt"</span>))
+    <span class="k">for</span> (<span class="k">let</span> name <span class="k">in</span> <span class="k">await</span> <span class="f">fs</span>.readDir(<span class="s">"."</span>)) {
+        <span class="f">console</span>.log(name)
+    }
+}</code></pre>
+
+    <h2 id="crypto">crypto — hashing &amp; encoding</h2>
+    <p>Pure C++ implementations — no OpenSSL dependency:</p>
+    <table>
+      <tr><th>Function</th><th>Description</th></tr>
+      <tr><td><code>crypto.sha256(data)</code></td><td>Lowercase hex SHA-256 digest.</td></tr>
+      <tr><td><code>crypto.base64Encode(data)</code></td><td>Base64-encode a string.</td></tr>
+      <tr><td><code>crypto.base64Decode(data)</code></td><td>Base64-decode; skips <code>=</code> padding and whitespace, yields lossy UTF-8.</td></tr>
+      <tr><td><code>crypto.randomHex(numBytes)</code></td><td>Cryptographically random bytes from <code>/dev/urandom</code> as lowercase hex (clamped to 0–4096 bytes).</td></tr>
+      <tr><td><code>crypto.uuid()</code></td><td>Random UUID v4.</td></tr>
+    </table>
+<pre><code><span class="k">use</span> crypto
+
+<span class="f">console</span>.log(<span class="f">crypto</span>.sha256(<span class="s">"marina"</span>))
+<span class="f">console</span>.log(<span class="f">crypto</span>.base64Encode(<span class="s">"marina"</span>))
+<span class="f">console</span>.log(<span class="f">crypto</span>.uuid())</code></pre>
+
+    <h2 id="sql">sql — SQLite</h2>
+    <p>SQLite via the system <code>libsqlite3</code> (MySQL/Postgres drivers are not available yet). Values are always bound as prepared-statement parameters — never string-concatenated — through the <code>sql.stmt</code> tagged template: <code>${expr}</code> binds a value; only integers, floats, strings and bools can be bound.</p>
+    <table>
+      <tr><th>Member</th><th>Description</th></tr>
+      <tr><td><code>new sql.Connection(driver, url)</code></td><td>Open a connection; only <code>"sqlite"</code> is supported.</td></tr>
+      <tr><td><code>db.execute(stmt)</code></td><td>Run a statement that returns no rows; resolves to <code>{ lastInsertId, changes }</code>.</td></tr>
+      <tr><td><code>db.query(stmt)</code></td><td>Collect rows as objects whose fields are the column names (<code>Array&lt;Row&gt;</code>).</td></tr>
+      <tr><td><code>db.close()</code></td><td>Close the connection.</td></tr>
+    </table>
+<pre><code><span class="k">use</span> sql
+
+<span class="k">async function</span> <span class="f">main</span>() {
+    <span class="k">let</span> db = <span class="k">new</span> <span class="t">sql</span>.Connection(<span class="s">"sqlite"</span>, <span class="s">"app.db"</span>)
+    <span class="k">await</span> db.execute(<span class="t">sql</span>.stmt<span class="s">`CREATE TABLE IF NOT EXISTS t (id INTEGER PRIMARY KEY, name TEXT)`</span>)
+    <span class="k">let</span> result = <span class="k">await</span> db.execute(<span class="t">sql</span>.stmt<span class="s">`INSERT INTO t (name) VALUES (${</span><span class="s">"marina"</span><span class="s">})`</span>)
+    <span class="f">console</span>.log(result.lastInsertId)
+    <span class="k">let</span> rows = <span class="k">await</span> db.query(<span class="t">sql</span>.stmt<span class="s">`SELECT id, name FROM t`</span>)
+    <span class="f">console</span>.log(rows)
+}</code></pre>
+
+    <h2 id="arrays">Array methods</h2>
+    <p>Every array value carries these members (callbacks run synchronously):</p>
+    <table>
+      <tr><th>Member</th><th>Description</th></tr>
+      <tr><td><code>length</code></td><td>Number of elements.</td></tr>
+      <tr><td><code>push(v)</code> / <code>unshift(v)</code></td><td>Append / prepend a value; returns the new length.</td></tr>
+      <tr><td><code>pop()</code> / <code>shift()</code></td><td>Remove and return the last / first element (panics on empty).</td></tr>
+      <tr><td><code>splice(start, count)</code></td><td>Remove <code>count</code> elements at <code>start</code> (clamped); returns them as a new array.</td></tr>
+      <tr><td><code>slice(start, end)</code></td><td>Copy elements <code>[start, end)</code> (clamped) into a new array.</td></tr>
+      <tr><td><code>concat(other)</code></td><td>New array with the elements of both arrays.</td></tr>
+      <tr><td><code>join(sep)</code></td><td>Join the elements' string forms with a separator.</td></tr>
+      <tr><td><code>reverse()</code> / <code>sort()</code></td><td>In place; returns the same array. <code>sort</code> is stable — numbers numerically, strings bytewise.</td></tr>
+      <tr><td><code>forEach(item =&gt; Void)</code></td><td>Run a callback for each element.</td></tr>
+      <tr><td><code>map(item =&gt; T)</code></td><td>New array of the callback results.</td></tr>
+      <tr><td><code>filter(item =&gt; bool)</code></td><td>New array of elements whose callback returned true.</td></tr>
+      <tr><td><code>reduce((acc, item) =&gt; T, init)</code></td><td>Fold the array into a single value.</td></tr>
+    </table>
+    <p>Indexing (<code>arr[i]</code>) is bounds-checked and panics when out of range.</p>
+
+    <h2 id="strings">String members</h2>
+    <p>Strings are UTF-8 byte sequences; indices are byte offsets:</p>
+    <table>
+      <tr><th>Member</th><th>Description</th></tr>
+      <tr><td><code>length</code></td><td>Length in bytes.</td></tr>
+      <tr><td><code>charAt(index)</code></td><td>Byte (code unit) at <code>index</code>, 0 when out of bounds.</td></tr>
+      <tr><td><code>substring(start, end)</code></td><td>Substring over byte indices <code>[start, end)</code>, clamped; an end below start yields <code>""</code>.</td></tr>
+    </table>
+    <p>String equality (<code>==</code>/<code>!=</code>) compares content, and any value can be interpolated into template literals: <code>`hello ${name}`</code>. <code>console.log</code> formats any value via its string form.</p>
+  </div>
+</div>

@@ -1,0 +1,222 @@
+---
+layout: base.html
+title: Under the Hood
+description: How the marina runtime works — the multithreaded event loop, async state machines, and reference counting (ARC) — compared with Swift ARC, Go's GC and Rust's borrow checker.
+---
+
+<div class="wrap doc-layout">
+  <aside class="doc-toc">
+    <div class="toc-title">On this page</div>
+    <a href="#eventloop">The event loop &amp; async threads</a>
+    <a href="#await">What <code>await</code> actually does</a>
+    <a href="#http-loop">The HTTP accept loop</a>
+    <a href="#memory">Memory management: ARC</a>
+    <a href="#compare">ARC vs Go GC vs Rust ownership</a>
+  </aside>
+
+  <div class="doc">
+    <h1>Under the Hood</h1>
+    <p class="muted">Two systems do most of the runtime's work: a multithreaded event loop that powers <code>async</code>/<code>await</code>, and the reference-counting allocator that manages every heap value. This page walks through both with architecture diagrams, then compares marina's approach with Swift, Go and Rust.</p>
+
+    <h2 id="eventloop">The event loop &amp; async threads</h2>
+    <p>Marina compiles <code>async</code> functions <strong>ahead of time</strong> into state machines — there is no VM, no interpreter, and no green-thread scheduler. The compiled binary links <code>libmarina_runtime.a</code>, which starts a small thread pool and a timer thread. Every blocking operation (fs, net, sql, http) runs as a task on the pool; continuations after <code>await</code> are tasks too.</p>
+    <ul>
+      <li><strong>Worker pool</strong> — <code>min(hardware_concurrency, 8)</code> threads pulling from a shared task deque under one mutex + condition variable.</li>
+      <li><strong>Timer thread</strong> — a binary min-heap of <code>setTimeout</code> entries ordered by <code>(due, seq)</code>; a due timer becomes an ordinary task.</li>
+      <li><strong>Quiescence</strong> — the main thread blocks in <code>marina_event_loop_run()</code> until <em>no queued tasks, no running tasks, no pending timers, no unresolved promises, and no listening HTTP servers</em> remain, then the process exits.</li>
+    </ul>
+<pre class="mermaid">
+flowchart TB
+    subgraph MAIN["Main thread"]
+        M1["compiled main()"] --> M2["async main() state machine<br/>kicked off with resume(frame, 0, null)"]
+        M2 --> M3["marina_event_loop_start()<br/>spawns worker pool + timer thread"]
+        M3 --> M4["marina_event_loop_run()<br/>waits on condition variable"]
+    end
+
+    subgraph POOL["Worker pool — min(cores, 8) threads"]
+        W1["worker 0"]
+        W2["worker 1"]
+        W3["worker n"]
+    end
+
+    subgraph TIMER["Timer thread"]
+        T1["min-heap of timers<br/>ordered by (due, seq)"]
+    end
+
+    Q[("Task deque<br/>std::function&lt;void()&gt;")]
+
+    M3 --> POOL
+    M3 --> TIMER
+    W1 & W2 & W3 -- "pop task<br/>running += 1" --> Q
+    T1 -- "timer due:<br/>push callback task" --> Q
+    W1 & W2 & W3 -- "task done<br/>running -= 1<br/>notify_all" --> M4
+
+    M4 -. "quiescent when tasks are empty,<br/>running == 0, timers empty,<br/>pending_promises == 0,<br/>pending_listeners == 0" .-> EXIT["process exits (0)"]
+    LISTEN["HTTP server listening"] -. "never quiescent<br/>(Ctrl-C to stop)" .-> M4
+</pre>
+
+    <h2 id="await">What <code>await</code> actually does</h2>
+    <p>The compiler splits every <code>async</code> function at each <code>await</code> into segments. Each segment is a case in a generated <code>resume(frame, state, value)</code> function — the frame is a plain heap block holding the locals. <code>await promise</code> compiles to <code>marina_await(promise, resume, frame, next_state)</code>: the frame is parked and the worker thread moves on immediately. When the promise resolves, a waiter task runs the continuation on <em>some</em> worker thread — the value crosses threads by reference-counted ownership, never by shared mutable state.</p>
+<pre class="mermaid">
+sequenceDiagram
+    participant A as async fn (segment N)
+    participant P as Promise
+    participant Q as Task deque
+    participant B as Worker (blocking work)
+    participant C as Worker (continuation)
+
+    A->>P: marina_await(promise, resume,<br/>frame, state N+1)
+    alt not resolved yet
+        P->>P: waiters.push({resume, frame, state})<br/>(await consumes the caller's +1 ref)
+        Note over A: frame parked —<br/>thread is free immediately
+    else already resolved
+        P->>Q: waiter task (same semantics)
+    end
+
+    Note over B: e.g. fs.readFile body —<br/>blocking syscalls are fine here
+    B->>B: run blocking work
+    B->>P: marina_promise_resolve(promise, value)<br/>(first resolve wins)
+    P->>Q: schedule one waiter task per waiter<br/>(task retains a copy of the value)
+    Q->>C: run_waiter
+    C->>A: resume(frame, N+1, &value)
+    Note over A: execution continues after await,<br/>on whichever worker picked it up
+    C->>P: release the waiter's promise ref
+</pre>
+<pre><code><span class="k">async function</span> <span class="f">load</span>(path: <span class="t">String</span>): <span class="t">String</span> {
+    <span class="k">let</span> text = <span class="k">await</span> <span class="f">fs</span>.readFile(path)   <span class="c">// parks the frame here</span>
+    <span class="k">return</span> <span class="f">crypto</span>.sha256(text)          <span class="c">// runs in a continuation segment</span>
+}</code></pre>
+    <p>The same machinery backs <code>setTimeout</code> (timer → task) and promise executors (<code>new Promise</code> runs synchronously, JS semantics). Promises are ARC-managed too: creating one registers it as pending so the loop can't exit while work is outstanding.</p>
+
+    <h2 id="http-loop">The HTTP accept loop</h2>
+    <p>Blocking servers (<code>http.listen</code>) occupy one listener thread, but the express-style <code>server.listen(host, port)</code> uses a poll(2)-multiplexed accept loop — a single thread watches every connection's file descriptor, so thousands of idle keep-alive connections cost nothing until they have data. Handlers are async: each request becomes a task on the worker pool.</p>
+<pre class="mermaid">
+flowchart LR
+    L["listener thread"] --> P["poll(2) over all<br/>registered fds"]
+    P -- "listening fd readable" --> ACC["accept() →<br/>register new fd"]
+    P -- "connection fd readable" --> REQ["read request →<br/>run async handler<br/>as a task"]
+    ACC --> P
+    REQ --> RES["res.json / res.send<br/>(write when ready)"]
+    RES --> P
+</pre>
+
+    <h2 id="memory">Memory management: ARC</h2>
+    <p>Every heap value — strings, arrays, objects, promises — carries a 16-byte header with a lock-free atomic reference count. The compiler inserts <code>retain</code>/<code>release</code> calls during codegen: a value assigned into a variable, array slot or object field takes a <code>+1</code>; overwriting or leaving scope drops it. When a count hits zero the object is freed immediately and deterministically — there is no garbage collector, no tracing, no pauses.</p>
+<pre class="mermaid">
+flowchart TD
+    LIT["String literal —<br/>interned at first use"] --> IMM["rc = -1 (immortal):<br/>retain/release are no-ops"]
+    NEW["Alloc: string / array /<br/>object / promise"] --> RC1["header.rc = 1<br/>(creator owns it)"]
+    RC1 -- "assign, pass, store<br/>in array/object field" --> RET["retain: rc.fetch_add(1)<br/>lock-free atomic"]
+    RET --> LIVE["value alive"]
+    LIVE -- "overwrite, leave scope,<br/>frame dropped" --> REL["release: rc.fetch_sub(1)<br/>acq_rel ordering"]
+    REL -- "old value was 1" --> FREE["free_obj:<br/>release elements (deep drop),<br/>return block to the heap"]
+    REL -- "other owners remain" --> LIVE
+</pre>
+<pre class="mermaid">
+flowchart LR
+    subgraph OBJ["Any ARC object (StrObj, ArrayObj, ObjectObj, Promise)"]
+        direction LR
+        H["Header — 16 bytes:<br/>atomic&lt;i64&gt; rc · kind · pad"] --> PAY["payload:<br/>e.g. len + UTF-8 bytes,<br/>vector&lt;MValue&gt; elements,<br/>class fields"]
+    end
+    subgraph FRAME["Compiler-managed blocks (not refcounted)"]
+        F1["async frame — locals,<br/>state, owned values<br/>dropped by generated code"]
+        F2["closure env — captured refs<br/>released by an env_drop fn"]
+    end
+</pre>
+    <p>A few rules make this safe across threads: counts are atomic (a value can be retained on one worker and released on another), element drops are deep (freeing an array releases every element), and background tasks record an <code>Owns</code> list of retained payloads that is released when the task finishes — so an I/O task can't outlive its arguments.</p>
+
+    <h2 id="compare">ARC vs Go GC vs Rust ownership</h2>
+    <table>
+      <tr><th></th><th>Marina / Swift (ARC)</th><th>Go (GC)</th><th>Rust (ownership)</th></tr>
+      <tr><td>When is memory freed?</td><td>The instant the last reference drops</td><td>Some time after it becomes unreachable, in a GC cycle</td><td>The instant the owner's scope ends (compile-time inserts the frees)</td></tr>
+      <tr><td>Runtime cost</td><td>Atomic increment/decrement per assignment</td><td>Concurrent mark &amp; sweep; write barriers, GC assists, larger heaps</td><td>Zero — everything is decided at compile time</td></tr>
+      <tr><td>Pause times</td><td>None (destruction is incremental)</td><td>Very short stop-the-world pauses, plus CPU stolen by the collector</td><td>None</td></tr>
+      <tr><td>Reference cycles</td><td>Leak (Swift: break with <code>weak</code>/<code>unowned</code>; marina: none of these yet)</td><td>Collected automatically — cycles are fine</td><td>Compile error unless you opt in (<code>Rc&lt;RefCell&lt;_&gt;&gt;</code> + <code>Weak</code>)</td></tr>
+      <tr><td>Programmer burden</td><td>Almost none; mind cycles</td><td>None</td><td>High — fight the borrow checker for shared mutation</td></tr>
+      <tr><td>Deterministic destruction</td><td>Yes (RAII-style drops)</td><td>No (finalizers are not prompts)</td><td>Yes</td></tr>
+    </table>
+<pre class="mermaid">
+flowchart LR
+    subgraph ARC["Marina &amp; Swift — reference counting"]
+        A1["assign: +1"] --> A2["last release: 0"] --> A3["freed immediately"]
+    end
+    subgraph GC["Go — concurrent mark &amp; sweep"]
+        G1["object becomes<br/>unreachable"] --> G2["next GC cycle:<br/>mark reachable set"] --> G3["sweep frees it later"]
+    end
+    subgraph OWN["Rust — compile-time ownership"]
+        R1["move transfers ownership"] --> R2["scope end"] --> R3["freed immediately,<br/>no runtime bookkeeping"]
+    end
+</pre>
+
+    <h3>Swift — ARC with escape hatches</h3>
+    <p>Swift is marina's closest cousin: the compiler also inserts <code>retain</code>/<code>release</code>. Swift additionally has <code>weak</code>/<code>unowned</code> references and autorelease pools; marina currently has neither (cycles leak, same as a Swift cycle you forgot to break).</p>
+<pre><code><span class="k">class</span> <span class="t">Node</span> {
+    <span class="k">var</span> next: <span class="t">Node</span>?          <span class="c">// strong reference</span>
+}
+<span class="k">var</span> a = <span class="t">Node</span>()
+<span class="k">var</span> b = <span class="t">Node</span>()
+a.next = b
+b.next = a        <span class="c">// cycle: both stay at rc = 1 forever → leak</span>
+
+<span class="k">class</span> <span class="t">Parent</span> {
+    <span class="k">weak var</span> child: <span class="t">Child</span>?   <span class="c">// weak: does not bump the refcount</span>
+}</code></pre>
+
+    <h3>Go — the runtime decides</h3>
+    <p>In Go you never think about ownership: objects live as long as they are reachable, and the concurrent collector (tri-color mark &amp; sweep with write barriers) reclaims them — cycles included — in background cycles with very short stop-the-world phases. The price is a bigger heap and CPU time you don't control.</p>
+<pre><code><span class="k">type</span> <span class="t">Node</span> <span class="k">struct</span> {
+    next *<span class="t">Node</span>
+}
+
+<span class="k">func</span> <span class="f">main</span>() {
+    a := &amp;<span class="t">Node</span>{}
+    b := &amp;<span class="t">Node</span>{}
+    a.next = b
+    b.next = a
+    a, b = <span class="k">nil</span>, <span class="k">nil</span>   <span class="c">// cycle is unreachable — the GC collects it</span>
+    runtime.<span class="f">GC</span>()      <span class="c">// ...at some point like this (or on its own)</span>
+}</code></pre>
+
+    <h3>Rust — the borrow checker decides</h3>
+    <p>Rust enforces a single owner per value at compile time. Assignment <em>moves</em>; borrows (<code>&amp;</code>/<code>&amp;mut</code>) are checked so no aliasing mutation can exist. Nothing runs at runtime — which is why there are no refcount atomics and no GC pauses — but shared mutation needs explicit opt-in (<code>Rc</code>, <code>RefCell</code>, <code>Arc</code>, <code>Mutex</code>).</p>
+<pre><code><span class="k">struct</span> <span class="t">Node</span> {
+    next: <span class="t">Option</span>&lt;<span class="t">Box</span>&lt;<span class="t">Node</span>&gt;&gt;,   <span class="c">// Box: single owner, freed on drop</span>
+}
+
+<span class="k">let</span> a = <span class="t">Node</span> { next: <span class="t">None</span> };
+<span class="k">let</span> b = a;              <span class="c">// move — `a` is no longer usable</span>
+<span class="c">// println!(&quot;{}&quot;, a.next.is_none()); // compile error: value moved</span>
+<span class="k">let</span> r = &amp;b;             <span class="c">// borrow — checked at compile time</span>
+
+<span class="k">use</span> std::rc::<span class="t">Rc</span>;
+<span class="k">let</span> shared = <span class="t">Rc</span>::new(<span class="t">Node</span> { next: <span class="t">None</span> });  <span class="c">// opt-in refcounting</span>
+<span class="k">let</span> also = <span class="t">Rc</span>::clone(&amp;shared);              <span class="c">// rc: 2</span></code></pre>
+
+    <h3>Marina — ARC in an AOT C++ runtime</h3>
+    <p>Marina programs read like Swift: plain assignment, no annotations, deterministic destruction. The counting happens in the generated LLVM IR calling the C runtime — <code>marina_retain</code> / <code>marina_release</code> — so it behaves exactly like the diagram above: freeing is immediate, cycles leak, and there is no collector to tune.</p>
+<pre><code><span class="k">class</span> <span class="t">Node</span> {
+    <span class="k">public</span> name: <span class="t">String</span>
+}
+
+<span class="k">let</span> a = <span class="k">new</span> <span class="t">Node</span>()       <span class="c">// rc = 1 (a owns it)</span>
+<span class="k">let</span> b = a               <span class="c">// same object — retain (+1)</span>
+b.name = <span class="s">"shared"</span>
+
+<span class="k">let</span> list = [<span class="s">"a"</span>, <span class="s">"b"</span>]   <span class="c">// array owns its element strings</span>
+<span class="k">let</span> copy = list         <span class="c">// retain the array (+1), elements untouched</span>
+
+<span class="c">// when a, b, list, copy leave scope the compiler emits:</span>
+<span class="c">//   call void @marina_release(ptr %b)</span>
+<span class="c">//   ...</span>
+<span class="c">//   call void @marina_release(ptr %list) ; frees when the count hits 0</span>
+<span class="c">// (a reference cycle would keep both counts above 0 — same as Swift)</span></code></pre>
+    <blockquote>
+      Design rule of thumb: <strong>Swift's ergonomics + Rust's determinism, without Rust's type-system burden.</strong> The trade-off accepted for v0.2 is that reference cycles leak — same as Swift with strong references — while Go would have collected them.
+    </blockquote>
+  </div>
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/mermaid@10.9.1/dist/mermaid.min.js"></script>
+<script>
+  mermaid.initialize({ startOnLoad: true, theme: 'dark', flowchart: { htmlLabels: true, curve: 'basis' }, securityLevel: 'loose' });
+</script>

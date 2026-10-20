@@ -13,6 +13,7 @@ description: The Marina language — types and inference, let/const, arrays, obj
     <a href="#objects">Objects &amp; classes</a>
     <a href="#generics">Generics</a>
     <a href="#interfaces">Interfaces</a>
+    <a href="#inheritance">Inheritance &amp; OOP</a>
     <a href="#async">Async / await</a>
     <a href="#controlflow">Control flow</a>
     <a href="#stdlib">Standard libraries</a>
@@ -78,11 +79,15 @@ xs.<span class="f">forEach</span>((item) =&gt; { <span class="f">console</span>.
 }
 <span class="f">console</span>.log(abc.a)   <span class="c">// 5</span>
 abc.b = <span class="n">10</span>           <span class="c">// field write</span></code></pre>
-    <p>Accessing <code>abc.d</code> is a compile-time error. <strong>Declared classes</strong> define a named shape, instantiated with <code>new</code>. Fields are public by default; classes are pure data (no methods):</p>
+    <p>Accessing <code>abc.d</code> is a compile-time error. <strong>Declared classes</strong> define a named shape, instantiated with <code>new</code>. Fields and methods are <code>public</code> by default. <code>private</code> fields and methods are visible only inside the class's own methods and constructor:</p>
 <pre><code><span class="k">class</span> <span class="t">Point</span> {
     <span class="k">public</span> x: <span class="t">Float64</span>
-    <span class="k">public</span> y: <span class="t">Float64</span>
+    <span class="k">private</span> y: <span class="t">Float64</span>
     label: <span class="t">string</span>
+
+    describe(): <span class="t">string</span> {
+        <span class="k">return</span> <span class="s">`${this.label}`</span>
+    }
 }
 <span class="k">let</span> origin = <span class="k">new</span> <span class="t">Point</span>()
 origin.x = <span class="n">0.0</span></code></pre>
@@ -101,16 +106,53 @@ origin.x = <span class="n">0.0</span></code></pre>
 <span class="k">let</span> box = <span class="k">new</span> <span class="t">Box</span>&lt;<span class="t">Int32</span>&gt;()            <span class="c">// explicit type argument</span></code></pre>
 
     <h2 id="interfaces">Interfaces</h2>
-    <p><code>interface</code> declares a structural data contract: any object — a ghost class (object literal) or a declared class — that has the interface's fields with matching types conforms to it, and extra fields are allowed. Conformance is checked at compile time; interfaces are erased at runtime (field access is resolved by name through the runtime, so the same code works on any conforming shape).</p>
+    <p><code>interface</code> declares a structural contract: any object — a ghost class (object literal) or a declared class — that has the interface's fields and public methods with matching types conforms to it, and extra fields are allowed. Method signatures look like TypeScript (<code>name(params): Type</code>, no body). Conformance is checked at compile time. Field access is resolved by name; a method call dispatches to the concrete class's method.</p>
 <pre><code><span class="k">interface</span> <span class="t">Point</span> { x: <span class="t">Int32</span>, y: <span class="t">Int32</span>, name: <span class="t">string</span> }
 <span class="k">interface</span> <span class="t">Named</span> { name: <span class="t">string</span> }
+<span class="k">interface</span> <span class="t">Titled</span> { title(): <span class="t">string</span> }
 
 <span class="k">function</span> <span class="f">describe</span>(pt: <span class="t">Point</span>): <span class="t">string</span> {
     <span class="k">return</span> <span class="s">`${pt.name}: ${pt.x}, ${pt.y}`</span>
 }
 
+<span class="k">function</span> <span class="f">show</span>(t: <span class="t">Titled</span>): <span class="t">string</span> {
+    <span class="k">return</span> t.title()
+}
+
 <span class="k">let</span> p = { x: <span class="n">1</span>, y: <span class="n">2</span>, name: <span class="s">"origin"</span> }   <span class="c">// object literal conforms</span>
 <span class="k">let</span> shapes: <span class="t">Array</span>&lt;<span class="t">Named</span>&gt; = [p, q, car]    <span class="c">// different concrete shapes</span></code></pre>
+
+    <h2 id="inheritance">Inheritance &amp; OOP</h2>
+    <p>Classes support the TypeScript OOP surface: single inheritance (<code>extends</code>), interfaces (<code>implements</code>), abstract classes and methods, <code>public</code>/<code>private</code>/<code>protected</code> access, <code>static</code> members, <code>get</code>/<code>set</code> accessors and <code>super</code>. Overridden methods dispatch <strong>virtually</strong> on the runtime class id, so a base-typed array (<code>Array&lt;Shape&gt;</code>) runs the right subclass implementation.</p>
+<pre><code><span class="k">abstract class</span> <span class="t">Shape</span> {
+    <span class="k">protected</span> originX: <span class="t">Float64</span>        <span class="c">// subclass-visible</span>
+    <span class="k">static</span> created: <span class="t">Int32</span>             <span class="c">// class-level field</span>
+
+    <span class="k">constructor</span>(originX: <span class="t">Float64</span>) {
+        <span class="k">this</span>.originX = originX
+        <span class="t">Shape</span>.created = <span class="t">Shape</span>.created + <span class="n">1</span>
+    }
+
+    <span class="k">abstract</span> area(): <span class="t">Float64</span>;         <span class="c">// no body: subclasses implement</span>
+
+    <span class="k">get</span> <span class="p">origin</span>(): <span class="t">string</span> { <span class="k">return</span> <span class="s">`(${this.originX}, 0)`</span> }
+}
+
+<span class="k">class</span> <span class="t">Circle</span> <span class="k">extends</span> <span class="t">Shape</span> <span class="k">implements</span> <span class="t">Describable</span> {
+    radius: <span class="t">Float64</span>
+
+    <span class="k">constructor</span>(x: <span class="t">Float64</span>, radius: <span class="t">Float64</span>) {
+        <span class="k">super</span>(x)                      <span class="c">// base constructor call</span>
+        <span class="k">this</span>.radius = radius
+    }
+
+    area(): <span class="t">Float64</span> { <span class="k">return</span> <span class="n">3.14</span> * <span class="k">this</span>.radius * <span class="k">this</span>.radius }
+
+    <span class="k">override</span> <span class="f">describe</span>(): <span class="t">string</span> {
+        <span class="k">return</span> <span class="s">`circle: ${super.describe()}`</span>
+    }
+}</code></pre>
+    <p><code>private</code> members are usable only inside the defining class; <code>protected</code> also inside subclasses; everything else is a compile-time error. Statics (<code>Shape.created</code>) are inherited and stored as module globals. <code>super.method()</code> calls the base implementation directly; a subclass constructor must call <code>super(...)</code> when the base declares one. <code>abstract</code> classes cannot be instantiated.</p>
 
     <h2 id="async">Async / await</h2>
     <p>JS-style promises. Each <code>async function</code> compiles to an entry function plus a <code>resume</code> <strong>state machine</strong> — one basic block per continuation segment. <code>await</code> registers the frame with the runtime; when the promise resolves, the runtime resumes it on a worker thread. The program exits when the event loop reaches quiescence.</p>
@@ -129,7 +171,7 @@ origin.x = <span class="n">0.0</span></code></pre>
     <p><code>if</code>/<code>else</code>, <code>while</code>, C-style <code>for</code>, with <code>++</code>, <code>--</code>, <code>+=</code>, <code>-=</code>. Loop conditions must be <code>bool</code> (no truthiness); the <code>for</code> init variable is scoped to the loop. Entry point: define <code>main</code> (sync or async).</p>
 
     <h2 id="stdlib">Standard libraries</h2>
-    <p>Bring them in with a top-level <code>use</code> statement (<code>use http</code> — the JS-style <code>import</code> is not supported).</p>
+    <p>Bring them in with a top-level <code>use</code> statement (<code>use http</code> — the JS-style <code>import</code> is not supported). Full signatures and examples live on the <a href="/docs/stdlib">standard library page</a>.</p>
     <table>
       <tr><th>Module</th><th>What it provides</th></tr>
       <tr><td><code>net</code></td><td>raw TCP: <code>net.connect(host, port)</code> → <code>Stream</code> with <code>write</code> / <code>read_all</code> / <code>close</code></td></tr>
