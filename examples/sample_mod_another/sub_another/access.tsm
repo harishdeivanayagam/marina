@@ -1,0 +1,5 @@
+use sample_mod/sub
+
+export function access_sub(a: Int32, b: Int32) {
+    return sub.sub(a, b)
+}

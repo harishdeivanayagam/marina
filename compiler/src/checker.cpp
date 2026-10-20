@@ -204,15 +204,32 @@ using marina::lex::Span;
 /// package name and the function name must be valid camelCase identifiers.
 bool is_namespaced_fn(const std::string& s) {
     size_t pos = s.find("__");
-    if (pos == std::string::npos) return false;
+    if (pos == std::string::npos || pos == 0 || pos + 2 > s.size()) return false;
     std::string pkg = s.substr(0, pos);
-    std::string f = s.substr(pos + 2);
-    if (pkg.empty()) return false;
+    // package/module part: lowercase words (+ optional PascalCase class name
+    // for lowered methods like `Calc__add`), underscores, digits
     for (unsigned char c : pkg) {
-        if (!((c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '_'))
+        if (!((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') ||
+              c == '_'))
             return false;
     }
-    return is_camel_case(f);
+    // every `__`-separated part after the module prefix must be a name
+    // (camelCase fn or snake_case sub-module segment like `sub_another`)
+    size_t start = pos + 2;
+    for (;;) {
+        size_t nxt = s.find("__", start);
+        std::string part = s.substr(start, nxt == std::string::npos ? std::string::npos
+                                                                    : nxt - start);
+        if (part.empty()) return false;
+        for (unsigned char c : part) {
+            if (!((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') ||
+                  c == '_'))
+                return false;
+        }
+        if (nxt == std::string::npos) return true;
+        start = nxt + 2;
+        if (start >= s.size()) return false; // trailing '__'
+    }
 }
 
 std::string pad4(size_t n) {
@@ -546,6 +563,13 @@ public:
     std::vector<std::string> var_names;
     // modules introduced by top-level `use` statements
     std::vector<std::string> uses;
+    // use alias -> mangled-name prefix for the module's functions
+    // (`use sample_mod/sub` → alias `sub`, prefix `sample_mod__sub`).
+    // Aliases absent from the map mangle to themselves.
+    std::unordered_map<std::string, std::string> use_prefix;
+    // name of the function whose body is being checked (pass 3); used to
+    // decide whether `private` field access is allowed
+    std::string cur_fn;
     // `let` variables holding `new http.JsonValidator({...})`: var id ->
     // ordered (field, kind) schema
     std::unordered_map<size_t, std::vector<std::pair<std::string, FieldKind>>> validator_fields;
@@ -663,12 +687,13 @@ public:
         for (const auto& [id, cl] : pending) {
             std::vector<std::pair<std::string, CTy>> fields;
             std::unordered_set<std::string> seen_fields;
-            for (const auto& [fname, ann] : cl->fields) {
-                if (!seen_fields.insert(fname).second) {
-                    diag("duplicate field '" + fname + "' in class '" + cl->name + "'", cl->span);
+            for (const auto& f : cl->fields) {
+                if (!seen_fields.insert(f.name).second) {
+                    diag("duplicate field '" + f.name + "' in class '" + cl->name + "'", cl->span);
                     continue;
                 }
-                fields.emplace_back(fname, ty_of(ann));
+                fields.emplace_back(f.name, ty_of(f.ty));
+                if (f.is_private) classes[id].private_fields.push_back(f.name);
             }
             classes[id].fields = std::move(fields);
         }
@@ -1241,6 +1266,12 @@ public:
                          span);
                     return fallback_stmt();
                 }
+                if (def.field_is_private(field) && !can_access_private(ty.object.name)) {
+                    diag("field '" + field + "' of class '" + ty.object.name +
+                             "' is private (assign it inside the class)",
+                         span);
+                    return fallback_stmt();
+                }
                 CTy elem = def.fields[idx].second;
                 CExpr vc = check_expr(*x->value, false);
                 coerce(expr_ty(vc), elem, span);
@@ -1488,6 +1519,7 @@ public:
         if (std::holds_alternative<CFsArgs>(e.v)) return cty_array(cty_str());
         if (auto* x = std::get_if<CObjectLit>(&e.v)) return object_ty_of_class(x->class_id);
         if (auto* x = std::get_if<CNewClass>(&e.v)) return object_ty_of_class(x->class_id);
+        if (auto* x = std::get_if<CNewClassCtor>(&e.v)) return object_ty_of_class(x->class_id);
         if (auto* x = std::get_if<CFieldGet>(&e.v)) return x->ty;
         if (std::holds_alternative<CNetConnect>(e.v)) return cty_promise(cty_stream());
         if (std::holds_alternative<CNetWrite>(e.v) || std::holds_alternative<CNetClose>(e.v))
@@ -1718,11 +1750,59 @@ public:
                 vn.fields = std::move(fields);
                 return ce(std::move(vn));
             }
+            // local class (optionally module-qualified): `new Calc(args)` /
+            // `new sample_mod.Calc(args)` — construct, then run the
+            // constructor when the class declares one
+            std::string cname;
+            bool is_std_alias = path.size() == 2 &&
+                                (path[0] == "net" || path[0] == "http" || path[0] == "fs" ||
+                                 path[0] == "crypto" || path[0] == "sql");
             if (path.size() == 1) {
-                auto it = class_by_name.find(path[0]);
-                if (it != class_by_name.end()) return ce(CNewClass{it->second});
-                diag("unknown class '" + path[0] + "'", e.span);
-                return cbool(false);
+                cname = path[0];
+            } else if (path.size() == 2 && !is_std_alias && contains_str(uses, path[0])) {
+                cname = path[1];
+            }
+            if (!cname.empty()) {
+                auto it = class_by_name.find(cname);
+                if (it == class_by_name.end()) {
+                    if (generic_classes.count(cname)) {
+                        diag("generic classes do not support constructor arguments", e.span);
+                        return cbool(false);
+                    }
+                    diag("unknown class '" + cname + "'", e.span);
+                    return cbool(false);
+                }
+                if (x->args.empty()) return ce(CNewClass{it->second});
+                std::string ctor_fn = cname + "__new";
+                auto sit = sigs.find(ctor_fn);
+                if (sit == sigs.end()) {
+                    diag("class '" + cname +
+                             "' takes no constructor arguments (declare a constructor to accept "
+                             "arguments)",
+                         e.span);
+                    return cbool(false);
+                }
+                std::vector<CTy> params;
+                for (size_t i = 1; i < sit->second.params.size(); ++i)
+                    params.push_back(sit->second.params[i]);
+                if (x->args.size() != params.size()) {
+                    diag("constructor of class '" + cname + "' takes " + numstr(params.size()) +
+                             " argument(s), got " + numstr(x->args.size()),
+                         e.span);
+                }
+                std::vector<CExpr> cargs;
+                for (size_t i = 0; i < x->args.size(); ++i) {
+                    CExpr c = check_expr(*x->args[i], false);
+                    if (i < params.size()) {
+                        coerce(expr_ty(c), params[i], x->args[i]->span);
+                    }
+                    cargs.push_back(std::move(c));
+                }
+                CNewClassCtor nc;
+                nc.class_id = it->second;
+                nc.fn = ctor_fn;
+                nc.args = std::move(cargs);
+                return ce(std::move(nc));
             }
             std::vector<std::string> parts = path;
             diag("unknown class '" + join(parts, ".") + "'", e.span);
@@ -1794,6 +1874,13 @@ public:
                     const ClassDef& def = classes[ot.object.id];
                     for (size_t idx = 0; idx < def.fields.size(); ++idx) {
                         if (def.fields[idx].first == name) {
+                            if (def.field_is_private(name) &&
+                                !can_access_private(ot.object.name)) {
+                                diag("field '" + name + "' of class '" + ot.object.name +
+                                         "' is private (access it inside the class)",
+                                     e.span);
+                                return cbool(false);
+                            }
                             CFieldGet g;
                             g.obj = exptr(std::move(oc));
                             g.idx = idx;
@@ -2487,11 +2574,11 @@ public:
         if (exist != class_by_name.end()) return cty_object(exist->second, mangled);
         std::vector<std::pair<std::string, CTy>> fields;
         std::unordered_set<std::string> seen;
-        for (const auto& [fname, ann] : decl.fields) {
-            if (!seen.insert(fname).second) continue;
-            ast::TyAnn a2 = ann;
+        for (const auto& f : decl.fields) {
+            if (!seen.insert(f.name).second) continue;
+            ast::TyAnn a2 = f.ty;
             subst_ann(a2, bindings);
-            fields.emplace_back(fname, ty_of(a2));
+            fields.emplace_back(f.name, ty_of(a2));
         }
         size_t id = classes.size();
         ClassDef d;
@@ -2845,26 +2932,104 @@ public:
         return cbool(false);
     }
 
+    /// Collect a dotted member chain: `a.b.c` → ["a","b","c"]. Returns false
+    /// when the expression isn't a pure identifier/member chain.
+    static bool member_chain(const ast::Expr& e, std::vector<std::string>& out) {
+        if (auto* id = std::get_if<ast::EIdent>(&e.v)) {
+            out.push_back(id->name);
+            return true;
+        }
+        if (auto* mem = std::get_if<ast::EMember>(&e.v)) {
+            if (!member_chain(*mem->obj, out)) return false;
+            out.push_back(mem->name);
+            return true;
+        }
+        return false;
+    }
+
+    /// Mangled-name prefix for a `use` alias (identity when absent: std
+    /// modules and registry packages mangle to their own name).
+    std::string use_prefix_of(const std::string& alias) const {
+        auto it = use_prefix.find(alias);
+        return it != use_prefix.end() ? it->second : alias;
+    }
+
+    /// True when the function currently being checked belongs to the class
+    /// (its name is `Class__method` / `Class__new`) — the only context where
+    /// `private` fields may be accessed.
+    bool can_access_private(const std::string& class_name) const {
+        std::string prefix = class_name + "__";
+        return cur_fn.size() > prefix.size() && cur_fn.compare(0, prefix.size(), prefix) == 0;
+    }
+
+    /// Method call on a class instance: `obj.method(args)` lowers to a call
+    /// of the lowered `Class__method(this, args)` function. Nullopt when the
+    /// class has no such method.
+    std::optional<CExpr> check_user_method(CExpr oc, const ObjectTy& obj, const std::string& name,
+                                           const std::vector<ast::ExprPtr>& args, Span span) {
+        std::string full = obj.name + "__" + name;
+        auto sit = sigs.find(full);
+        if (sit == sigs.end()) return std::nullopt;
+        // param 0 is the implicit `this`
+        std::vector<CTy> params;
+        for (size_t i = 1; i < sit->second.params.size(); ++i) params.push_back(sit->second.params[i]);
+        if (args.size() != params.size()) {
+            diag("method '" + name + "' of class '" + obj.name + "' takes " +
+                     numstr(params.size()) + " argument(s), got " + numstr(args.size()),
+                 span);
+        }
+        std::vector<CExpr> cargs;
+        cargs.push_back(std::move(oc));
+        for (size_t i = 0; i < args.size(); ++i) {
+            CExpr c = check_expr(*args[i], false);
+            if (i < params.size()) {
+                coerce(expr_ty(c), params[i], args[i]->span);
+            }
+            cargs.push_back(std::move(c));
+        }
+        if (sit->second.ret) {
+            CCallFn f;
+            f.name = full;
+            f.args = std::move(cargs);
+            f.ret = *sit->second.ret;
+            f.is_async = sit->second.is_async;
+            return ce(std::move(f));
+        }
+        diag("cannot call method '" + name + "' of class '" + obj.name +
+                 "' here: its return type is not yet known (add a return type annotation)",
+             span);
+        return cbool(false);
+    }
+
     CExpr check_call(const ast::Expr& callee, const std::vector<ast::ExprPtr>& args, Span span) {
         // std-module and package functions: `net.connect(...)`, `http.get(...)`,
-        // `mypkg.fn(...)` (registry packages are exposed as `pkg__fn`)
+        // `mypkg.fn(...)`, `mod.sub.fn(...)` (modules expose functions under
+        // their mangled `<prefix>__<path>__<fn>` names)
         const ast::EMember* mem = std::get_if<ast::EMember>(&callee.v);
         if (mem) {
-            if (auto* mid = std::get_if<ast::EIdent>(&mem->obj->v)) {
-                if (contains_str(uses, mid->name)) {
-                    const std::string& m = mid->name;
-                    if (m == "net") return check_net_module(mem->name, args, span);
-                    if (m == "http") return check_http_module(mem->name, args, span);
-                    if (m == "fs") return check_fs_module(mem->name, args, span);
-                    if (m == "crypto") return check_crypto_module(mem->name, args, span);
-                    std::string full = m + "__" + mem->name;
+            std::vector<std::string> chain;
+            if (member_chain(callee, chain) && chain.size() >= 2 &&
+                contains_str(uses, chain[0])) {
+                const std::string& m = chain[0];
+                // statics on exported std-module classes: http.JsonValidator.string()
+                bool json_static =
+                    chain.size() == 3 && m == "http" && chain[1] == "JsonValidator";
+                if (!json_static) {
+                    if (chain.size() == 2) {
+                        if (m == "net") return check_net_module(chain[1], args, span);
+                        if (m == "http") return check_http_module(chain[1], args, span);
+                        if (m == "fs") return check_fs_module(chain[1], args, span);
+                        if (m == "crypto") return check_crypto_module(chain[1], args, span);
+                    }
+                    std::string full = use_prefix_of(m);
+                    for (size_t i = 1; i < chain.size(); ++i) full += "__" + chain[i];
                     if (sigs.count(full)) {
                         ast::Expr ident;
                         ident.span = span;
                         ident.v = ast::EIdent{full};
                         return check_call(ident, args, span);
                     }
-                    diag("module '" + m + "' has no function '" + mem->name + "'", span);
+                    diag("module '" + m + "' has no function '" + chain.back() + "'", span);
                     return cbool(false);
                 }
             }
@@ -2916,24 +3081,30 @@ public:
                 if (ot.tag == CTy::Tag::Object) {
                     if (auto r = check_http_object_method(std::move(oc), ot.object, name, args, span))
                         return std::move(*r);
-                    diag("class '" + ot.object.name + "' has no methods (marina objects are fields only)",
-                         span);
+                    if (auto r = check_user_method(std::move(oc), ot.object, name, args, span))
+                        return std::move(*r);
+                    diag("class '" + ot.object.name + "' has no method '" + name + "'", span);
                     return cbool(false);
                 }
                 diag("'" + name + "' is not supported", span);
                 return cbool(false);
             }
             // member calls on non-identifier objects (e.g. chained method
-            // calls): array methods and http std-module objects too
+            // calls): array methods, http std-module objects, class methods
             CExpr oc = check_expr(*mem->obj, false);
             CTy ot = expr_ty(oc);
             if (ot.tag == CTy::Tag::Array)
                 return check_array_method(std::move(oc), deref(ot.inner), name, args, span);
             if (ot.tag == CTy::Tag::Str) return check_str_method(std::move(oc), name, args, span);
-            if (ot.tag == CTy::Tag::Stream) return check_stream_method(std::move(oc), name, args, span);
+            if (ot.tag == CTy::Tag::Stream)
+                return check_stream_method(std::move(oc), name, args, span);
             if (ot.tag == CTy::Tag::Object) {
                 if (auto r = check_http_object_method(std::move(oc), ot.object, name, args, span))
                     return std::move(*r);
+                if (auto r = check_user_method(std::move(oc), ot.object, name, args, span))
+                    return std::move(*r);
+                diag("class '" + ot.object.name + "' has no method '" + name + "'", span);
+                return cbool(false);
             }
             diag("member access is only supported for 'console.log(...)' and array methods", span);
             return cbool(false);
@@ -3602,6 +3773,56 @@ public:
 // Entry points
 // ---------------------------------------------------------------------------
 
+/// Lower class constructors/methods into top-level functions before checking:
+///   `constructor(params)`  →  `Name__new(this: Name, params)`
+///   `method(args)`         →  `Name__method(this: Name, args)`
+/// Method bodies reference the instance as `this` (the hidden first
+/// parameter). Generic classes don't support constructors/methods yet —
+/// reported as diagnostics.
+std::vector<Diag> lower_classes(ast::Program& program) {
+    std::vector<Diag> diags;
+    std::vector<ast::FnDecl> hoisted;
+    for (auto& cl : program.classes) {
+        if (!cl.ctor && cl.methods.empty()) continue;
+        if (!cl.type_params.empty()) {
+            diags.push_back(
+                Diag{"generic classes do not support constructors or methods yet", cl.span});
+            continue;
+        }
+        ast::TyAnn self_ann;
+        self_ann.name = cl.name;
+        self_ann.span = cl.span;
+        auto make_this = [&]() {
+            ast::Param p;
+            p.name = "this";
+            p.ann = self_ann;
+            p.span = cl.span;
+            return p;
+        };
+        if (cl.ctor) {
+            ast::FnDecl f = *cl.ctor;
+            f.name = cl.name + "__new";
+            f.params.insert(f.params.begin(), make_this());
+            f.is_async = false;
+            hoisted.push_back(std::move(f));
+        }
+        for (auto& m : cl.methods) {
+            ast::FnDecl f = std::move(m);
+            f.name = cl.name + "__" + f.name;
+            f.params.insert(f.params.begin(), make_this());
+            f.is_async = false;
+            hoisted.push_back(std::move(f));
+        }
+        cl.ctor.reset();
+        cl.methods.clear();
+    }
+    // hoisted methods come first so their (inferred) return types are known
+    // by the time `main` and later-declared functions are checked
+    program.fns.insert(program.fns.begin(), std::make_move_iterator(hoisted.begin()),
+                       std::make_move_iterator(hoisted.end()));
+    return diags;
+}
+
 Checked check(const ast::Program& program) {
     std::vector<Diag> diags;
     Checked checked = check_with_diags(program, diags);
@@ -3612,11 +3833,21 @@ Checked check(const ast::Program& program) {
 /// Like `check`, but always returns the (possibly incomplete) `Checked`
 /// alongside diagnostics. Used by the language server, which still wants
 /// class/variable info from programs that contain errors.
-Checked check_with_diags(const ast::Program& program, std::vector<Diag>& diags_out) {
+Checked check_with_diags(const ast::Program& program_in, std::vector<Diag>& diags_out) {
+    // mutable copy: class methods/constructors are lowered into functions
+    ast::Program program = program_in;
+    {
+        std::vector<Diag> lower_diags = lower_classes(program);
+        diags_out.insert(diags_out.end(), std::make_move_iterator(lower_diags.begin()),
+                         std::make_move_iterator(lower_diags.end()));
+    }
     Checker c;
     for (const auto& [n, _] : program.uses) {
         (void)_;
         c.uses.push_back(n);
+    }
+    for (const auto& [alias, prefix] : program.use_prefixes) {
+        c.use_prefix[alias] = prefix;
     }
 
     // --- pass 0: register classes + interfaces (hoisting) ---
@@ -3703,6 +3934,7 @@ Checked check_with_diags(const ast::Program& program, std::vector<Diag>& diags_o
     bool has_async_main = false;
     bool has_sync_main = false;
     for (const auto& f : program.fns) {
+        c.cur_fn = f.name;
         if (f.name == "main") {
             if (f.is_async) {
                 if (has_sync_main) {

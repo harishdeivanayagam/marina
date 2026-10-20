@@ -231,11 +231,24 @@ struct FnDecl {
     Span span;
 };
 
-// `class Name<T> { field: T, ... }` — fields are public by default.
+// `class Name<T> { field: T, ... }` — fields are public by default; `private`
+// restricts access to the class's own methods/constructor.
+struct ClassField {
+    std::string name;
+    TyAnn ty;
+    bool is_private = false;
+    Span span;
+};
+
+// `class Name { ... }` — fields plus (optionally) a constructor and methods.
+// Methods and the constructor are lowered to top-level functions
+// (`Name__method` with a leading `this` parameter) before checking.
 struct ClassDecl {
     std::string name;
     std::vector<std::string> type_params;
-    std::vector<std::pair<std::string, TyAnn>> fields;
+    std::vector<ClassField> fields;
+    std::optional<FnDecl> ctor;
+    std::vector<FnDecl> methods;
     Span span;
 };
 
@@ -253,9 +266,13 @@ struct Program {
     std::vector<FnDecl> fns;
     std::vector<ClassDecl> classes;
     std::vector<InterfaceDecl> interfaces;
-    // Top-level `use <module>;` declarations: std modules (net, http) or
-    // wave registry packages.
+    // Top-level `use <module>;` declarations: std modules (net, http),
+    // local folder modules (`sample_mod/sub`), or wave registry packages.
     std::vector<std::pair<std::string, Span>> uses;
+    // For each use alias, the prefix used to mangle the module's functions
+    // (`sample_mod/sub` → alias `sub`, prefix `sample_mod__sub`). Aliases
+    // without an entry mangle to themselves (std modules, registry packages).
+    std::vector<std::pair<std::string, std::string>> use_prefixes;
 };
 
 } // namespace marina::ast
