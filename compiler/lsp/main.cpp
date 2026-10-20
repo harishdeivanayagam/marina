@@ -642,33 +642,18 @@ bool valid_utf8(const std::string& s) {
     return true;
 }
 
-// Replicates Rust `Path::ends_with(".tsm")`: a whole-path-component suffix
-// match, so "a/b/main.tsm" does NOT end with ".tsm" (only a component that is
-// exactly ".tsm" does).
+// True if the final path component has extension ".tsm" — i.e. Rust
+// `Path::extension() == Some("tsm")`. Note this is NOT `Path::ends_with`:
+// component-based suffix matching would reject "a/b/main.tsm" (only a file
+// literally named ".tsm" would pass), which flagged every valid marina file.
 bool path_ends_with_tsm(const std::string& p) {
-    std::vector<std::string> comps;
-    size_t i = 0;
-    bool has_root = !p.empty() && p[0] == '/';
-    if (has_root) i = 1;
-    size_t start = i;
-    auto push = [&](size_t b, size_t e) {
-        if (b >= e) return;
-        std::string c = p.substr(b, e - b);
-        if (c == ".") {
-            // Rust Path::components skips CurDir except at the very start of
-            // a relative path
-            if (comps.empty() && !has_root) comps.push_back(c);
-        } else if (c != "") {
-            comps.push_back(c);
-        }
-    };
-    for (; i <= p.size(); i++) {
-        if (i == p.size() || p[i] == '/') {
-            push(start, i);
-            start = i + 1;
-        }
-    }
-    return !comps.empty() && comps.back() == ".tsm";
+    size_t slash = p.find_last_of('/');
+    std::string fn = (slash == std::string::npos) ? p : p.substr(slash + 1);
+    // A leading dot (hidden file like ".tsm" or ".foo") is not an extension,
+    // matching the stem computation in check_document().
+    size_t dot = fn.find_last_of('.');
+    if (dot == std::string::npos || dot == 0) return false;
+    return fn.compare(dot, 4, ".tsm") == 0;
 }
 
 // Lex + parse + type-check a document and collect all diagnostics
