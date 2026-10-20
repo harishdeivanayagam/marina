@@ -1,0 +1,71 @@
+<div class="os-switch">
+  <div class="os-bar">
+    <div class="os-tabs" role="tablist" aria-label="Install command">
+      <button type="button" role="tab" id="os-tab-mac" data-os="mac" aria-selected="false" aria-controls="os-panel-mac">macOS</button>
+      <button type="button" role="tab" id="os-tab-linux" data-os="linux" aria-selected="false" aria-controls="os-panel-linux">Linux</button>
+      <button type="button" role="tab" id="os-tab-windows" data-os="windows" aria-selected="false" aria-controls="os-panel-windows">Windows</button>
+    </div>
+    <button type="button" class="copy-btn">copy</button>
+  </div>
+  <pre id="os-panel-mac" role="tabpanel" aria-labelledby="os-tab-mac" data-os="mac" hidden><code>xcode-select --install
+brew install cmake
+curl -fsSL https://marina-lang.org/install.sh | sh</code></pre>
+  <pre id="os-panel-linux" role="tabpanel" aria-labelledby="os-tab-linux" data-os="linux" hidden><code>sudo apt install build-essential cmake clang libsqlite3-dev git curl
+curl -fsSL https://marina-lang.org/install.sh | sh</code></pre>
+  <pre id="os-panel-windows" role="tabpanel" aria-labelledby="os-tab-windows" data-os="windows" hidden><code>irm https://marina-lang.org/install.ps1 | iex</code></pre>
+  <p class="os-note" data-os="mac" hidden>Then open a new terminal. <code>wave</code> is on <code>~/.local/bin</code>.</p>
+  <p class="os-note" data-os="linux" hidden>Then open a new terminal. <code>wave</code> is on <code>~/.local/bin</code>.</p>
+  <p class="os-note" data-os="windows" hidden>Builds inside WSL. Native Windows is not supported. After install, run <code>wsl wave</code>.</p>
+</div>
+<script>
+(function () {
+  var root = document.currentScript.previousElementSibling;
+  var tabs = root.querySelectorAll("[data-os][role='tab']");
+  var panels = root.querySelectorAll("pre[data-os]");
+  var notes = root.querySelectorAll(".os-note");
+  var copy = root.querySelector(".copy-btn");
+
+  function systemOs() {
+    var ua = navigator.userAgent || "";
+    var platform = (navigator.userAgentData && navigator.userAgentData.platform) || navigator.platform || "";
+    var blob = (platform + " " + ua).toLowerCase();
+    if (blob.indexOf("win") !== -1) return "windows";
+    if (blob.indexOf("mac") !== -1 || blob.indexOf("iphone") !== -1 || blob.indexOf("ipad") !== -1) return "mac";
+    return "linux";
+  }
+
+  function show(os) {
+    tabs.forEach(function (tab) {
+      var on = tab.getAttribute("data-os") === os;
+      tab.setAttribute("aria-selected", on ? "true" : "false");
+      tab.tabIndex = on ? 0 : -1;
+    });
+    panels.forEach(function (panel) {
+      panel.hidden = panel.getAttribute("data-os") !== os;
+    });
+    notes.forEach(function (note) {
+      note.hidden = note.getAttribute("data-os") !== os;
+    });
+  }
+
+  tabs.forEach(function (tab) {
+    tab.addEventListener("click", function () { show(tab.getAttribute("data-os")); });
+  });
+
+  copy.addEventListener("click", function () {
+    var panel = root.querySelector("pre[data-os]:not([hidden])");
+    var text = panel ? panel.innerText.replace(/\n$/, "") : "";
+    var done = function () {
+      copy.textContent = "copied";
+      setTimeout(function () { copy.textContent = "copy"; }, 1400);
+    };
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      navigator.clipboard.writeText(text).then(done, done);
+    } else {
+      done();
+    }
+  });
+
+  show(systemOs());
+})();
+</script>
