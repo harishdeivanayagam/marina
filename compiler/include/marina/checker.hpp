@@ -269,7 +269,7 @@ enum class ArrayOpKind {
 
 enum class HofKind { ForEach, Map, Filter, Reduce };
 
-enum class StrOpKind { CharAt, Substring };
+enum class StrOpKind { CharAt, CharCodeAt, Substring };
 
 // How the generated lambda is called by the runtime.
 enum class LambdaAbi {
@@ -391,7 +391,8 @@ struct CLambdaVal {
 struct CStrLen {
     CExprPtr v;
 };
-// `str.charAt(i)` / `str.substring(a, b)` — bootstrap primitives for the
+// `str.charAt(i)` / `str.charCodeAt(i)` / `str.substring(a, b)` —
+// bootstrap primitives for the
 // self-hosted compiler (byte-index based, matching the runtime).
 struct CStrMethod {
     StrOpKind op{};
@@ -580,6 +581,12 @@ struct CCryptoRandomHex {
 };
 struct CCryptoUuid {};
 
+// `String.fromCharCode(code)` — a 1-char string from a byte code unit.
+struct CStringFromCharCode {
+    CExprPtr v;
+};
+
+
 // ---- time std module ----
 enum class TimeKind { Now, NowSecs, NowNanos, Mono, Sleep, Format };
 struct CTimeCall {
@@ -638,7 +645,7 @@ struct CExpr {
                  CHttpFieldOp, CHttpValidate, CIfaceGet, CIfaceSetExpr, CIfaceCall,
                  CFsReadFile, CFsWriteFile, CFsExists, CFsReadDir, CFsMkdir,
                  CFsRemove, CCryptoSha256, CCryptoBase64, CCryptoRandomHex,
-                 CCryptoUuid, CTimeCall, COsCall,
+                 CCryptoUuid, CTimeCall, COsCall, CStringFromCharCode,
                  CSqlOpen, CSqlExec, CSqlQuery, CSqlClose>
         v;
 

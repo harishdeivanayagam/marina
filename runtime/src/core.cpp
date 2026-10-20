@@ -503,6 +503,13 @@ extern "C" bool marina_str_eq(const MValue* a, const MValue* b) {
     return mv_to_string(*a) == mv_to_string(*b);
 }
 
+// String.fromCharCode(code) — a 1-char string holding the single byte
+// `code` (truncating, matching the byte-index semantics of charAt /
+// charCodeAt).
+extern "C" void marina_string_from_code(int64_t code, MValue* out) {
+    out_mv(out, mv_str_owned(std::string(1, (char)(uint8_t)code)));
+}
+
 // ---------------------------------------------------------------------------
 // Process arguments (fs.args())
 // ---------------------------------------------------------------------------

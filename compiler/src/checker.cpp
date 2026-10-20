@@ -2177,6 +2177,7 @@ public:
         if (std::holds_alternative<CSqlQuery>(e.v))
             return cty_promise(cty_array(cty_interface("sql_Row")));
         if (std::holds_alternative<CSqlClose>(e.v)) return cty_void();
+        if (std::holds_alternative<CStringFromCharCode>(e.v)) return cty_str();
         if (auto* x = std::get_if<CTimeCall>(&e.v)) {
             switch (x->kind) {
                 case TimeKind::Now:
@@ -4491,6 +4492,23 @@ public:
                     cl.v = exptr(std::move(a));
                     return ce(std::move(cl));
                 }
+                if (o->name == "String") {
+                    if (name != "fromCharCode") {
+                        diag("String." + name + " is not supported (only String.fromCharCode)",
+                             span);
+                        return cbool(false);
+                    }
+                    if (args.size() != 1) {
+                        diag("String.fromCharCode takes exactly one argument", span);
+                        return cbool(false);
+                    }
+                    CExpr a = check_expr(*args[0], false);
+                    adapt_literal(a, cty_int(32, false));
+                    coerce(expr_ty(a), cty_int(32, false), args[0]->span);
+                    CStringFromCharCode f;
+                    f.v = exptr(std::move(a));
+                    return ce(std::move(f));
+                }
                 // other member calls: array methods, streams, http std-module objects
                 CExpr oc = check_expr(*mem->obj, false);
                 CTy ot = expr_ty(oc);
@@ -5022,20 +5040,21 @@ public:
     /// self-hosted compiler (byte-index based, like the runtime).
     CExpr check_str_method(CExpr s, const std::string& name, const std::vector<ast::ExprPtr>& args,
                            Span span) {
-        if (name == "charAt") {
+        if (name == "charAt" || name == "charCodeAt") {
             if (args.size() != 1) {
-                diag("string.charAt takes (index)", span);
+                diag("string." + name + " takes (index)", span);
                 return cbool(false);
             }
             CExpr i = check_expr(*args[0], false);
             if (!is_i32(expr_ty(i))) {
-                diag("string.charAt index must be Int32", span);
+                diag("string." + name + " index must be Int32", span);
             }
             CStrMethod m;
-            m.op = StrOpKind::CharAt;
+            m.op = name == "charAt" ? StrOpKind::CharAt : StrOpKind::CharCodeAt;
             m.obj = exptr(std::move(s));
             m.args.push_back(std::move(i));
-            m.ret = cty_int();
+            // JS parity: charAt is the 1-char string, charCodeAt the code
+            m.ret = name == "charAt" ? cty_str() : cty_int();
             return ce(std::move(m));
         }
         if (name == "substring") {
@@ -5058,7 +5077,9 @@ public:
             m.ret = cty_str();
             return ce(std::move(m));
         }
-        diag("strings have no method '" + name + "' (available: length, charAt, substring)", span);
+        diag("strings have no method '" + name +
+                 "' (available: length, charAt, charCodeAt, substring)",
+             span);
         return cbool(false);
     }
 

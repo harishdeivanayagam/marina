@@ -411,6 +411,7 @@ const char* DECLARES =
     "declare ptr @marina_string_concat(ptr, ptr)\n"
     "declare i64 @marina_string_len(ptr)\n"
     "declare i64 @marina_string_charcode_at(ptr, i64)\n"
+    "declare void @marina_string_from_code(i64, ptr)\n"
     "declare ptr @marina_string_substring(ptr, i64, i64)\n"
     "declare ptr @marina_args()\n"
     "declare ptr @marina_to_string(ptr)\n"
@@ -2250,6 +2251,19 @@ struct Gen {
             std::string p = borrow(s);
             CgVal v;
             if (x->op == StrOpKind::CharAt) {
+                // JS parity: the 1-char string at byte index i (an out-of
+                // -range index yields "", like JS). substring clamps, so
+                // this is just [i, i+1).
+                CgVal iv = cg_expr(x->args[0]);
+                std::string i = sext_i64(iv);
+                std::string i1 = fresh("sc1");
+                emit(i1 + " = add i64 " + i + ", 1");
+                std::string r = fresh("sc");
+                emit(r + " = call ptr @marina_string_substring(ptr " + p + ", i64 " + i +
+                     ", i64 " + i1 + ")");
+                v = CgVal{CgTy::Str, r, true};
+                discard(iv);
+            } else if (x->op == StrOpKind::CharCodeAt) {
                 CgVal iv = cg_expr(x->args[0]);
                 std::string i = sext_i64(iv);
                 std::string n = fresh("sc");
@@ -2270,6 +2284,14 @@ struct Gen {
             }
             // borrow already queued the string's single release
             return v;
+        }
+        if (auto* x = std::get_if<CStringFromCharCode>(&e.v)) {
+            CgVal v = cg_expr(*x->v);
+            std::string i = sext_i64(v);
+            std::string out = alloca("%mv");
+            emit("call void @marina_string_from_code(i64 " + i + ", ptr " + out + ")");
+            discard(v);
+            return mv_load(out, CgTy::Str);
         }
         if (std::get_if<CFsArgs>(&e.v)) {
             std::string r = fresh("arg");

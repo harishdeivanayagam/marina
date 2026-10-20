@@ -1,0 +1,19 @@
+let a = 5
+let b = 6
+
+let c = "Hello, World!"
+
+console.log(a + b)
+
+// charAt(i) gives the 1-char string at byte index i (JS semantics;
+// "" when out of bounds), charCodeAt(i) the numeric code unit
+let text = ``
+for (let i = 0; i < c.length; i++) {
+    console.log(c.charAt(i))
+    text = `${text}${c.charAt(i)}`
+}
+console.log(text)
+
+// String.fromCharCode turns a code unit back into a 1-char string
+let fromCodes = `${String.fromCharCode(72)}${String.fromCharCode(105)}`
+console.log(fromCodes)

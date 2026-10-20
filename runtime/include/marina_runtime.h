@@ -147,6 +147,10 @@ int64_t marina_string_len(const void* s);
 /* Byte (code unit) at byte index i, 0 when out of bounds (borrowed). */
 int64_t marina_string_charcode_at(const void* s, int64_t i);
 
+/* String.fromCharCode(code) — a 1-char string holding the single byte
+ * `code` (truncating, byte semantics like charAt/charCodeAt). */
+void marina_string_from_code(int64_t code, MValue* out);
+
 /* Substring over byte indices [start, end), clamped to the string; an
  * end below start yields an empty string. Returns a new owned string. */
 void* marina_string_substring(const void* s, int64_t start, int64_t end);

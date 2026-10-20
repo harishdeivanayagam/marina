@@ -17,8 +17,9 @@ Language support for **marina** (`.tsm`) programs in Cursor / VS Code.
   and after `.`:
   - std modules (`net`, `http`, `fs`, `crypto`, `sql`) and their members with
     signature + docs, e.g. `crypto.sha256(data: String): String`
-  - `console.log`, array methods (`push`, `map`, `filter`, `reduce`, …),
-    string methods (`length`, `charAt`, `substring`) and stream methods
+  - `console.log`, `String.fromCharCode`, array methods (`push`, `map`,
+    `filter`, `reduce`, …), string methods (`length`, `charAt`, `charCodeAt`,
+    `substring`) and stream methods
   - fields of class instances and ghost-class object literals
   - keywords, builtin types (`Int32`, `Float64`, …), `setTimeout` / `Promise`,
     and every function, class, interface and variable declared in the file
