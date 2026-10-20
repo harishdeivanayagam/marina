@@ -744,7 +744,7 @@ Implementation notes: `Map<V>` keeps two parallel private arrays (`keyList: Arra
 
 ### `rand` — randomness, written in Marina itself
 
-Like `map`, the whole module is **Marina code** (`stdlib/rand/main.tsm`). A `Rand` holds a 64-bit linear congruential state (Knuth's MMIX constants) advanced with multiply/add — Marina has no bit-shift operators, but an LCG only needs multiply/add (which wrap at 64 bits, exactly what an LCG wants) and modulo extraction. Array helpers draw from an independent 32-bit stream, since integer widths do not convert to each other and array indices must be `Int32`.
+Like `map`, the whole module is **Marina code** (`stdlib/rand/main.tsm`). A `Rand` holds a 64-bit linear congruential state (Knuth's MMIX constants) advanced with multiply/add — Marina has no bit-shift operators, but an LCG only needs multiply/add (which wrap at 64 bits, exactly what an LCG wants) and modulo extraction. The array helpers draw from an independent 32-bit stream seeded from `/dev/urandom`, since integer widths do not convert to each other and array indices must be `Int32`.
 
 ```ts
 import rand
@@ -769,7 +769,7 @@ console.log(a.below(1000) == b.below(1000))        // true
 
 API:
 - `rand.newSeeded() -> Rand` — clock-seeded (the usual way in)
-- `rand.newRand(seed: Int64) -> Rand` — reproducible sequences from an explicit seed (any Int64, including 0)
+- `rand.newRand(seed: Int64) -> Rand` — reproducible `Int64` sequences from an explicit seed (any Int64, including 0); the `Int32` stream is urandom-seeded per instance and not reproducible
 - `next() -> Int64` — the raw state; `below(n: Int64) -> Int64`; `range(lo: Int64, hi: Int64) -> Int64`
 - `float() -> Float64` — uniform `[0, 1)` with 48 bits of precision; `bool() -> bool`
 - `int(max: Int32) -> Int32` — uniform `[0, max)` from the Int32 stream
