@@ -612,8 +612,8 @@ std::optional<CTy> numeric_alias(const std::string& name) {
     if (name == "uint32" || name == "UInt32" || name == "u32") return cty_int(32, true);
     if (name == "uint64" || name == "UInt64" || name == "u64") return cty_int(64, true);
     if (name == "float32" || name == "Float32" || name == "f32") return cty_float(32);
-    if (name == "float" || name == "float64" || name == "Float64" || name == "f64" || name == "double" ||
-        name == "number")
+    if (name == "float" || name == "float64" || name == "Float64" || name == "f64" ||
+        name == "double")
         return cty_float(64);
     return std::nullopt;
 }
@@ -1227,6 +1227,14 @@ public:
         const std::string& name = ann.name;
         bool has_args = !ann.args.empty();
         CTy t;
+        if (name == "number") {
+            // TypeScript-ism: Marina has no `number` — inference picks the
+            // type (`let n = 10` is Int32), or name Int32/Float64 exactly
+            diag("'number' is not a Marina type — use Int32 or Float64 "
+                 "(or drop the annotation: `let n = 10` infers Int32)",
+                 ann.span);
+            return cty_float(64);
+        }
         if (auto num = numeric_alias(name)) {
             t = *num;
         } else if (name == "string" || name == "String") {
