@@ -8,7 +8,7 @@
 //     (lex, parse and type-check errors, plus the strict naming rules)
 //   * textDocument/hover → class shape info (fields + types, ghost classes)
 //   * textDocument/completion → std-module members after a dot (console,
-//     net, http, fs, crypto, sql, streams), array/string methods, class
+//     net, http, fs, crypto, time, os, sql, streams), array/string methods, class
 //     fields; keywords, types, std modules, builtins and program-declared
 //     functions/classes/variables at the top level
 //
@@ -1053,6 +1053,31 @@ Json member_completions(const std::string& receiver, const ir::Checked& checked)
         add("base64Decode", 3, "crypto.base64Decode(data: String): String", "Base64-decode (lossy UTF-8).");
         add("randomHex", 3, "crypto.randomHex(numBytes: Int32): String", "Cryptographically random hex from /dev/urandom.");
         add("uuid", 3, "crypto.uuid(): String", "Random UUID v4.");
+    } else if (receiver == "time") {
+        add("now", 3, "time.now(): Int64", "Unix epoch milliseconds (wall clock).");
+        add("nowSecs", 3, "time.nowSecs(): Int64", "Unix epoch seconds (wall clock).");
+        add("nowNanos", 3, "time.nowNanos(): Int64", "Unix epoch nanoseconds (wall clock).");
+        add("mono", 3, "time.mono(): Int64", "Monotonic milliseconds — for measuring elapsed time.");
+        add("sleep", 3, "time.sleep(ms: Int64): Void", "Block the calling thread for `ms` milliseconds.");
+        add("format", 3, "time.format(ms: Int64): String", "ISO-8601 UTC string for epoch milliseconds.");
+    } else if (receiver == "os") {
+        add("platform", 3, "os.platform(): String", "\"macos\", \"linux\" or \"windows\".");
+        add("arch", 3, "os.arch(): String", "Machine architecture, e.g. \"arm64\", \"x86_64\".");
+        add("hostname", 3, "os.hostname(): String", "The machine's host name.");
+        add("cwd", 3, "os.cwd(): String", "Current working directory.");
+        add("tmpdir", 3, "os.tmpdir(): String", "$TMPDIR or \"/tmp\".");
+        add("pid", 3, "os.pid(): Int64", "Process id.");
+        add("env", 3, "os.env(name: String): String", "Environment variable; panics when unset.");
+        add("envOr", 3, "os.envOr(name: String, fallback: String): String", "Environment variable or the fallback when unset.");
+        add("setEnv", 3, "os.setEnv(name: String, value: String): Void", "Set (or overwrite) an environment variable.");
+        add("unsetEnv", 3, "os.unsetEnv(name: String): Void", "Remove an environment variable.");
+        add("exec", 3, "os.exec(command: String): String", "Run via /bin/sh and capture stdout; panics on a non-zero exit status.");
+        add("exit", 3, "os.exit(code: Int64): Void", "Terminate the process with the given exit status.");
+    } else if (receiver == "rand") {
+        add("newSeeded", 3, "rand.newSeeded(): rand.Rand", "A generator seeded from the wall + monotonic clocks.");
+        add("newRand", 3, "rand.newRand(seed: Int64): rand.Rand", "A generator from an explicit seed (same seed, same sequence).");
+        add("pick", 3, "rand.pick<T>(r: rand.Rand, items: Array<T>): T", "A random element of a non-empty array.");
+        add("shuffle", 3, "rand.shuffle<T>(r: rand.Rand, items: Array<T>): Array<T>", "Fisher-Yates shuffle of a copy.");
     } else if (receiver == "sql") {
         add("Connection", 7, "class sql.Connection",
             "`new sql.Connection(\"sqlite\", \"path.db\")` with `execute`, `query` and `close`.");
@@ -1132,7 +1157,8 @@ Json global_completions(const ast::Program& program, const ir::Checked& checked)
                                   "Float32", "Float64", "bool",   "String"};
     for (const char* ty : types) add(ty, 7, "type", "");
 
-    static const char* modules[] = {"net", "http", "fs", "crypto", "sql", "map"};
+    static const char* modules[] = {"net", "http", "fs", "crypto", "time",
+                                    "os", "sql", "map", "rand"};
     for (const char* m : modules)
         add(m, 9, "std module", "Import with `import " + std::string(m) + "`.");
     add("console", 9, "builtin", "Console output: `console.log(value)`.");
@@ -1265,7 +1291,8 @@ Json completion(const std::string& text, int64_t line, int64_t col) {
                                       "bool",    "String"};
         for (const char* ty : types)
             fallback_items.push_back(completion_item(ty, 7, "type", ""));
-        static const char* modules[] = {"net", "http", "fs", "crypto", "sql"};
+        static const char* modules[] = {"net", "http", "fs", "crypto", "time",
+                                        "os", "sql", "map", "rand"};
         for (const char* m : modules)
             fallback_items.push_back(completion_item(m, 9, "std module", ""));
         return Json::array(std::move(fallback_items));

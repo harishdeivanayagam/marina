@@ -2177,6 +2177,34 @@ public:
         if (std::holds_alternative<CSqlQuery>(e.v))
             return cty_promise(cty_array(cty_interface("sql_Row")));
         if (std::holds_alternative<CSqlClose>(e.v)) return cty_void();
+        if (auto* x = std::get_if<CTimeCall>(&e.v)) {
+            switch (x->kind) {
+                case TimeKind::Now:
+                case TimeKind::NowSecs:
+                case TimeKind::NowNanos:
+                case TimeKind::Mono: return cty_int(64, false);
+                case TimeKind::Format: return cty_str();
+                case TimeKind::Sleep: return cty_void();
+            }
+            return cty_void();
+        }
+        if (auto* x = std::get_if<COsCall>(&e.v)) {
+            switch (x->kind) {
+                case OsKind::Platform:
+                case OsKind::Arch:
+                case OsKind::Hostname:
+                case OsKind::Cwd:
+                case OsKind::Tmpdir:
+                case OsKind::EnvGet:
+                case OsKind::EnvGetOr:
+                case OsKind::Exec: return cty_str();
+                case OsKind::Pid: return cty_int(64, false);
+                case OsKind::EnvSet:
+                case OsKind::EnvUnset:
+                case OsKind::Exit: return cty_void();
+            }
+            return cty_void();
+        }
         return cty_void();
     }
 
@@ -2457,7 +2485,8 @@ public:
             std::string cname;
             bool is_std_alias = path.size() == 2 &&
                                 (path[0] == "net" || path[0] == "http" || path[0] == "fs" ||
-                                 path[0] == "crypto" || path[0] == "sql");
+                                 path[0] == "crypto" || path[0] == "sql" ||
+                                 path[0] == "time" || path[0] == "os");
             if (path.size() == 1) {
                 cname = path[0];
             } else if (path.size() == 2 && !is_std_alias && contains_str(uses, path[0])) {
@@ -3881,6 +3910,140 @@ public:
         return cbool(false);
     }
 
+    // ------------------------------------------------------------------
+    // std modules: time
+    // ------------------------------------------------------------------
+
+    CExpr check_time_module(const std::string& name, const std::vector<ast::ExprPtr>& args,
+                            Span span) {
+        auto no_args = [&](const char* sig) {
+            if (!args.empty()) diag(std::string(sig) + " takes no arguments", span);
+        };
+        if (name == "now" || name == "nowSecs" || name == "nowNanos" || name == "mono") {
+            no_args(("time." + name).c_str());
+            TimeKind kind = name == "now"       ? TimeKind::Now
+                            : name == "nowSecs" ? TimeKind::NowSecs
+                            : name == "nowNanos" ? TimeKind::NowNanos
+                                                 : TimeKind::Mono;
+            return ce(CTimeCall{kind, nullptr});
+        }
+        if (name == "sleep") {
+            if (args.size() != 1) {
+                diag("time.sleep takes (ms)", span);
+                return cbool(false);
+            }
+            CExpr v = check_expr(*args[0], false);
+            adapt_literal(v, cty_int(64, false));
+            coerce(expr_ty(v), cty_int(64, false), args[0]->span);
+            CTimeCall c;
+            c.kind = TimeKind::Sleep;
+            c.arg = exptr(std::move(v));
+            return ce(std::move(c));
+        }
+        if (name == "format") {
+            if (args.size() != 1) {
+                diag("time.format takes (ms)", span);
+                return cbool(false);
+            }
+            CExpr v = check_expr(*args[0], false);
+            adapt_literal(v, cty_int(64, false));
+            coerce(expr_ty(v), cty_int(64, false), args[0]->span);
+            CTimeCall c;
+            c.kind = TimeKind::Format;
+            c.arg = exptr(std::move(v));
+            return ce(std::move(c));
+        }
+        diag("time." + name +
+                 " is not supported (time has now, nowSecs, nowNanos, mono, sleep, format)",
+             span);
+        return cbool(false);
+    }
+
+    // ------------------------------------------------------------------
+    // std modules: os
+    // ------------------------------------------------------------------
+
+    CExpr check_os_module(const std::string& name, const std::vector<ast::ExprPtr>& args,
+                          Span span) {
+        auto no_args = [&](const char* sig) {
+            if (!args.empty()) diag(std::string(sig) + " takes no arguments", span);
+        };
+        // string-returning no-arg queries
+        if (name == "platform" || name == "arch" || name == "hostname" ||
+            name == "cwd" || name == "tmpdir") {
+            no_args(("os." + name).c_str());
+            OsKind kind = name == "platform"   ? OsKind::Platform
+                          : name == "arch"     ? OsKind::Arch
+                          : name == "hostname" ? OsKind::Hostname
+                          : name == "cwd"      ? OsKind::Cwd
+                                               : OsKind::Tmpdir;
+            return ce(COsCall{kind, nullptr, nullptr});
+        }
+        if (name == "pid") {
+            no_args("os.pid");
+            return ce(COsCall{OsKind::Pid, nullptr, nullptr});
+        }
+        auto str_arg = [&](size_t i) {
+            CExpr v = check_expr(*args[i], false);
+            coerce(expr_ty(v), cty_str(), args[i]->span);
+            return v;
+        };
+        if (name == "env") {
+            if (args.size() != 1) {
+                diag("os.env takes (name)", span);
+                return cbool(false);
+            }
+            return ce(COsCall{OsKind::EnvGet, exptr(str_arg(0)), nullptr});
+        }
+        if (name == "envOr") {
+            if (args.size() != 2) {
+                diag("os.envOr takes (name, fallback)", span);
+                return cbool(false);
+            }
+            CExpr a = str_arg(0);
+            CExpr b = str_arg(1);
+            return ce(COsCall{OsKind::EnvGetOr, exptr(std::move(a)), exptr(std::move(b))});
+        }
+        if (name == "setEnv") {
+            if (args.size() != 2) {
+                diag("os.setEnv takes (name, value)", span);
+                return cbool(false);
+            }
+            CExpr a = str_arg(0);
+            CExpr b = str_arg(1);
+            return ce(COsCall{OsKind::EnvSet, exptr(std::move(a)), exptr(std::move(b))});
+        }
+        if (name == "unsetEnv") {
+            if (args.size() != 1) {
+                diag("os.unsetEnv takes (name)", span);
+                return cbool(false);
+            }
+            return ce(COsCall{OsKind::EnvUnset, exptr(str_arg(0)), nullptr});
+        }
+        if (name == "exec") {
+            if (args.size() != 1) {
+                diag("os.exec takes (command)", span);
+                return cbool(false);
+            }
+            return ce(COsCall{OsKind::Exec, exptr(str_arg(0)), nullptr});
+        }
+        if (name == "exit") {
+            if (args.size() != 1) {
+                diag("os.exit takes (code)", span);
+                return cbool(false);
+            }
+            CExpr v = check_expr(*args[0], false);
+            adapt_literal(v, cty_int(64, false));
+            coerce(expr_ty(v), cty_int(64, false), args[0]->span);
+            return ce(COsCall{OsKind::Exit, exptr(std::move(v)), nullptr});
+        }
+        diag("os." + name +
+                 " is not supported (os has platform, arch, hostname, cwd, tmpdir, pid, env, "
+                 "envOr, setEnv, unsetEnv, exec, exit)",
+             span);
+        return cbool(false);
+    }
+
     /// Collect a dotted member chain: `a.b.c` → ["a","b","c"]. Returns false
     /// when the expression isn't a pure identifier/member chain.
     static bool member_chain(const ast::Expr& e, std::vector<std::string>& out) {
@@ -4264,6 +4427,8 @@ public:
                         if (m == "http") return check_http_module(chain[1], args, span);
                         if (m == "fs") return check_fs_module(chain[1], args, span);
                         if (m == "crypto") return check_crypto_module(chain[1], args, span);
+                        if (m == "time") return check_time_module(chain[1], args, span);
+                        if (m == "os") return check_os_module(chain[1], args, span);
                     }
                     std::string full = use_prefix_of(m);
                     for (size_t i = 1; i < chain.size(); ++i) full += "__" + chain[i];

@@ -418,6 +418,54 @@ void* marina_sql_query_async(void* o, const MValue* sql, size_t n_binds,
 /* `db.close()` — closes the database connection. */
 void marina_sql_close(void* o);
 
+/* ------------------------------------------------------------------ */
+/* std module: time                                                    */
+/* ------------------------------------------------------------------ */
+
+/* `time.now()` — Unix epoch milliseconds (wall clock) as an Int64. */
+void marina_time_now(MValue* out);
+/* `time.nowSecs()` — Unix epoch seconds (wall clock). */
+void marina_time_now_secs(MValue* out);
+/* `time.nowNanos()` — Unix epoch nanoseconds (wall clock). */
+void marina_time_now_nanos(MValue* out);
+/* `time.mono()` — monotonic milliseconds (for measuring elapsed time). */
+void marina_time_mono(MValue* out);
+/* `time.sleep(ms)` — block the calling thread for ms milliseconds. */
+void marina_time_sleep(int64_t ms);
+/* `time.format(ms)` — ISO-8601 UTC string for epoch milliseconds,
+ * e.g. "2026-10-20T15:04:05.123Z". */
+void marina_time_format(int64_t ms, MValue* out);
+
+/* ------------------------------------------------------------------ */
+/* std module: os                                                      */
+/* ------------------------------------------------------------------ */
+
+/* `os.platform()` — "macos", "linux" or "windows". */
+void marina_os_platform(MValue* out);
+/* `os.arch()` — machine architecture ("arm64", "x86_64", ...). */
+void marina_os_arch(MValue* out);
+/* `os.hostname()` — the machine's host name. */
+void marina_os_hostname(MValue* out);
+/* `os.cwd()` — current working directory. */
+void marina_os_cwd(MValue* out);
+/* `os.tmpdir()` — $TMPDIR or "/tmp". */
+void marina_os_tmpdir(MValue* out);
+/* `os.pid()` — process id. */
+void marina_os_pid(MValue* out);
+/* `os.env(name)` — panics when unset. */
+void marina_os_env(const MValue* name, MValue* out);
+/* `os.envOr(name, fallback)` — fallback when unset. */
+void marina_os_env_or(const MValue* name, const MValue* fallback, MValue* out);
+/* `os.setEnv(name, value)`. */
+void marina_os_set_env(const MValue* name, const MValue* value);
+/* `os.unsetEnv(name)`. */
+void marina_os_unset_env(const MValue* name);
+/* `os.exec(command)` — run via /bin/sh, capture stdout; panics on a
+ * non-zero exit status. */
+void marina_os_exec(const MValue* cmd, MValue* out);
+/* `os.exit(code)` — terminate the process. */
+void marina_os_exit(int64_t code);
+
 #ifdef __cplusplus
 } /* extern "C" */
 #endif

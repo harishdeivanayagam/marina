@@ -21,7 +21,7 @@ marina/
 │   ├── lsp/main.cpp           # LSP server (see "Editor support" below)
 │   └── tools/                 # tokdump / astdump debug tools
 ├── runtime/                   # runtime staticlib linked into every binary
-│   └── src/                   # ARC, promises, event loop, objects, printing, net/http/fs/crypto/sql std modules
+│   └── src/                   # ARC, promises, event loop, objects, printing, net/http/fs/crypto/sql/time/os std modules
 ├── wave/                      # the package manager & build tool (`wave run`, …)
 ├── editors/                   # "marina-lsp" VSIX extension for Cursor/VS Code
 └── CMakeLists.txt             # CMake build (C++20)
@@ -119,7 +119,7 @@ Projects are described by a **`package.json`** in the project root:
 }
 ```
 
-**The registry model** — like Rust's crates.io, not node_modules. Packages are installed *once* into a global registry (default `~/.wave/registry/<name>/<version>/main.tsm`, override with the `WAVE_REGISTRY` env var) and every project on the machine uses that copy. There is no per-project dependency folder to commit or vendor. A package is a directory (or git repo) with a `main.tsm` entry file and optional `package.json` metadata (`name`, `version`); `wave add` copies it into the registry and records the dependency. In code, `import my-pkg` merges the package behind a namespace: `my-pkg.fn(...)` calls an `export`ed function. A function or class without `export` is not visible to other modules (`no exported member 'fn' from module 'my-pkg'`). Packages expose functions and classes only — no top-level statements, no `main`, and no dependencies on other packages yet (std modules `net`/`http`/`fs`/`crypto`/`sql`/`map` are allowed).
+**The registry model** — like Rust's crates.io, not node_modules. Packages are installed *once* into a global registry (default `~/.wave/registry/<name>/<version>/main.tsm`, override with the `WAVE_REGISTRY` env var) and every project on the machine uses that copy. There is no per-project dependency folder to commit or vendor. A package is a directory (or git repo) with a `main.tsm` entry file and optional `package.json` metadata (`name`, `version`); `wave add` copies it into the registry and records the dependency. In code, `import my-pkg` merges the package behind a namespace: `my-pkg.fn(...)` calls an `export`ed function. A function or class without `export` is not visible to other modules (`no exported member 'fn' from module 'my-pkg'`). Packages expose functions and classes only — no top-level statements, no `main`, and no dependencies on other packages yet (std modules `net`/`http`/`fs`/`crypto`/`sql`/`time`/`os`/`map`/`rand` are allowed).
 
 ### One-off files
 
@@ -496,7 +496,7 @@ The `catch` binding is a `string` (the error message) and is optional — a bare
 
 Define `main` (sync or `async`). If it is `async`, the runtime drives its promise to completion before exiting.
 
-## Standard libraries: `net`, `http`, `fs`, `crypto`, `sql` and `map`
+## Standard libraries: `net`, `http`, `fs`, `crypto`, `sql`, `map`, `time`, `os` and `rand`
 
 Std modules ship with the compiler and runtime — bring them in with a top-level `import` statement (`import http`). **`http` is built on top of `net`**: its client literally composes `net.connect`/`write`/`read_all`/`close` in the runtime. **`map` is different: it is written in Marina itself** (`stdlib/map/main.tsm`) — a generic `Map<V>` class monomorphized per value type, exactly like a user-defined module.
 
@@ -630,6 +630,58 @@ let id = crypto.uuid()                       // random v4 UUID (8-4-4-4-12)
 
 - `crypto.sha256(data) -> string`, `crypto.base64Encode(data) -> string`, `crypto.base64Decode(data) -> string`, `crypto.randomHex(numBytes) -> string`, `crypto.uuid() -> string`
 
+### `time` — clocks, sleep and formatting
+
+Pure C++ (POSIX `clock_gettime`/`std::chrono` under the hood). The `now`-family reads the wall clock; `mono` is immune to system clock changes and meant for measuring elapsed time. Everything is `Int64`.
+
+```ts
+import time
+
+console.log(time.now())                     // epoch milliseconds
+console.log(time.nowSecs())                 // epoch seconds
+console.log(time.nowNanos())                // epoch nanoseconds
+
+let start = time.mono()                     // monotonic clock
+time.sleep(50)                              // block for 50ms
+console.log(time.mono() - start)            // ~50
+
+console.log(time.format(0))                 // 1970-01-01T00:00:00.000Z
+console.log(time.format(time.now()))        // 2026-10-20T15:04:05.123Z
+```
+
+- `time.now() -> Int64` (epoch millis), `time.nowSecs() -> Int64`, `time.nowNanos() -> Int64`, `time.mono() -> Int64`
+- `time.sleep(ms: Int64) -> void` — blocks the calling thread (negatives treated as 0); use `setTimeout` for event-loop-friendly waits
+- `time.format(ms: Int64) -> string` — ISO-8601 UTC for epoch milliseconds
+
+### `os` — platform, environment and process
+
+Pure C++/POSIX. Failures panic and are catchable with `try`/`catch` — `os.env` panics on an unset name, so prefer `os.envOr` when a variable may be absent.
+
+```ts
+import os
+
+console.log(os.platform())                  // macos | linux | windows
+console.log(os.arch())                      // arm64 | x86_64 | ...
+console.log(os.hostname())
+console.log(os.cwd())
+console.log(os.tmpdir())                    // $TMPDIR or /tmp
+console.log(os.pid())
+
+os.setEnv("GREETING", "hi")                 // set (or overwrite)
+console.log(os.env("GREETING"))             // hi
+console.log(os.envOr("MISSING", "fallback"))
+os.unsetEnv("GREETING")
+
+console.log(os.exec("echo rendered by /bin/sh")) // captures stdout
+os.exit(0)                                  // terminate with an exit status
+```
+
+- `os.platform() -> string`, `os.arch() -> string`, `os.hostname() -> string`, `os.cwd() -> string`, `os.tmpdir() -> string`, `os.pid() -> Int64`
+- `os.env(name) -> string` (panics when unset), `os.envOr(name, fallback) -> string`
+- `os.setEnv(name, value) -> void`, `os.unsetEnv(name) -> void`
+- `os.exec(command) -> string` — runs via `/bin/sh`, returns stdout (stderr passes through); a non-zero exit status panics
+- `os.exit(code: Int64) -> void`
+
 ### `sql` — databases (SQLite)
 
 SQL with prepared statements via tagged templates. In v0.2 the only driver is **SQLite** (FFI against the system `libsqlite3` — macOS ships it; Linux needs the `sqlite3` package). `mysql`, `pg` and `mariadb` are accepted driver names but abort at compile time (or runtime panic) until implemented.
@@ -690,6 +742,41 @@ API:
 
 Implementation notes: `Map<V>` keeps two parallel private arrays (`keyList: Array<string>`, `valList: Array<V>`) in sync and does a linear scan for lookup — fine for the small collections Marina targets. Everything (including the `private indexOf` helper) is ordinary Marina: a generic class with methods, exported through a module.
 
+### `rand` — randomness, written in Marina itself
+
+Like `map`, the whole module is **Marina code** (`stdlib/rand/main.tsm`). A `Rand` holds a 64-bit linear congruential state (Knuth's MMIX constants) advanced with multiply/add — Marina has no bit-shift operators, but an LCG only needs multiply/add (which wrap at 64 bits, exactly what an LCG wants) and modulo extraction. Array helpers draw from an independent 32-bit stream, since integer widths do not convert to each other and array indices must be `Int32`.
+
+```ts
+import rand
+
+let r = rand.newSeeded()      // seeded from the wall + monotonic clocks
+
+console.log(r.next())         // raw signed Int64
+console.log(r.below(100))     // 0..99
+console.log(r.range(1, 7))    // dice roll
+console.log(r.float())        // 0.0..<1.0, 48 bits of precision
+console.log(r.bool())
+console.log(r.int(10))        // 0..9 as Int32 (sized for array indexing)
+
+let fruits = ["apple", "banana", "cherry", "date"]
+console.log(rand.pick<string>(r, fruits))          // random element
+console.log(rand.shuffle<Int32>(r, [1, 2, 3, 4]))  // Fisher–Yates copy
+
+let a = rand.newRand(42)      // explicit seed: same seed, same sequence
+let b = rand.newRand(42)
+console.log(a.below(1000) == b.below(1000))        // true
+```
+
+API:
+- `rand.newSeeded() -> Rand` — clock-seeded (the usual way in)
+- `rand.newRand(seed: Int64) -> Rand` — reproducible sequences from an explicit seed (any Int64, including 0)
+- `next() -> Int64` — the raw state; `below(n: Int64) -> Int64`; `range(lo: Int64, hi: Int64) -> Int64`
+- `float() -> Float64` — uniform `[0, 1)` with 48 bits of precision; `bool() -> bool`
+- `int(max: Int32) -> Int32` — uniform `[0, max)` from the Int32 stream
+- `rand.pick<T>(r, items: Array<T>) -> T` — random element (throws on empty)
+- `rand.shuffle<T>(r, items: Array<T>) -> Array<T>` — Fisher–Yates shuffle of a copy; the input array is untouched
+- Invalid inputs (empty arrays, non-positive bounds) `throw` and are catchable with `try`/`catch`
+
 ## How a program is compiled
 
 1. **Lex & parse** → AST
@@ -747,11 +834,14 @@ Marina ships its own language server (`marina-lsp`, in `compiler/lsp/main.cpp`) 
 | `examples/map-demo.tsm` | `import map`: the std `Map<V>` dictionary — `newMap`, `set`/`get`/`getOr`/`has`/`delete`/`clear`, `size`/`keys`/`values` getters, overwrite-on-set, key iteration, one instantiation per value type |
 | `examples/try-catch.tsm` | `try`/`catch`/`throw`: catching thrown strings, catching runtime panics, the catch binding, propagation across calls, `return` inside a `try` |
 | `examples/fs-crypto.tsm` | `import fs` (write/read/exists/mkdir/readDir/remove) and `import crypto` (sha256, base64, randomHex, uuid) |
+| `examples/time-os-demo.tsm` | `import time` (clocks, `sleep`, ISO-8601 `format`) and `import os` (platform info, environment, `exec`, `exit`) |
+| `examples/rand-demo.tsm` | `import rand`: the std random generator — `newSeeded`/`newRand`, `next`/`below`/`range`/`float`/`bool`/`int`, `pick`/`shuffle`, reproducible seeds |
+| `examples/jokes.tsm` | a tiny random-joke teller on top of `rand.pick` |
 | `examples/todos-http-sqlite.tsm` | `import sql`: `new sql.Connection`, `sql.stmt\`...\`` prepared statements, `db.execute`/`db.query`, typed rows via interfaces — a persistent todo REST API on SQLite (try `curl localhost:8080/todos`) |
 
 ## Current limitations (v0.2)
 
-- Packages expose functions and classes only: no top-level statements, no `main`, and no package-on-package dependencies (std modules `net`/`http`/`fs`/`crypto`/`sql`/`map` are allowed)
+- Packages expose functions and classes only: no top-level statements, no `main`, and no package-on-package dependencies (std modules `net`/`http`/`fs`/`crypto`/`sql`/`time`/`os`/`map`/`rand` are allowed)
 - sql: SQLite only (via the system `libsqlite3`); `mysql`/`pg`/`mariadb` drivers are planned but abort at compile time; rows of `db.query` are dynamically bound to the SELECT's columns (no nested transactions, no prepared-statement reuse across calls)
 - http: `http://` URLs only (no TLS/https), sequential request handling on the server (one connection at a time), no request headers, no streaming responses; one HTTP server per program; the express-style API supports `get`/`post` routes only
 - Schema validation (`JsonValidator.validate`) aborts the program with a runtime panic on an invalid body (no per-request error responses yet)
