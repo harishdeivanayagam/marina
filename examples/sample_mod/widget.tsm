@@ -1,0 +1,26 @@
+// Base is NOT exported; Widget extends it and IS exported.
+class Base {
+    protected id: Int32
+
+    constructor(id: Int32) {
+        this.id = id
+    }
+
+    label(): string {
+        return `base-${this.id}`
+    }
+}
+
+export class Widget extends Base {
+    constructor(id: Int32) {
+        super(id)
+    }
+
+    override label(): string {
+        return `widget(${super.label()})`
+    }
+}
+
+export function make(n: Int32): Widget {
+    return new Widget(n)
+}

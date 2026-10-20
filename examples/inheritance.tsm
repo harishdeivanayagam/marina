@@ -1,0 +1,107 @@
+// TypeScript-style OOP: inheritance, abstract classes, interfaces,
+// protected members, statics, getters/setters and super calls.
+
+// --- interfaces: methods + fields, satisfied by inheritance too ---
+interface Describable {
+    describe(): string,
+}
+
+interface HasId {
+    id: Int32,
+    label(): string,
+}
+
+// --- abstract base class ---
+abstract class Shape {
+    // protected: visible here and in subclasses, not outside
+    protected originX: Float64
+    protected originY: Float64
+    static created: Int32
+
+    constructor(originX: Float64, originY: Float64) {
+        this.originX = originX
+        this.originY = originY
+        Shape.created = Shape.created + 1
+    }
+
+    // abstract method: every concrete subclass must implement it
+    abstract area(): Float64;
+
+    // virtual method: subclasses override it
+    describe(): string {
+        return `shape with area ${this.area()}`
+    }
+
+    // getter
+    get origin(): string {
+        return `(${this.originX}, ${this.originY})`
+    }
+}
+
+class Circle extends Shape implements Describable {
+    radius: Float64
+
+    constructor(x: Float64, y: Float64, radius: Float64) {
+        super(x, y)
+        this.radius = radius
+    }
+
+    area(): Float64 {
+        return 3.14159 * this.radius * this.radius
+    }
+
+    override describe(): string {
+        return `circle: ${super.describe()}`
+    }
+}
+
+class Square extends Shape implements Describable, HasId {
+    id: Int32
+    side: Float64
+
+    constructor(x: Float64, y: Float64, side: Float64) {
+        super(x, y)
+        this.side = side
+        this.id = 7
+    }
+
+    area(): Float64 {
+        return this.side * this.side
+    }
+
+    label(): string {
+        return `square-${this.id}`
+    }
+}
+
+// --- static factory + polymorphism through a base-class-typed array ---
+function makeSquare(side: Float64): Square {
+    return new Square(0.0, 0.0, side)
+}
+
+let shapes: Array<Shape> = [new Circle(1.0, 2.0, 3.0), makeSquare(4.0)]
+
+for (let i = 0; i < shapes.length; i++) {
+    // virtual dispatch on the runtime class
+    console.log(shapes[i].describe())
+    console.log(shapes[i].area())
+}
+
+// inherited members are visible on subclasses
+let c = new Circle(0.0, 0.0, 1.0)
+console.log(c.origin)        // (0, 0) — inherited getter
+console.log(Shape.created)   // 2 — static field
+Shape.created = 10
+console.log(Shape.created)   // 10
+
+// interface conformance via methods and inherited methods
+let d: Describable = c
+console.log(d.describe())
+let h: HasId = makeSquare(2.0)
+console.log(h.label())
+
+// upcasting: a subclass value where the base is expected
+function firstArea(list: Array<Shape>): Float64 {
+    return list[0].area()
+}
+console.log(firstArea(shapes))

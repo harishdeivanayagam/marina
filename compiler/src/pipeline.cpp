@@ -7,6 +7,7 @@
 #include <fstream>
 #include <functional>
 #include <iostream>
+#include <map>
 #include <set>
 #include <sstream>
 #include <sys/wait.h>
@@ -422,7 +423,127 @@ void qual_expr(ast::ExprPtr& e, const std::set<std::string>& local,
     } else if (auto* x = std::get_if<ast::ELambda>(&e->v)) {
         for (auto& s : x->lambda->body) qual_stmt(s, local, pkg);
     }
-    // EInt, EFloat, EBool, EStr, EIdent, ENewClass: nothing to do
+    // EInt, EFloat, EBool, EStr, EIdent: nothing to do
+}
+
+// Non-exported classes and interfaces are renamed to `prefix__Name` so other
+// modules cannot refer to them. `hide` maps the original name to that.
+void hide_ty(ast::TyAnn& ann, const std::map<std::string, std::string>& hide) {
+    auto it = hide.find(ann.name);
+    if (it != hide.end()) ann.name = it->second;
+    for (auto& a : ann.args) hide_ty(a, hide);
+}
+
+void hide_expr(ast::ExprPtr& e, const std::map<std::string, std::string>& hide);
+void hide_stmt(ast::Stmt& s, const std::map<std::string, std::string>& hide);
+
+void hide_expr(ast::ExprPtr& e, const std::map<std::string, std::string>& hide) {
+    if (!e || hide.empty()) return;
+    if (auto* x = std::get_if<ast::ETemplate>(&e->v)) {
+        for (auto& p : x->parts)
+            if (auto* tp = std::get_if<ast::TExpr>(&p)) hide_expr(tp->expr, hide);
+    } else if (auto* x = std::get_if<ast::ETagged>(&e->v)) {
+        hide_expr(x->tag, hide);
+        for (auto& p : x->parts)
+            if (auto* tp = std::get_if<ast::TExpr>(&p)) hide_expr(tp->expr, hide);
+    } else if (auto* x = std::get_if<ast::EUnary>(&e->v)) {
+        hide_expr(x->operand, hide);
+    } else if (auto* x = std::get_if<ast::EBinary>(&e->v)) {
+        hide_expr(x->lhs, hide);
+        hide_expr(x->rhs, hide);
+    } else if (auto* x = std::get_if<ast::ECall>(&e->v)) {
+        hide_expr(x->callee, hide);
+        for (auto& a : x->args) hide_expr(a, hide);
+    } else if (auto* x = std::get_if<ast::ECallGen>(&e->v)) {
+        hide_expr(x->callee, hide);
+        for (auto& a : x->type_args) hide_ty(a, hide);
+        for (auto& a : x->args) hide_expr(a, hide);
+    } else if (auto* x = std::get_if<ast::EMember>(&e->v)) {
+        hide_expr(x->obj, hide);
+    } else if (auto* x = std::get_if<ast::EIndex>(&e->v)) {
+        hide_expr(x->obj, hide);
+        hide_expr(x->index, hide);
+    } else if (auto* x = std::get_if<ast::EArrayLit>(&e->v)) {
+        for (auto& el : x->elems) hide_expr(el, hide);
+    } else if (auto* x = std::get_if<ast::EObjectLit>(&e->v)) {
+        for (auto& f : x->fields) hide_expr(f.value, hide);
+    } else if (auto* x = std::get_if<ast::ENewClass>(&e->v)) {
+        auto it = hide.find(x->name);
+        if (it != hide.end()) x->name = it->second;
+        for (auto& a : x->type_args) hide_ty(a, hide);
+    } else if (auto* x = std::get_if<ast::ENewCtor>(&e->v)) {
+        if (x->path.size() == 1) {
+            auto it = hide.find(x->path[0]);
+            if (it != hide.end()) x->path[0] = it->second;
+        }
+        for (auto& a : x->args) hide_expr(a, hide);
+    } else if (auto* x = std::get_if<ast::EAwait>(&e->v)) {
+        hide_expr(x->operand, hide);
+    } else if (auto* x = std::get_if<ast::ENewPromise>(&e->v)) {
+        hide_expr(x->executor, hide);
+    } else if (auto* x = std::get_if<ast::ELambda>(&e->v)) {
+        for (auto& p : x->lambda->params)
+            if (p.ann) hide_ty(*p.ann, hide);
+        for (auto& st : x->lambda->body) hide_stmt(st, hide);
+    }
+}
+
+void hide_stmt(ast::Stmt& s, const std::map<std::string, std::string>& hide) {
+    if (hide.empty()) return;
+    if (auto* x = std::get_if<ast::SLet>(&s.v)) {
+        if (x->ann) hide_ty(*x->ann, hide);
+        hide_expr(x->init, hide);
+    } else if (auto* x = std::get_if<ast::SAssign>(&s.v)) {
+        hide_expr(x->value, hide);
+    } else if (auto* x = std::get_if<ast::SMemberAssign>(&s.v)) {
+        hide_expr(x->value, hide);
+    } else if (auto* x = std::get_if<ast::SIndexAssign>(&s.v)) {
+        hide_expr(x->index, hide);
+        hide_expr(x->value, hide);
+    } else if (auto* x = std::get_if<ast::SReturn>(&s.v)) {
+        if (x->value) hide_expr(*x->value, hide);
+    } else if (auto* x = std::get_if<ast::SIf>(&s.v)) {
+        hide_expr(x->cond, hide);
+        for (auto& t : x->then_body) hide_stmt(t, hide);
+        if (x->else_body)
+            for (auto& t : *x->else_body) hide_stmt(t, hide);
+    } else if (auto* x = std::get_if<ast::SWhile>(&s.v)) {
+        hide_expr(x->cond, hide);
+        for (auto& t : x->body) hide_stmt(t, hide);
+    } else if (auto* x = std::get_if<ast::SFor>(&s.v)) {
+        if (x->init) hide_stmt(**x->init, hide);
+        if (x->cond) hide_expr(*x->cond, hide);
+        if (x->update) hide_stmt(**x->update, hide);
+        for (auto& t : x->body) hide_stmt(t, hide);
+    } else if (auto* x = std::get_if<ast::SExpr>(&s.v)) {
+        hide_expr(x->expr, hide);
+    }
+}
+
+void hide_fn(ast::FnDecl& f, const std::map<std::string, std::string>& hide) {
+    for (auto& p : f.params)
+        if (p.ann) hide_ty(*p.ann, hide);
+    if (f.ret_ann) hide_ty(*f.ret_ann, hide);
+    for (auto& s : f.body) hide_stmt(s, hide);
+}
+
+void hide_program_refs(ast::Program& mod, const std::map<std::string, std::string>& hide) {
+    if (hide.empty()) return;
+    for (auto& s : mod.stmts) hide_stmt(s, hide);
+    for (auto& f : mod.fns) hide_fn(f, hide);
+    for (auto& c : mod.classes) {
+        for (auto& field : c.fields) hide_ty(field.ty, hide);
+        if (c.ctor) hide_fn(*c.ctor, hide);
+        for (auto& m : c.methods) hide_fn(m, hide);
+    }
+    for (auto& it : mod.interfaces) {
+        for (auto& field : it.fields) hide_ty(field.second, hide);
+        for (auto& m : it.methods) {
+            for (auto& p : m.params)
+                if (p.ann) hide_ty(*p.ann, hide);
+            hide_ty(m.ret, hide);
+        }
+    }
 }
 
 bool load_registry_package(const std::string& name, std::string& out_src,
@@ -467,6 +588,20 @@ std::vector<SrcDiag> resolve_uses(ast::Program& program, const std::string& base
     // functions so their (inferred) return types are known first
     std::vector<ast::FnDecl> extra_fns;
     std::vector<ast::ClassDecl> extra_classes;
+    std::vector<ast::InterfaceDecl> extra_ifaces;
+    std::vector<std::string> exported_fns;
+    std::vector<std::string> module_classes;
+    std::vector<std::string> exported_classes;
+    auto absorb = [&](ast::Program& mod, const std::string& prefix) {
+        for (auto& f : mod.fns) {
+            bool exp = f.exported;
+            f.name = prefix + "__" + f.name;
+            if (exp) exported_fns.push_back(f.name);
+            extra_fns.push_back(std::move(f));
+        }
+        for (auto& c : mod.classes) extra_classes.push_back(std::move(c));
+        for (auto& it : mod.interfaces) extra_ifaces.push_back(std::move(it));
+    };
     std::set<std::string> merged;
     std::set<std::string> seen_aliases;
     // module files already merged (a module can be reached through several
@@ -482,77 +617,107 @@ std::vector<SrcDiag> resolve_uses(ast::Program& program, const std::string& base
     // and sub/sub.tsm's function `sub` as `sample_mod.sub.sub`). Functions
     // are renamed to their `__`-joined path from base_dir, and the use alias
     // maps to that prefix via program.use_prefixes.
+    struct PendingMod {
+        ast::Program mod;
+        std::string prefix;
+    };
     std::function<void(const fs::path&, const std::vector<std::string>&)> load_dir =
         [&](const fs::path& dir, const std::vector<std::string>& segs) {
-            std::error_code ec;
-            std::vector<fs::path> files;
-            std::vector<fs::path> subdirs;
-            for (const auto& entry : fs::directory_iterator(dir, ec)) {
-                if (entry.is_directory()) {
-                    // skip hidden/build directories
-                    const std::string fn = entry.path().filename().string();
-                    if (!fn.empty() && fn[0] != '.') subdirs.push_back(entry.path());
-                } else if (entry.path().extension() == ".tsm") {
-                    files.push_back(entry.path());
-                }
-            }
-            std::sort(files.begin(), files.end());
-            std::sort(subdirs.begin(), subdirs.end());
-            std::string prefix = prefix_of(segs);
-            for (const auto& file : files) {
-                std::string canon = fs::weakly_canonical(file, ec).string();
-                if (!canon.empty() && !loaded_files.insert(canon).second) continue; // already merged
-                auto src = read_file(file);
-                if (!src) {
-                    diags.push_back(diag_from("cannot read module file '" + file.string() + "'",
-                                              lex::Span{}));
-                    continue;
-                }
-                std::string rel = fs::relative(file, base_dir, ec).string();
-                try {
-                    auto tokens = lex::lex(*src);
-                    ast::Program mod = ast::parse(std::move(tokens));
-                    if (!mod.stmts.empty()) {
-                        diags.push_back(diag_from(
-                            "module file '" + rel +
-                                "' cannot have top-level statements (functions and classes only)",
-                            ast::stmt_span(mod.stmts[0])));
+            std::vector<PendingMod> batch;
+            std::function<void(const fs::path&, const std::vector<std::string>&)> collect =
+                [&](const fs::path& d, const std::vector<std::string>& sgs) {
+                    std::error_code ec;
+                    std::vector<fs::path> files;
+                    std::vector<fs::path> subdirs;
+                    for (const auto& entry : fs::directory_iterator(d, ec)) {
+                        if (entry.is_directory()) {
+                            const std::string fn = entry.path().filename().string();
+                            if (!fn.empty() && fn[0] != '.') subdirs.push_back(entry.path());
+                        } else if (entry.path().extension() == ".tsm") {
+                            files.push_back(entry.path());
+                        }
                     }
-                    for (const auto& f : mod.fns) {
-                        if (f.name == "main") {
+                    std::sort(files.begin(), files.end());
+                    std::sort(subdirs.begin(), subdirs.end());
+                    std::string prefix = prefix_of(sgs);
+                    for (const auto& file : files) {
+                        std::string canon = fs::weakly_canonical(file, ec).string();
+                        if (!canon.empty() && !loaded_files.insert(canon).second) continue;
+                        auto src = read_file(file);
+                        if (!src) {
                             diags.push_back(diag_from(
-                                "module file '" + rel + "' must not define main (it is a library)",
-                                f.span));
+                                "cannot read module file '" + file.string() + "'", lex::Span{}));
+                            continue;
+                        }
+                        std::string rel = fs::relative(file, base_dir, ec).string();
+                        try {
+                            auto tokens = lex::lex(*src);
+                            ast::Program mod = ast::parse(std::move(tokens));
+                            if (!mod.stmts.empty()) {
+                                diags.push_back(diag_from(
+                                    "module file '" + rel +
+                                        "' cannot have top-level statements (functions and classes only)",
+                                    ast::stmt_span(mod.stmts[0])));
+                            }
+                            for (const auto& f : mod.fns) {
+                                if (f.name == "main") {
+                                    diags.push_back(diag_from(
+                                        "module file '" + rel +
+                                            "' must not define main (it is a library)",
+                                        f.span));
+                                }
+                            }
+                            for (auto& u : mod.uses) queue.push_back(std::move(u));
+                            mod.uses.clear();
+                            batch.push_back(PendingMod{std::move(mod), prefix});
+                        } catch (const lex::LexError& e) {
+                            diags.push_back(diag_from("module file '" + rel + "': " + e.msg, e.span));
+                        } catch (const ast::ParseError& e) {
+                            diags.push_back(diag_from("module file '" + rel + "': " + e.msg, e.span));
                         }
                     }
-                    // rewrite unqualified intra-module calls to their mangled
-                    // names (module functions are renamed on merge)
-                    {
-                        std::set<std::string> local;
-                        for (const auto& f : mod.fns) local.insert(f.name);
-                        for (auto& f : mod.fns) {
-                            for (auto& s : f.body) qual_stmt(s, local, prefix);
-                        }
+                    for (const auto& sub : subdirs) {
+                        std::vector<std::string> sub_segs = sgs;
+                        sub_segs.push_back(sub.filename().string());
+                        collect(sub, sub_segs);
                     }
-                    // the module's own `use` statements are resolved against
-                    // the same base directory
-                    for (auto& u : mod.uses) queue.push_back(std::move(u));
-                    mod.uses.clear();
-                    for (auto& f : mod.fns) {
-                        f.name = prefix + "__" + f.name;
-                        extra_fns.push_back(std::move(f));
-                    }
-                    for (auto& c : mod.classes) extra_classes.push_back(std::move(c));
-                } catch (const lex::LexError& e) {
-                    diags.push_back(diag_from("module file '" + rel + "': " + e.msg, e.span));
-                } catch (const ast::ParseError& e) {
-                    diags.push_back(diag_from("module file '" + rel + "': " + e.msg, e.span));
-                }
+                };
+            collect(dir, segs);
+            // Non-exported classes and interfaces stay usable inside the
+            // module (every file in the tree) under a mangled name, and are
+            // invisible to the importing program.
+            std::map<std::string, std::string> hide;
+            for (const auto& item : batch) {
+                for (const auto& c : item.mod.classes)
+                    if (!c.exported) hide[c.name] = item.prefix + "__" + c.name;
+                for (const auto& it : item.mod.interfaces)
+                    if (!it.exported) hide[it.name] = item.prefix + "__" + it.name;
             }
-            for (const auto& sub : subdirs) {
-                std::vector<std::string> sub_segs = segs;
-                sub_segs.push_back(sub.filename().string());
-                load_dir(sub, sub_segs);
+            for (auto& item : batch) {
+                hide_program_refs(item.mod, hide);
+                for (auto& c : item.mod.classes) {
+                    module_classes.push_back(c.name);
+                    if (c.exported) exported_classes.push_back(c.name);
+                    else if (auto it = hide.find(c.name); it != hide.end()) c.name = it->second;
+                }
+                for (auto& itf : item.mod.interfaces) {
+                    if (!itf.exported) {
+                        if (auto it = hide.find(itf.name); it != hide.end()) itf.name = it->second;
+                    }
+                }
+                {
+                    std::set<std::string> local;
+                    for (const auto& f : item.mod.fns) local.insert(f.name);
+                    for (auto& f : item.mod.fns)
+                        for (auto& s : f.body) qual_stmt(s, local, item.prefix);
+                    for (auto& c : item.mod.classes) {
+                        if (c.ctor)
+                            for (auto& s : c.ctor->body) qual_stmt(s, local, item.prefix);
+                        for (auto& m : c.methods)
+                            for (auto& s : m.body) qual_stmt(s, local, item.prefix);
+                    }
+                }
+                absorb(item.mod, item.prefix);
             }
         };
 
@@ -654,16 +819,34 @@ std::vector<SrcDiag> resolve_uses(ast::Program& program, const std::string& base
                 for (auto& f : pkg.fns) {
                     for (auto& s : f.body) qual_stmt(s, local, name);
                 }
+                for (auto& c : pkg.classes) {
+                    if (c.ctor)
+                        for (auto& s : c.ctor->body) qual_stmt(s, local, name);
+                    for (auto& m : c.methods)
+                        for (auto& s : m.body) qual_stmt(s, local, name);
+                }
             }
             // dependencies first, so a package's deps are always fully
             // merged by the time the checker resolves calls against it
             for (auto& u : pkg.uses) queue.push_back(u);
             pkg.uses.clear();
-            for (auto& f : pkg.fns) {
-                f.name = name + "__" + f.name;
-                extra_fns.push_back(std::move(f));
+            std::map<std::string, std::string> hide;
+            for (const auto& c : pkg.classes)
+                if (!c.exported) hide[c.name] = name + "__" + c.name;
+            for (const auto& it : pkg.interfaces)
+                if (!it.exported) hide[it.name] = name + "__" + it.name;
+            hide_program_refs(pkg, hide);
+            for (auto& c : pkg.classes) {
+                module_classes.push_back(c.name);
+                if (c.exported) exported_classes.push_back(c.name);
+                else if (auto it = hide.find(c.name); it != hide.end()) c.name = it->second;
             }
-            for (auto& c : pkg.classes) extra_classes.push_back(std::move(c));
+            for (auto& itf : pkg.interfaces) {
+                if (!itf.exported) {
+                    if (auto it = hide.find(itf.name); it != hide.end()) itf.name = it->second;
+                }
+            }
+            absorb(pkg, name);
             kept.emplace_back(name, span);
         } catch (const lex::LexError& e) {
             diags.push_back(diag_from("package '" + name + "': " + e.msg, e.span));
@@ -680,6 +863,12 @@ std::vector<SrcDiag> resolve_uses(ast::Program& program, const std::string& base
                        std::make_move_iterator(extra_fns.end()));
     program.classes.insert(program.classes.begin(), std::make_move_iterator(extra_classes.begin()),
                            std::make_move_iterator(extra_classes.end()));
+    program.interfaces.insert(program.interfaces.begin(),
+                              std::make_move_iterator(extra_ifaces.begin()),
+                              std::make_move_iterator(extra_ifaces.end()));
+    program.exported_fns = std::move(exported_fns);
+    program.module_classes = std::move(module_classes);
+    program.exported_classes = std::move(exported_classes);
     return diags;
 }
 

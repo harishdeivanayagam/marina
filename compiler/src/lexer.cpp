@@ -3,6 +3,8 @@
 
 #include <algorithm>
 #include <cctype>
+#include <cerrno>
+#include <cstdlib>
 #include <stdexcept>
 
 namespace marina::lex {
@@ -342,17 +344,13 @@ private:
                 return error<TokV>("invalid float literal");
             }
         }
-        try {
-            long long i = std::stoll(text);
-            if (i > 2147483647LL) {
-                return error<TokV>("integer literal does not fit in Int32");
-            }
-            return TInt{static_cast<int32_t>(i)};
-        } catch (const LexError&) {
-            throw;
-        } catch (...) {
+        errno = 0;
+        char* end = nullptr;
+        unsigned long long i = std::strtoull(text.c_str(), &end, 10);
+        if (end != text.c_str() + text.size() || errno == ERANGE) {
             return error<TokV>("integer literal out of range");
         }
+        return TInt{static_cast<uint64_t>(i)};
     }
 
     TokV scan_punct() {

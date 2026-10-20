@@ -15,7 +15,7 @@ namespace {
 MValue mv_from(int32_t tag, const MValue& v) {
     MValue m = v;
     m.tag = tag;
-    m.pad = 0;
+    // pad carries integer signedness / float width for printing and sort
     return m;
 }
 
@@ -49,8 +49,21 @@ int mv_cmp(const MValue& x, const MValue& y) {
         if (c != 0) return c < 0 ? -1 : 1;
         return lx < ly ? -1 : (lx > ly ? 1 : 0);
     }
-    double fx = x.tag == TAG_FLOAT ? x.f : (double)x.i;
-    double fy = y.tag == TAG_FLOAT ? y.f : (double)y.i;
+    if (x.tag == TAG_INT && y.tag == TAG_INT) {
+        bool unsign = ((x.pad | y.pad) & 0x100) != 0;
+        if (unsign) {
+            uint64_t xi = static_cast<uint64_t>(x.i);
+            uint64_t yi = static_cast<uint64_t>(y.i);
+            if (xi < yi) return -1;
+            if (xi > yi) return 1;
+            return 0;
+        }
+        if (x.i < y.i) return -1;
+        if (x.i > y.i) return 1;
+        return 0;
+    }
+    double fx = x.tag == TAG_FLOAT ? (x.pad == 32 ? (double)(float)x.f : x.f) : (double)x.i;
+    double fy = y.tag == TAG_FLOAT ? (y.pad == 32 ? (double)(float)y.f : y.f) : (double)y.i;
     if (fx < fy) return -1;
     if (fx > fy) return 1;
     return 0;

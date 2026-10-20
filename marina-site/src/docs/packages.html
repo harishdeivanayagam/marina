@@ -67,17 +67,17 @@ $ wave check</code></pre>
 }</code></pre>
 
     <h2 id="using">Using packages in code</h2>
-    <p>In code, <code>use my-pkg</code> merges the package's exports behind a <strong>namespace</strong>: <code>my-pkg.fn(...)</code> calls the package's <code>fn</code>. Module-qualified constructors work too — <code>new sample_mod.Calc(10, 20)</code> — including nested namespaces like <code>sample_mod.sub.sub(10, 20)</code>.</p>
+    <p>In code, <code>use my-pkg</code> merges the package behind a <strong>namespace</strong>: <code>my-pkg.fn(...)</code> calls the package's <code>fn</code>. Only declarations marked <code>export</code> are visible. Using anything else is a compile error: <code>no exported member 'fn' from module 'my-pkg'</code>. Module-qualified constructors work too — <code>new sample_mod.Calc(10, 20)</code> — including nested namespaces like <code>sample_mod.sub.sub(10, 20)</code>.</p>
 
     <h2 id="authoring">Authoring a package</h2>
     <p>A package is a directory with a <code>main.tsm</code> entry file:</p>
 <pre><code><span class="c">// main.tsm — packages expose functions and classes only</span>
-<span class="k">class</span> <span class="t">Calc</span> {
-    a: <span class="t">Int32</span>
-    b: <span class="t">Int32</span>
+<span class="k">export class</span> <span class="t">Calc</span> {
+    <span class="k">public</span> a: <span class="t">Int32</span>
+    <span class="k">private</span> b: <span class="t">Int32</span>
 }
 
-<span class="k">function</span> <span class="f">sub</span>(a: <span class="t">Int32</span>, b: <span class="t">Int32</span>): <span class="t">Int32</span> {
+<span class="k">export function</span> <span class="f">sub</span>(a: <span class="t">Int32</span>, b: <span class="t">Int32</span>): <span class="t">Int32</span> {
     <span class="k">return</span> a - b
 }</code></pre>
 <pre><code>{

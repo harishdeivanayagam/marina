@@ -1,5 +1,5 @@
 export class Calc {
-    
+
     private a: Int32
     private b: Int32
 
@@ -8,19 +8,19 @@ export class Calc {
         this.b = b
     }
 
-    add() {
+    add(): Int32 {
         return this.a + this.b
     }
 
-    sub() {
+    sub(): Int32 {
         return this.a - this.b
     }
 
-    mul() {
+    mul(): Int32 {
         return this.a * this.b
     }
-    
-    div() {
+
+    div(): Float64 {
         return this.a / this.b
     }
 }

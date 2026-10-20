@@ -6,8 +6,12 @@
 // Rules (v0.1):
 //   * Function parameters REQUIRE type annotations (strict mode).
 //   * No `any`, no implicit truthiness, no string arithmetic.
-//   * Int32 -> Float64 widening is the only implicit conversion
-//     (so `10 + 20.5` is `Float64`, matching the examples).
+//   * Numeric types are Int8/16/32/64, UInt8/16/32/64, Float32 and Float64.
+//     Unsuffixed integers default to Int32 (Int64 / UInt64 when the literal
+//     does not fit). Unsuffixed floats default to Float64.
+//   * Implicit conversions: any integer widens to Float32 or Float64, and
+//     Float32 widens to Float64. A numeric literal may also be used as any
+//     integer or float type it fits in. Integer widths do not convert.
 //   * `await` is allowed only at statement level:
 //       `let x = await e`, `await e`, or `return await e`.
 //   * Lambdas are only allowed as arguments to `setTimeout` / `new Promise`.
@@ -19,6 +23,7 @@
 
 #include <algorithm>
 #include <cstdio>
+#include <set>
 #include <tuple>
 #include <unordered_map>
 #include <unordered_set>
@@ -33,8 +38,9 @@ namespace marina::ir {
 std::string CTy::name() const {
     switch (tag) {
         case Tag::Void: return "void";
-        case Tag::Int: return "Int32";
-        case Tag::Float: return "Float64";
+        case Tag::Int:
+            return (unsign ? "UInt" : "Int") + std::to_string(bits == 0 ? 32 : bits);
+        case Tag::Float: return bits == 32 ? "Float32" : "Float64";
         case Tag::Bool: return "bool";
         case Tag::Str: return "string";
         case Tag::Promise:
@@ -60,21 +66,26 @@ bool CTy::operator==(const CTy& o) const {
             return !inner || *inner == *o.inner;
         case Tag::Object: return object == o.object; // identity by id
         case Tag::Interface: return iface == o.iface;
-        default: return true; // Void/Int/Float/Bool/Str/Stream
+        case Tag::Int: return bits == o.bits && unsign == o.unsign;
+        case Tag::Float: return bits == o.bits;
+        default: return true; // Void/Bool/Str/Stream
     }
 }
 
 CTy cty_void() { return CTy{}; }
 
-CTy cty_int() {
+CTy cty_int(uint8_t bits, bool unsign) {
     CTy t;
     t.tag = CTy::Tag::Int;
+    t.bits = bits;
+    t.unsign = unsign;
     return t;
 }
 
-CTy cty_float() {
+CTy cty_float(uint8_t bits) {
     CTy t;
     t.tag = CTy::Tag::Float;
+    t.bits = bits == 32 ? 32 : 64;
     return t;
 }
 
@@ -173,6 +184,15 @@ bool is_pascal_case(const std::string& s) {
             return false;
     }
     return true;
+}
+
+/// PascalCase, or a module-hidden `prefix__PascalName` (non-exported class
+/// or interface, renamed so other modules cannot name it).
+bool is_module_pascal(const std::string& s) {
+    if (is_pascal_case(s)) return true;
+    size_t pos = s.rfind("__");
+    if (pos == std::string::npos || pos == 0 || pos + 2 >= s.size()) return false;
+    return is_pascal_case(s.substr(pos + 2));
 }
 
 /// kebab-case file stems: lowercase words separated by single hyphens.
@@ -308,8 +328,8 @@ FieldKind validator_kind_of(const CExpr& c) {
 std::string mangle_ty(const CTy& t) {
     switch (t.tag) {
         case CTy::Tag::Void: return "Void";
-        case CTy::Tag::Int: return "Int32";
-        case CTy::Tag::Float: return "Float64";
+        case CTy::Tag::Int: return t.name();
+        case CTy::Tag::Float: return t.name();
         case CTy::Tag::Bool: return "Bool";
         case CTy::Tag::Str: return "string";
         case CTy::Tag::Stream: return "Stream";
@@ -527,9 +547,66 @@ struct VarEntry {
 
 namespace {
 
+bool lit_fits(uint64_t mag, bool neg, uint8_t bits, bool unsign) {
+    if (bits != 8 && bits != 16 && bits != 32 && bits != 64) return false;
+    if (neg) {
+        if (unsign) return false;
+        if (bits == 64) return mag <= (1ULL << 63);
+        return mag <= (1ULL << (bits - 1));
+    }
+    if (unsign) {
+        if (bits == 64) return true;
+        return mag < (1ULL << bits);
+    }
+    if (bits == 64) return mag <= static_cast<uint64_t>(INT64_MAX);
+    return mag < (1ULL << (bits - 1));
+}
+
+CTy default_int_ty(uint64_t v) {
+    if (v <= 2147483647ULL) return cty_int(32, false);
+    if (v <= 9223372036854775807ULL) return cty_int(64, false);
+    return cty_int(64, true);
+}
+
+bool is_i32(const CTy& t) {
+    return t.tag == CTy::Tag::Int && !t.unsign && (t.bits == 0 || t.bits == 32);
+}
+
+bool is_num_lit(const CExpr& e) {
+    return std::holds_alternative<CInt>(e.v) || std::holds_alternative<CFloat>(e.v);
+}
+
+// Any integer widens to either float; Float32 widens to Float64.
+bool num_widens(const CTy& from, const CTy& to) {
+    if (from.tag == CTy::Tag::Int && to.tag == CTy::Tag::Float) return true;
+    if (from.tag == CTy::Tag::Float && to.tag == CTy::Tag::Float && from.bits == 32 && to.bits != 32)
+        return true;
+    return false;
+}
+
+std::optional<CTy> numeric_alias(const std::string& name) {
+    if (name == "int8" || name == "Int8" || name == "i8") return cty_int(8, false);
+    if (name == "int16" || name == "Int16" || name == "i16") return cty_int(16, false);
+    if (name == "int" || name == "int32" || name == "Int32" || name == "i32") return cty_int(32, false);
+    if (name == "int64" || name == "Int64" || name == "i64") return cty_int(64, false);
+    if (name == "uint8" || name == "UInt8" || name == "u8") return cty_int(8, true);
+    if (name == "uint16" || name == "UInt16" || name == "u16") return cty_int(16, true);
+    if (name == "uint32" || name == "UInt32" || name == "u32") return cty_int(32, true);
+    if (name == "uint64" || name == "UInt64" || name == "u64") return cty_int(64, true);
+    if (name == "float32" || name == "Float32" || name == "f32") return cty_float(32);
+    if (name == "float" || name == "float64" || name == "Float64" || name == "f64" || name == "double" ||
+        name == "number")
+        return cty_float(64);
+    return std::nullopt;
+}
+
 class Checker {
 public:
     std::unordered_map<std::string, FnSig> sigs;
+    // Abstract method signatures, keyed `Class__method` (no `this` param):
+    // abstract methods are not lowered, but calls on abstract receivers
+    // still type-check against them and dispatch virtually.
+    std::unordered_map<std::string, FnSig> abstract_sigs;
     std::vector<CTy> var_types;
     size_t next_id = 0;
     std::vector<Diag> diags;
@@ -539,6 +616,11 @@ public:
     bool is_async_ctx = false;
     std::optional<CTy> ret_ty;
     bool saw_float_ret = false;
+    // Width of a float return seen alongside an integer return (32 or 64).
+    uint8_t ret_float_bits = 0;
+    // When a function or callback has an annotated/expected return type,
+    // numeric literals in `return` adapt to it.
+    std::optional<CTy> ret_literal_target;
     // inferred return type of the most recently checked function
     std::optional<CTy> last_fn_ret;
     // current promise-executor inference: (T, saw_float)
@@ -567,6 +649,11 @@ public:
     // (`use sample_mod/sub` → alias `sub`, prefix `sample_mod__sub`).
     // Aliases absent from the map mangle to themselves.
     std::unordered_map<std::string, std::string> use_prefix;
+    // Mangled names of functions exported from a used module, and class
+    // names that arrived from a module (exported or not).
+    std::unordered_set<std::string> exported_fns;
+    std::unordered_set<std::string> module_classes;
+    std::unordered_set<std::string> exported_classes;
     // name of the function whose body is being checked (pass 3); used to
     // decide whether `private` field access is allowed
     std::string cur_fn;
@@ -581,6 +668,21 @@ public:
     std::unordered_map<std::string, ast::ClassDecl> generic_classes;
     // interfaces: name -> ordered (field, type)
     std::unordered_map<std::string, std::vector<std::pair<std::string, CTy>>> interfaces;
+    struct IfaceMSig {
+        std::vector<CTy> params;
+        CTy ret;
+    };
+    // interface name -> method signatures (no `this`; return type required)
+    std::unordered_map<std::string, std::vector<std::pair<std::string, IfaceMSig>>> iface_methods;
+    // direct subclasses of a declared class (inheritance tree)
+    std::unordered_map<size_t, std::vector<size_t>> children;
+    // declaration spans for diagnostics (ghost ids absent)
+    std::unordered_map<size_t, Span> class_spans;
+
+    Span def_span(size_t id) const {
+        auto it = class_spans.find(id);
+        return it != class_spans.end() ? it->second : Span{};
+    }
     // monomorphized functions/classes generated during checking
     std::vector<CFn> mono_fns;
 
@@ -658,14 +760,15 @@ public:
     /// pass 0: hoist all declared classes into the class table so types can
     /// reference classes defined anywhere in the file. Generic classes
     /// (`class Box<T>`) are stashed for monomorphization instead.
-    /// Two passes: first register every non-generic class name (with an
-    /// empty field list), then resolve fields — this makes recursive and
-    /// mutually-referential class types work.
+    /// Passes: (A) register every non-generic class name, (B) resolve
+    /// `extends` bases and detect cycles, (C) flatten fields (base fields
+    /// first, so a subclass instance is layout-compatible with its bases)
+    /// and record visibility/statics.
     void register_classes(const ast::Program& program) {
         // pass A: names only (enables forward/recursive references)
         std::vector<std::pair<size_t, const ast::ClassDecl*>> pending; // (id, decl)
         for (const auto& cl : program.classes) {
-            if (!is_pascal_case(cl.name))
+            if (!is_module_pascal(cl.name))
                 diag("class '" + cl.name + "' must be PascalCase", cl.span);
             if (class_by_name.count(cl.name)) {
                 diag("duplicate class '" + cl.name + "'", cl.span);
@@ -679,42 +782,113 @@ public:
             ClassDef d;
             d.name = cl.name;
             d.is_ghost = false;
+            d.is_abstract = cl.is_abstract;
             classes.push_back(std::move(d));
+            class_spans[id] = cl.span;
             class_by_name[cl.name] = id;
             pending.emplace_back(id, &cl);
         }
-        // pass B: field types (now every declared class name is known)
+        // pass B: resolve bases, detect inheritance cycles
         for (const auto& [id, cl] : pending) {
+            if (!cl->base.has_value()) continue;
+            auto it = class_by_name.find(*cl->base);
+            if (it == class_by_name.end()) {
+                // hidden (non-exported) module classes are renamed
+                // `<prefix>__Name` by the pipeline — try each `use` prefix
+                for (const auto& u : uses) {
+                    auto hit = class_by_name.find(use_prefix_of(u) + "__" + *cl->base);
+                    if (hit != class_by_name.end()) {
+                        it = hit;
+                        break;
+                    }
+                }
+            }
+            if (it == class_by_name.end()) {
+                diag("unknown base class '" + *cl->base + "'", cl->span);
+                continue;
+            }
+            if (it->second == id) {
+                diag("class '" + cl->name + "' cannot extend itself", cl->span);
+                continue;
+            }
+            // cycle check: walk the base's chain; reaching `id` is a cycle
+            size_t c = it->second;
+            bool cyclic = false;
+            while (classes[c].base.has_value()) {
+                c = *classes[c].base;
+                if (c == id) {
+                    cyclic = true;
+                    break;
+                }
+            }
+            if (cyclic) {
+                diag("inheritance cycle involving class '" + cl->name + "'", cl->span);
+                continue;
+            }
+            classes[id].base = it->second;
+            children[it->second].push_back(id);
+        }
+        // pass C: fields — flattened (base first), visibility, statics
+        for (const auto& [id, cl] : pending) {
+            ClassDef& def = classes[id];
             std::vector<std::pair<std::string, CTy>> fields;
             std::unordered_set<std::string> seen_fields;
+            if (def.base.has_value()) {
+                for (const auto& [fname, fty] : classes[*def.base].fields) {
+                    seen_fields.insert(fname);
+                    fields.emplace_back(fname, fty);
+                }
+            }
+            std::vector<std::pair<std::string, CTy>> statics;
             for (const auto& f : cl->fields) {
                 if (!seen_fields.insert(f.name).second) {
                     diag("duplicate field '" + f.name + "' in class '" + cl->name + "'", cl->span);
                     continue;
                 }
-                fields.emplace_back(f.name, ty_of(f.ty));
-                if (f.is_private) classes[id].private_fields.push_back(f.name);
+                CTy t = ty_of(f.ty);
+                if (f.is_static) {
+                    statics.emplace_back(f.name, t);
+                    continue;
+                }
+                fields.emplace_back(f.name, t);
+                def.own_fields.push_back(ClassDef::OwnField{f.name, f.is_private, f.is_protected});
+                if (f.is_private) def.private_fields.push_back(f.name);
+                if (f.is_protected) def.protected_fields.push_back(f.name);
             }
-            classes[id].fields = std::move(fields);
+            def.fields = std::move(fields);
+            def.static_fields = std::move(statics);
+            for (const auto& m : cl->methods) {
+                if (m.is_private) def.private_methods.push_back(m.name);
+                if (m.is_protected) def.protected_methods.push_back(m.name);
+                if (m.is_abstract) {
+                    FnSig as;
+                    for (const auto& p : m.params)
+                        as.params.push_back(p.ann ? ty_of(*p.ann) : cty_void());
+                    if (m.ret_ann) as.ret = ty_of(*m.ret_ann);
+                    abstract_sigs[cl->name + "__" + m.name] = std::move(as);
+                }
+            }
         }
     }
 
-    /// pass 0: hoist interface declarations (name -> ordered field types).
-    /// Two passes so interfaces may reference each other in any order.
+    /// pass 0: hoist interface declarations (name -> ordered field types
+    /// and method signatures). Two passes so interfaces may reference each
+    /// other in any order.
     void register_interfaces(const ast::Program& program) {
         for (const auto& it : program.interfaces) {
-            if (!is_pascal_case(it.name))
+            if (!is_module_pascal(it.name))
                 diag("interface '" + it.name + "' must be PascalCase", it.span);
             if (interfaces.count(it.name) || class_by_name.count(it.name)) {
                 diag("duplicate interface '" + it.name + "'", it.span);
                 continue;
             }
             interfaces[it.name] = std::vector<std::pair<std::string, CTy>>{};
+            iface_methods[it.name] = {};
         }
+        std::unordered_set<std::string> filled;
         for (const auto& it : program.interfaces) {
-            auto found = interfaces.find(it.name);
-            if (found == interfaces.end()) continue; // duplicate, already diagnosed
-            if (!found->second.empty()) continue;    // already filled
+            if (!interfaces.count(it.name)) continue; // duplicate, already diagnosed
+            if (!filled.insert(it.name).second) continue;
             std::vector<std::pair<std::string, CTy>> fields;
             std::unordered_set<std::string> seen_fields;
             for (const auto& [fname, ann] : it.fields) {
@@ -728,22 +902,315 @@ public:
                 fields.emplace_back(fname, t);
             }
             interfaces[it.name] = std::move(fields);
+            std::vector<std::pair<std::string, IfaceMSig>> methods;
+            for (const auto& m : it.methods) {
+                if (!is_camel_case(m.name))
+                    diag("interface method '" + it.name + "." + m.name + "' must be camelCase",
+                         m.span);
+                IfaceMSig sig;
+                for (const auto& p : m.params) {
+                    if (!p.ann) {
+                        diag("parameter '" + p.name + "' of interface method '" + it.name + "." +
+                                 m.name + "' needs a type annotation (strict mode)",
+                             p.span);
+                        sig.params.push_back(cty_void());
+                    } else {
+                        sig.params.push_back(ty_of(*p.ann));
+                    }
+                }
+                sig.ret = ty_of(m.ret);
+                methods.emplace_back(m.name, std::move(sig));
+            }
+            iface_methods[it.name] = std::move(methods);
         }
+    }
+
+    /// A fieldless, methodless interface (sql_Row) accepts any shape.
+    bool iface_open(const std::string& name) const {
+        auto it = interfaces.find(name);
+        if (it == interfaces.end() || !it->second.empty()) return false;
+        auto mit = iface_methods.find(name);
+        return mit == iface_methods.end() || mit->second.empty();
+    }
+
+    bool iface_has_method(const std::string& iname, const std::string& method) const {
+        auto mit = iface_methods.find(iname);
+        if (mit == iface_methods.end()) return false;
+        for (const auto& [n, _] : mit->second)
+            if (n == method) return true;
+        return false;
+    }
+
+    /// The id of the class that declares field `name` itself (walking up
+    /// the chain), or nullopt.
+    std::optional<size_t> field_owner(size_t cid, const std::string& name) const {
+        for (size_t c = cid;;) {
+            for (const auto& f : classes[c].own_fields)
+                if (f.name == name) return c;
+            if (!classes[c].base.has_value()) return std::nullopt;
+            c = *classes[c].base;
+        }
+    }
+
+    /// Static field read: `Name.member` where Name is a class.
+    CExpr check_static_member(size_t cid, const std::string& name, Span span) {
+        const std::pair<std::string, CTy>* sf = find_static_field(cid, name);
+        if (!sf) {
+            // static getter? (`static get name()`)
+            if (auto g = find_member(cid, name, "get_")) {
+                auto sit = sigs.find(g->second);
+                if (sit->second.ret) {
+                    CCallFn f;
+                    f.name = g->second;
+                    f.ret = *sit->second.ret;
+                    f.is_async = false;
+                    return ce(std::move(f));
+                }
+                diag("cannot read '" + name + "' here: the getter's return type is not yet known "
+                     "(add a return type annotation)",
+                     span);
+                return cbool(false);
+            }
+            diag("class '" + classes[cid].name + "' has no static member '" + name + "'", span);
+            return cbool(false);
+        }
+        bool priv = classes[cid].field_is_private(name);
+        bool prot = std::find(classes[cid].protected_fields.begin(),
+                              classes[cid].protected_fields.end(),
+                              name) != classes[cid].protected_fields.end();
+        if (!can_access_member(cid, priv, prot)) {
+            diag(std::string("static field '" + name + "' of class '" + classes[cid].name +
+                             "' is " + (priv ? "private" : "protected")),
+                 span);
+            return cbool(false);
+        }
+        CStaticRef r;
+        r.gname = "@static." + classes[cid].name + "__" + name;
+        r.ty = sf->second;
+        return ce(std::move(r));
+    }
+
+    /// Static field write: `Name.member = v` where Name is a class.
+    CStmt check_static_member_assign(size_t cid, const std::string& name,
+                                      const ast::ExprPtr& value, Span span) {
+        const std::pair<std::string, CTy>* sf = find_static_field(cid, name);
+        if (!sf) {
+            diag("class '" + classes[cid].name + "' has no static member '" + name + "'", span);
+            return fallback_stmt();
+        }
+        bool priv = classes[cid].field_is_private(name);
+        bool prot = std::find(classes[cid].protected_fields.begin(),
+                              classes[cid].protected_fields.end(),
+                              name) != classes[cid].protected_fields.end();
+        if (!can_access_member(cid, priv, prot)) {
+            diag(std::string("static field '" + name + "' of class '" + classes[cid].name +
+                             "' is " + (priv ? "private" : "protected")),
+                 span);
+            return fallback_stmt();
+        }
+        CTy elem = sf->second;
+        CExpr vc = check_expr(*value, false);
+        adapt_literal(vc, elem);
+        coerce(expr_ty(vc), elem, span);
+        CStaticSet st;
+        st.gname = "@static." + classes[cid].name + "__" + name;
+        st.value = exptr(std::move(vc));
+        st.elem = std::move(elem);
+        return cst(std::move(st));
+    }
+
+    /// Is `maybe_sub` the same as, or a subclass of, `base`?
+    bool is_subclass(size_t maybe_sub, size_t base) const {
+        for (size_t c = maybe_sub;;) {
+            if (c == base) return true;
+            if (c >= classes.size() || !classes[c].base.has_value()) return false;
+            c = *classes[c].base;
+        }
+    }
+
+    /// Nearest implementation of a member walking up the inheritance chain.
+    /// `suffix` is "" for methods, "get_" for getters, "set_" for setters,
+    /// "static__" for static methods. Only lowered (non-abstract) members
+    /// have entries in `sigs`, so abstract-only classes are skipped.
+    std::optional<std::pair<size_t, std::string>> find_member(size_t cid,
+                                                              const std::string& name,
+                                                              const char* suffix) const {
+        for (size_t c = cid;;) {
+            std::string mangled = classes[c].name + "__" + suffix + name;
+            if (sigs.count(mangled)) return std::make_pair(c, mangled);
+            if (c >= classes.size() || !classes[c].base.has_value()) return std::nullopt;
+            c = *classes[c].base;
+        }
+    }
+
+    /// A `static` field walking up the chain (statics are inherited).
+    const std::pair<std::string, CTy>* find_static_field(size_t cid,
+                                                         const std::string& name) const {
+        for (size_t c = cid;;) {
+            const ClassDef& def = classes[c];
+            for (const auto& sf : def.static_fields)
+                if (sf.first == name) return &sf;
+            if (!def.base.has_value()) return nullptr;
+            c = *def.base;
+        }
+    }
+
+    /// Does any strict descendant of `cid` define its own member `name`
+    /// (making runtime dispatch necessary)?
+    bool subtree_overrides(size_t cid, const std::string& name, const char* suffix) const {
+        auto it = children.find(cid);
+        if (it == children.end()) return false;
+        for (size_t d : it->second) {
+            if (sigs.count(classes[d].name + "__" + suffix + name)) return true;
+            if (subtree_overrides(d, name, suffix)) return true;
+        }
+        return false;
+    }
+
+    /// The name of the class whose (lowered) function is being checked:
+    /// `cur_fn` is `Class__method` / `Class__new` / `Class__get_x`.
+    /// Hidden module classes keep `__` in their own name
+    /// (`sample_mod__Base__new`), so try every `__` split and take the
+    /// longest prefix that names a class.
+    std::optional<size_t> cur_class_id() const {
+        size_t start = 0;
+        for (;;) {
+            size_t pos = cur_fn.find("__", start);
+            if (pos == std::string::npos || pos == 0) return std::nullopt;
+            auto it = class_by_name.find(cur_fn.substr(0, pos));
+            if (it != class_by_name.end()) return it->second;
+            start = pos + 2;
+        }
+    }
+
+    /// Visibility check for a member defined by class `definer`:
+    /// private — only inside the defining class; protected — inside the
+    /// defining class and its subclasses.
+    bool can_access_member(size_t definer, bool priv, bool prot) const {
+        if (!priv && !prot) return true;
+        auto cur = cur_class_id();
+        if (!cur.has_value()) return false;
+        if (priv) return *cur == definer;
+        return is_subclass(*cur, definer);
+    }
+
+    /// Class method `Class__name` (param 0 is `this`) matches an interface
+    /// method when every parameter and the return type are identical.
+    bool method_sig_eq(const FnSig& sig, const IfaceMSig& m) const {
+        if (sig.is_async || !sig.ret) return false;
+        if (sig.params.size() != m.params.size() + 1) return false;
+        for (size_t i = 0; i < m.params.size(); ++i)
+            if (!(sig.params[i + 1] == m.params[i])) return false;
+        return *sig.ret == m.ret;
+    }
+
+    /// Every interface method is satisfied (directly or inherited) by a
+    /// public method with the same signature. Diagnostics-free so element
+    /// coercion can use it.
+    bool iface_methods_match(size_t class_id, const std::string& iname) const {
+        auto mit = iface_methods.find(iname);
+        if (mit == iface_methods.end()) return true;
+        for (const auto& [mname, msig] : mit->second) {
+            auto impl = find_member(class_id, mname, "");
+            if (!impl) return false;
+            const ClassDef& definer = classes[impl->first];
+            if (definer.method_is_private(mname) &&
+                std::find(definer.private_methods.begin(), definer.private_methods.end(),
+                          mname) != definer.private_methods.end()) {
+                // the nearest implementation is private: does not satisfy
+                return false;
+            }
+            auto sit = sigs.find(impl->second);
+            if (sit == sigs.end() || !method_sig_eq(sit->second, msig)) return false;
+        }
+        return true;
+    }
+
+    /// Same as `iface_methods_match`, reporting why a class does not conform.
+    bool iface_methods_ok(size_t class_id, const std::string& iname, Span span) {
+        auto mit = iface_methods.find(iname);
+        if (mit == iface_methods.end()) return true;
+        bool ok = true;
+        for (const auto& [mname, msig] : mit->second) {
+            auto impl = find_member(class_id, mname, "");
+            if (!impl) {
+                diag("interface '" + iname + "': missing method '" + mname + "'", span);
+                ok = false;
+                continue;
+            }
+            const ClassDef& definer = classes[impl->first];
+            auto sit = sigs.find(impl->second);
+            bool priv = std::find(definer.private_methods.begin(), definer.private_methods.end(),
+                                  mname) != definer.private_methods.end();
+            bool prot = std::find(definer.protected_methods.begin(),
+                                  definer.protected_methods.end(),
+                                  mname) != definer.protected_methods.end();
+            if (priv || prot) {
+                diag(std::string("interface '" + iname + "': method '" + mname + "' of class '" +
+                                 definer.name + "' is " + (priv ? "private" : "protected")),
+                     span);
+                ok = false;
+                continue;
+            }
+            if (!method_sig_eq(sit->second, msig)) {
+                if (!sit->second.ret) {
+                    diag("interface '" + iname + "': method '" + mname + "' of class '" +
+                             definer.name + "' needs a return type annotation",
+                         span);
+                } else {
+                    diag("interface '" + iname + "': method '" + mname + "' of class '" +
+                             definer.name + "' has a different signature",
+                         span);
+                }
+                ok = false;
+            }
+        }
+        return ok;
     }
 
     // ------------------------------------------------------------------
     // Types
     // ------------------------------------------------------------------
 
+    void adapt_literal(CExpr& e, const CTy& to) {
+        if (auto* x = std::get_if<CInt>(&e.v)) {
+            if (to.tag == CTy::Tag::Int && lit_fits(x->value, x->neg, to.bits, to.unsign)) {
+                x->bits = to.bits;
+                x->unsign = to.unsign;
+            }
+            return;
+        }
+        if (auto* x = std::get_if<CFloat>(&e.v)) {
+            if (to.tag == CTy::Tag::Float) x->bits = to.bits;
+        }
+    }
+
+    void adapt_peers(CExpr& a, CExpr& b) {
+        bool la = is_num_lit(a);
+        bool lb = is_num_lit(b);
+        if (la && !lb) adapt_literal(a, expr_ty(b));
+        else if (lb && !la) adapt_literal(b, expr_ty(a));
+    }
+
+    void note_float_ret(const CTy& t) {
+        if (t.tag != CTy::Tag::Float) return;
+        saw_float_ret = true;
+        uint8_t b = t.bits == 32 ? 32 : 64;
+        if (b > ret_float_bits) ret_float_bits = b;
+    }
+
+    CTy apply_float_ret(CTy ret) const {
+        if (saw_float_ret && ret.tag == CTy::Tag::Int)
+            return cty_float(ret_float_bits == 32 ? 32 : 64);
+        return ret;
+    }
+
     CTy ty_of(const ast::TyAnn& ann) {
         const std::string& name = ann.name;
         bool has_args = !ann.args.empty();
         CTy t;
-        if (name == "int" || name == "Int32" || name == "i32") {
-            t = cty_int();
-        } else if (name == "float" || name == "Float64" || name == "f64" || name == "double" ||
-                   name == "number") {
-            t = cty_float();
+        if (auto num = numeric_alias(name)) {
+            t = *num;
         } else if (name == "string" || name == "String") {
             t = cty_str();
         } else if (name == "bool" || name == "boolean" || name == "Boolean") {
@@ -795,17 +1262,19 @@ public:
         return t;
     }
 
-    /// The only implicit conversion: Int32 widens to Float64. Interface
-    /// conformance is checked structurally.
+    /// Implicit numeric conversions: any integer widens to Float32 or
+    /// Float64, and Float32 widens to Float64. Interface conformance is
+    /// checked structurally. Integer widths do not convert here — literals
+    /// are retargeted by `adapt_literal` before this is called.
     bool coerce(const CTy& from, const CTy& to, Span span) {
         if (from == to) return true;
         // a fieldless interface (e.g. sql_Row) accepts any shape: its
         // fields are bound at runtime
-        if (from.tag == CTy::Tag::Interface) {
-            auto it = interfaces.find(from.iface);
-            if (it != interfaces.end() && it->second.empty()) return true;
-        }
-        if (from.tag == CTy::Tag::Int && to.tag == CTy::Tag::Float) return true;
+        if (from.tag == CTy::Tag::Interface && iface_open(from.iface)) return true;
+        if (num_widens(from, to)) return true;
+        // subclass upcast: a derived class flows where a base is expected
+        if (from.tag == CTy::Tag::Object && to.tag == CTy::Tag::Object)
+            return is_subclass(from.object.id, to.object.id);
         // element-wise coercion: Array<T> accepts Array<U> when U coerces to T
         if (from.tag == CTy::Tag::Array && to.tag == CTy::Tag::Array) {
             // no diagnostics for the element check
@@ -825,11 +1294,10 @@ public:
     /// Quiet coercion check (no diagnostics): used for element types.
     bool coerce_quiet(const CTy& from, const CTy& to) const {
         if (from == to) return true;
-        if (from.tag == CTy::Tag::Interface) {
-            auto it = interfaces.find(from.iface);
-            if (it != interfaces.end() && it->second.empty()) return true;
-        }
-        if (from.tag == CTy::Tag::Int && to.tag == CTy::Tag::Float) return true;
+        if (from.tag == CTy::Tag::Interface && iface_open(from.iface)) return true;
+        if (num_widens(from, to)) return true;
+        if (from.tag == CTy::Tag::Object && to.tag == CTy::Tag::Object)
+            return is_subclass(from.object.id, to.object.id);
         if (to.tag == CTy::Tag::Interface && from.tag == CTy::Tag::Object)
             return iface_conform_quiet(from.object, to.iface);
         if (from.tag == CTy::Tag::Interface && to.tag == CTy::Tag::Object)
@@ -855,7 +1323,7 @@ public:
                 }
             if (found) {
                 const CTy& t = found->second;
-                if (!(t == fty) && !(t.tag == CTy::Tag::Int && fty.tag == CTy::Tag::Float)) {
+                if (!(t == fty) && !num_widens(t, fty)) {
                     diag("interface '" + iname + "': field '" + fname + "' has type " + t.name() +
                              ", expected " + fty.name(),
                          span);
@@ -871,6 +1339,7 @@ public:
                 ok = false;
             }
         }
+        if (!iface_methods_ok(o.id, iname, span)) ok = false;
         return ok;
     }
 
@@ -888,9 +1357,9 @@ public:
                     break;
                 }
             if (!t) return false;
-            if (!(*t == fty) && !(t->tag == CTy::Tag::Int && fty.tag == CTy::Tag::Float)) return false;
+            if (!(*t == fty) && !num_widens(*t, fty)) return false;
         }
-        return true;
+        return iface_methods_match(o.id, iname);
     }
 
     // ------------------------------------------------------------------
@@ -942,6 +1411,20 @@ public:
         in_toplevel = false;
         ret_ty.reset();
         saw_float_ret = false;
+        ret_float_bits = 0;
+        std::optional<CTy> saved_target = std::move(ret_literal_target);
+        if (f.ret_ann) {
+            CTy at = ty_of(*f.ret_ann);
+            if (f.is_async && at.tag == CTy::Tag::Promise) {
+                ret_literal_target = deref(at.inner);
+                // unify `return` values against the awaited element type so
+                // sibling subclasses of the declared base all type-check
+                ret_ty = deref(at.inner);
+            } else if (!f.is_async) {
+                ret_literal_target = at;
+                ret_ty = at;
+            }
+        }
         scopes.emplace_back();
         std::vector<std::pair<size_t, CTy>> params;
         for (const auto& p : f.params) {
@@ -950,10 +1433,10 @@ public:
             params.emplace_back(id, ty);
         }
         std::vector<CStmt> body = check_stmts(f.body);
+        ret_literal_target = std::move(saved_target);
 
         // finalize inferred return type
-        CTy ret = ret_ty ? *ret_ty : cty_void();
-        if (saw_float_ret && ret.tag == CTy::Tag::Int) ret = cty_float();
+        CTy ret = apply_float_ret(ret_ty ? *ret_ty : cty_void());
         if (f.is_async) ret = cty_promise(std::move(ret));
         if (f.ret_ann) {
             CTy at = ty_of(*f.ret_ann);
@@ -1129,6 +1612,8 @@ public:
             CTy ty = init_ty;
             if (ann) {
                 CTy at = ty_of(*ann);
+                adapt_literal(init_c, at);
+                init_ty = expr_ty(init_c);
                 coerce(init_ty, at, span);
                 ty = at;
             }
@@ -1167,6 +1652,7 @@ public:
             }
             if (is_const) diag("cannot assign to 'const " + x->name + "'", span);
             CExpr v = check_expr(*x->value, false);
+            adapt_literal(v, ty);
             coerce(expr_ty(v), ty, span);
             CAssign a;
             a.id = id;
@@ -1190,10 +1676,11 @@ public:
             if (ty.tag == CTy::Tag::Array) {
                 CTy elem = deref(ty.inner);
                 CExpr ic = check_expr(*x->index, false);
-                if (expr_ty(ic).tag != CTy::Tag::Int) {
+                if (!is_i32(expr_ty(ic))) {
                     diag("array index must be Int32, found " + expr_ty(ic).name(), span);
                 }
                 CExpr vc = check_expr(*x->value, false);
+                adapt_literal(vc, elem);
                 coerce(expr_ty(vc), elem, span);
                 CIndexSet is;
                 is.id = id;
@@ -1210,6 +1697,11 @@ public:
             Span span = x->span;
             const std::string& obj = x->obj;
             const std::string& field = x->field;
+            // static field on a class name? (`Name.count = v`) — checked
+            // before variable lookup, which would fail for class names
+            if (!contains_str(uses, obj) && class_by_name.count(obj)) {
+                return check_static_member_assign(class_by_name[obj], field, x->value, span);
+            }
             auto found = lookup(obj, span);
             if (!found) return fallback_stmt();
             auto [id, ty, is_capture] = *found;
@@ -1230,6 +1722,11 @@ public:
                         break;
                     }
                 if (!elem) {
+                    if (iface_has_method(iname, field)) {
+                        diag("interface '" + iname + "': '" + field + "' is a method (call it)",
+                             span);
+                        return fallback_stmt();
+                    }
                     std::vector<std::string> names;
                     names.reserve(fields.size());
                     for (const auto& [n, _] : fields) names.push_back(n);
@@ -1240,6 +1737,7 @@ public:
                 }
                 CTy elem_c = *elem;
                 CExpr vc = check_expr(*x->value, false);
+                adapt_literal(vc, elem_c);
                 coerce(expr_ty(vc), elem_c, span);
                 CIfaceSet is;
                 is.id = id;
@@ -1258,6 +1756,44 @@ public:
                         break;
                     }
                 if (idx == def.fields.size()) {
+                    // static field on a class name? (`Name.count = v`)
+                    if (!contains_str(uses, obj) && class_by_name.count(obj)) {
+                        return check_static_member_assign(class_by_name[obj], field,
+                                                          x->value, span);
+                    }
+                    // setter? (`obj.prop = v` with `set prop(v)`)
+                    if (auto st = find_member(ty.object.id, field, "set_")) {
+                        auto sit = sigs.find(st->second);
+                        CTy elem = sit->second.params.size() > 1 ? sit->second.params[1]
+                                                                 : cty_void();
+                        CExpr vc = check_expr(*x->value, false);
+                        adapt_literal(vc, elem);
+                        coerce(expr_ty(vc), elem, span);
+                        bool virtual_set = classes[ty.object.id].is_abstract ||
+                                           subtree_overrides(ty.object.id, field, "set_");
+                        if (virtual_set) {
+                            CIfaceCall call;
+                            CExpr oc = ce(CIdent{id, ty});
+                            call.obj = exptr(std::move(oc));
+                            call.iface = classes[ty.object.id].name;
+                            call.method = "set_" + field;
+                            call.args.push_back(std::move(vc));
+                            call.ret = cty_void();
+                            CExprStmt es;
+                            es.expr = exptr(ce(std::move(call)));
+                            return cst(std::move(es));
+                        }
+                        CCallFn f;
+                        f.name = st->second;
+                        CExpr oc = ce(CIdent{id, ty});
+                        f.args.push_back(std::move(oc));
+                        f.args.push_back(std::move(vc));
+                        f.ret = cty_void();
+                        f.is_async = false;
+                        CExprStmt es;
+                        es.expr = exptr(ce(std::move(f)));
+                        return cst(std::move(es));
+                    }
                     std::vector<std::string> names;
                     names.reserve(def.fields.size());
                     for (const auto& [n, _] : def.fields) names.push_back(n);
@@ -1266,14 +1802,23 @@ public:
                          span);
                     return fallback_stmt();
                 }
-                if (def.field_is_private(field) && !can_access_private(ty.object.name)) {
-                    diag("field '" + field + "' of class '" + ty.object.name +
-                             "' is private (assign it inside the class)",
+                auto own = field_owner(ty.object.id, field);
+                const ClassDef* odef =
+                    own.has_value() ? &classes[*own] : nullptr;
+                bool priv = odef && odef->field_is_private(field);
+                bool prot = odef && std::find(odef->protected_fields.begin(),
+                                              odef->protected_fields.end(),
+                                              field) != odef->protected_fields.end();
+                if (odef && !can_access_member(*own, priv, prot)) {
+                    diag(std::string("field '" + field + "' of class '" + odef->name +
+                                     "' is " + (priv ? "private" : "protected") +
+                                     " (assign it inside the class or a subclass)"),
                          span);
                     return fallback_stmt();
                 }
                 CTy elem = def.fields[idx].second;
                 CExpr vc = check_expr(*x->value, false);
+                adapt_literal(vc, elem);
                 coerce(expr_ty(vc), elem, span);
                 CFieldSet fs;
                 fs.id = id;
@@ -1310,6 +1855,7 @@ public:
                 return ret_stmt(std::move(r.first), ReturnKindKind::Plain);
             }
             CExpr v = check_expr(val, false);
+            if (ret_literal_target) adapt_literal(v, *ret_literal_target);
             CTy t = expr_ty(v);
             if (is_async_ctx) {
                 if (t.tag == CTy::Tag::Promise) {
@@ -1462,10 +2008,28 @@ public:
             CTy prev = *ret_ty;
             if (prev == t) return;
             if (prev.tag == CTy::Tag::Int && t.tag == CTy::Tag::Float) {
-                saw_float_ret = true;
+                note_float_ret(t);
                 return;
             }
-            if (prev.tag == CTy::Tag::Float && t.tag == CTy::Tag::Int) return; // int widens to float
+            if (prev.tag == CTy::Tag::Float && t.tag == CTy::Tag::Int) {
+                note_float_ret(prev);
+                return; // int widens to float
+            }
+            if (prev.tag == CTy::Tag::Float && t.tag == CTy::Tag::Float && prev.bits != t.bits) {
+                ret_ty = cty_float(64);
+                note_float_ret(*ret_ty);
+                return;
+            }
+            // polymorphic returns: a subclass widens to its base (both
+            // branches may return different subclasses of a common base)
+            if (prev.tag == CTy::Tag::Object && t.tag == CTy::Tag::Object &&
+                prev.object.id < classes.size() && t.object.id < classes.size()) {
+                if (is_subclass(t.object.id, prev.object.id)) return; // keep base
+                if (is_subclass(prev.object.id, t.object.id)) {
+                    ret_ty = t;
+                    return;
+                }
+            }
             diag("inconsistent return types: expected " + prev.name() + ", found " + t.name(), span);
         } else {
             ret_ty = t;
@@ -1487,8 +2051,8 @@ public:
     }
 
     CTy expr_ty(const CExpr& e) const {
-        if (std::holds_alternative<CInt>(e.v)) return cty_int();
-        if (std::holds_alternative<CFloat>(e.v)) return cty_float();
+        if (auto* x = std::get_if<CInt>(&e.v)) return cty_int(x->bits, x->unsign);
+        if (auto* x = std::get_if<CFloat>(&e.v)) return cty_float(x->bits);
         if (std::holds_alternative<CBool>(e.v)) return cty_bool();
         if (std::holds_alternative<CStr>(e.v)) return cty_str();
         if (std::holds_alternative<CTemplate>(e.v)) return cty_str();
@@ -1521,6 +2085,7 @@ public:
         if (auto* x = std::get_if<CNewClass>(&e.v)) return object_ty_of_class(x->class_id);
         if (auto* x = std::get_if<CNewClassCtor>(&e.v)) return object_ty_of_class(x->class_id);
         if (auto* x = std::get_if<CFieldGet>(&e.v)) return x->ty;
+        if (auto* x = std::get_if<CStaticRef>(&e.v)) return x->ty;
         if (std::holds_alternative<CNetConnect>(e.v)) return cty_promise(cty_stream());
         if (std::holds_alternative<CNetWrite>(e.v) || std::holds_alternative<CNetClose>(e.v))
             return cty_promise(cty_void());
@@ -1537,6 +2102,7 @@ public:
             return object_ty_by_name("http_FieldValidator");
         if (auto* x = std::get_if<CHttpValidate>(&e.v)) return object_ty_of_class(x->out_class);
         if (auto* x = std::get_if<CIfaceGet>(&e.v)) return x->ty;
+        if (auto* x = std::get_if<CIfaceCall>(&e.v)) return x->ret;
         if (std::holds_alternative<CIfaceSetExpr>(e.v)) return cty_void();
         if (std::holds_alternative<CFsReadFile>(e.v)) return cty_promise(cty_str());
         if (std::holds_alternative<CFsWriteFile>(e.v) || std::holds_alternative<CFsMkdir>(e.v) ||
@@ -1556,8 +2122,15 @@ public:
     }
 
     CExpr check_expr(const ast::Expr& e, bool allow_await_top) {
-        if (auto* x = std::get_if<ast::EInt>(&e.v)) return ce(CInt{x->value});
-        if (auto* x = std::get_if<ast::EFloat>(&e.v)) return ce(CFloat{x->value});
+        if (auto* x = std::get_if<ast::EInt>(&e.v)) {
+            CTy dt = default_int_ty(x->value);
+            CInt n;
+            n.value = x->value;
+            n.bits = dt.bits;
+            n.unsign = dt.unsign;
+            return ce(std::move(n));
+        }
+        if (auto* x = std::get_if<ast::EFloat>(&e.v)) return ce(CFloat{x->value, 64});
         if (auto* x = std::get_if<ast::EBool>(&e.v)) return ce(CBool{x->value});
         if (auto* x = std::get_if<ast::EStr>(&e.v)) return ce(CStr{x->value});
         if (auto* x = std::get_if<ast::ETemplate>(&e.v)) {
@@ -1604,6 +2177,26 @@ public:
             if (x->op == ast::UnOp::Neg) {
                 if (!is_numeric(t)) {
                     diag("unary '-' requires a number, found " + t.name(), e.span);
+                }
+                if (auto* lit = std::get_if<CInt>(&c.v)) {
+                    if (lit->value == 0) return c;
+                    if (lit->neg || lit->value > (1ULL << 63)) {
+                        diag("integer literal does not fit in Int64", e.span);
+                        return c;
+                    }
+                    CInt n = *lit;
+                    n.neg = true;
+                    n.unsign = false;
+                    if (lit_fits(n.value, true, 32, false)) n.bits = 32;
+                    else n.bits = 64;
+                    return ce(std::move(n));
+                }
+                if (auto* fl = std::get_if<CFloat>(&c.v)) {
+                    fl->value = -fl->value;
+                    return c;
+                }
+                if (t.tag == CTy::Tag::Int && t.unsign) {
+                    diag("unary '-' is not allowed on " + t.name(), e.span);
                 }
                 CUnary u;
                 u.op = UnOpC::Neg;
@@ -1672,7 +2265,34 @@ public:
                 diag("class '" + x->name + "' does not take type parameters", e.span);
             }
             auto it = class_by_name.find(x->name);
-            if (it != class_by_name.end()) return ce(CNewClass{it->second});
+            if (it != class_by_name.end()) {
+                if (classes[it->second].is_abstract) {
+                    diag("cannot instantiate abstract class '" + x->name + "'", e.span);
+                    return cbool(false);
+                }
+                // `new C()` still runs a zero-argument constructor (own or
+                // inherited) like TypeScript does
+                for (size_t c = it->second;;) {
+                    std::string cand = classes[c].name + "__new";
+                    auto sit = sigs.find(cand);
+                    if (sit != sigs.end() && sit->second.params.size() == 1) {
+                        CNewClassCtor nc;
+                        nc.class_id = it->second;
+                        nc.fn = cand;
+                        return ce(std::move(nc));
+                    }
+                    if (sit != sigs.end()) {
+                        diag("constructor of class '" + x->name + "' takes " +
+                                 numstr(sit->second.params.size() - 1) +
+                                 " argument(s), got 0",
+                             e.span);
+                        return cbool(false);
+                    }
+                    if (!classes[c].base.has_value()) break;
+                    c = *classes[c].base;
+                }
+                return ce(CNewClass{it->second});
+            }
             diag("unknown class '" + x->name + "'", e.span);
             return cbool(false);
         }
@@ -1763,6 +2383,11 @@ public:
                 cname = path[1];
             }
             if (!cname.empty()) {
+                if (path.size() >= 2 && module_classes.count(cname) &&
+                    !exported_classes.count(cname)) {
+                    diag("no exported member '" + cname + "' from module '" + path[0] + "'", e.span);
+                    return cbool(false);
+                }
                 auto it = class_by_name.find(cname);
                 if (it == class_by_name.end()) {
                     if (generic_classes.count(cname)) {
@@ -1772,9 +2397,31 @@ public:
                     diag("unknown class '" + cname + "'", e.span);
                     return cbool(false);
                 }
-                if (x->args.empty()) return ce(CNewClass{it->second});
+                if (classes[it->second].is_abstract) {
+                    diag("cannot instantiate abstract class '" + cname + "'", e.span);
+                    return cbool(false);
+                }
                 std::string ctor_fn = cname + "__new";
                 auto sit = sigs.find(ctor_fn);
+                if (sit == sigs.end()) {
+                    // no own constructor: TypeScript calls the inherited
+                    // base constructor implicitly — do the same
+                    size_t base_id = SIZE_MAX;
+                    for (size_t c = it->second;;) {
+                        std::string cand = classes[c].name + "__new";
+                        if (sigs.count(cand)) {
+                            base_id = c;
+                            break;
+                        }
+                        if (!classes[c].base.has_value()) break;
+                        c = *classes[c].base;
+                    }
+                    if (base_id != SIZE_MAX) {
+                        sit = sigs.find(classes[base_id].name + "__new");
+                        ctor_fn = sit->first;
+                    }
+                }
+                if (x->args.empty() && sit == sigs.end()) return ce(CNewClass{it->second});
                 if (sit == sigs.end()) {
                     diag("class '" + cname +
                              "' takes no constructor arguments (declare a constructor to accept "
@@ -1794,6 +2441,7 @@ public:
                 for (size_t i = 0; i < x->args.size(); ++i) {
                     CExpr c = check_expr(*x->args[i], false);
                     if (i < params.size()) {
+                        adapt_literal(c, params[i]);
                         coerce(expr_ty(c), params[i], x->args[i]->span);
                     }
                     cargs.push_back(std::move(c));
@@ -1813,7 +2461,7 @@ public:
             CTy ot = expr_ty(oc);
             CExpr ic = check_expr(*x->index, false);
             CTy it = expr_ty(ic);
-            if (it.tag != CTy::Tag::Int) {
+            if (!is_i32(it)) {
                 diag("array index must be Int32, found " + it.name(), e.span);
             }
             if (ot.tag == CTy::Tag::Array) {
@@ -1827,6 +2475,13 @@ public:
             return cbool(false);
         }
         if (auto* x = std::get_if<ast::EMember>(&e.v)) {
+            // static member on a class name: `Name.count` (checked before
+            // the object expression, which would fail variable lookup)
+            if (auto* id = std::get_if<ast::EIdent>(&x->obj->v)) {
+                if (!contains_str(uses, id->name) && class_by_name.count(id->name)) {
+                    return check_static_member(class_by_name[id->name], x->name, e.span);
+                }
+            }
             // property access: `arr.length`, `str.length`, and fields on
             // class instances / ghost objects
             const ast::ExprPtr& obj = x->obj;
@@ -1861,6 +2516,10 @@ public:
                         return ce(std::move(g));
                     }
                 }
+                if (iface_has_method(iname, name)) {
+                    diag("interface '" + iname + "': '" + name + "' is a method (call it)", e.span);
+                    return cbool(false);
+                }
                 std::vector<std::string> names;
                 names.reserve(fields.size());
                 for (const auto& [n, _] : fields) names.push_back(n);
@@ -1874,12 +2533,22 @@ public:
                     const ClassDef& def = classes[ot.object.id];
                     for (size_t idx = 0; idx < def.fields.size(); ++idx) {
                         if (def.fields[idx].first == name) {
-                            if (def.field_is_private(name) &&
-                                !can_access_private(ot.object.name)) {
-                                diag("field '" + name + "' of class '" + ot.object.name +
-                                         "' is private (access it inside the class)",
-                                     e.span);
-                                return cbool(false);
+                            // visibility flags live on the defining class
+                            auto own = field_owner(ot.object.id, name);
+                            if (own.has_value()) {
+                                const ClassDef& odef = classes[*own];
+                                bool priv = odef.field_is_private(name);
+                                bool prot = std::find(odef.protected_fields.begin(),
+                                                      odef.protected_fields.end(),
+                                                      name) != odef.protected_fields.end();
+                                if (!can_access_member(*own, priv, prot)) {
+                                    diag(std::string("field '" + name + "' of class '" +
+                                                     odef.name + "' is " +
+                                                     (priv ? "private" : "protected") +
+                                                     " (access it inside the class or a subclass)"),
+                                         e.span);
+                                    return cbool(false);
+                                }
                             }
                             CFieldGet g;
                             g.obj = exptr(std::move(oc));
@@ -1887,6 +2556,32 @@ public:
                             g.ty = def.fields[idx].second;
                             return ce(std::move(g));
                         }
+                    }
+                    // no field: a getter? (`get name()`)
+                    if (auto g = find_member(ot.object.id, name, "get_")) {
+                        auto sit = sigs.find(g->second);
+                        bool virtual_get = classes[ot.object.id].is_abstract ||
+                                           subtree_overrides(ot.object.id, name, "get_");
+                        if (!virtual_get && sit->second.ret) {
+                            CCallFn f;
+                            f.name = g->second;
+                            f.args.push_back(std::move(oc));
+                            f.ret = *sit->second.ret;
+                            f.is_async = false;
+                            return ce(std::move(f));
+                        }
+                        if (virtual_get && sit->second.ret) {
+                            CIfaceCall call;
+                            call.obj = exptr(std::move(oc));
+                            call.iface = classes[ot.object.id].name;
+                            call.method = "get_" + name;
+                            call.ret = *sit->second.ret;
+                            return ce(std::move(call));
+                        }
+                        diag("cannot read '" + name + "' here: the getter's return type is not "
+                             "yet known (add a return type annotation)",
+                             e.span);
+                        return cbool(false);
                     }
                     std::vector<std::string> names;
                     names.reserve(def.fields.size());
@@ -1923,6 +2618,7 @@ public:
     CExpr check_binary(ast::BinOp op, const ast::Expr& l, const ast::Expr& r, Span span) {
         CExpr lc = check_expr(l, false);
         CExpr rc = check_expr(r, false);
+        adapt_peers(lc, rc);
         CTy lt = expr_ty(lc);
         CTy rt = expr_ty(rc);
         BinOpC opc;
@@ -1961,6 +2657,10 @@ public:
             case BinOpC::Ge: {
                 if (!is_numeric(lt) || !is_numeric(rt)) {
                     diag("comparison requires numbers, found " + lt.name() + " and " + rt.name(), span);
+                } else if (lt.tag == CTy::Tag::Int && rt.tag == CTy::Tag::Int && !(lt == rt)) {
+                    diag("comparison requires the same integer type, found " + lt.name() + " and " +
+                             rt.name(),
+                         span);
                 }
                 CBinary b;
                 b.op = opc;
@@ -1978,6 +2678,11 @@ public:
                         diag("'=='/'!=' requires numbers or bools, found " + lt.name(), span);
                     if (!is_numeric(rt) && rt.tag != CTy::Tag::Bool)
                         diag("'=='/'!=' requires numbers or bools, found " + rt.name(), span);
+                    if (lt.tag == CTy::Tag::Int && rt.tag == CTy::Tag::Int && !(lt == rt)) {
+                        diag("'=='/'!=' requires the same integer type, found " + lt.name() + " and " +
+                                 rt.name(),
+                             span);
+                    }
                 }
                 CBinary b;
                 b.op = opc;
@@ -1993,14 +2698,19 @@ public:
                 return arith(opc, std::move(lc), std::move(rc), lt, rt, span);
             }
             case BinOpC::Mod: {
-                if (lt.tag != CTy::Tag::Int || rt.tag != CTy::Tag::Int) {
-                    diag("operator '%' requires Int32 operands", span);
+                adapt_peers(lc, rc);
+                lt = expr_ty(lc);
+                rt = expr_ty(rc);
+                if (lt.tag != CTy::Tag::Int || rt.tag != CTy::Tag::Int || !(lt == rt)) {
+                    diag("operator '%' requires integer operands of the same type, found " +
+                             lt.name() + " and " + rt.name(),
+                         span);
                 }
                 CBinary b;
                 b.op = opc;
                 b.lhs = exptr(std::move(lc));
                 b.rhs = exptr(std::move(rc));
-                b.ty = cty_int();
+                b.ty = lt.tag == CTy::Tag::Int ? lt : cty_int();
                 return ce(std::move(b));
             }
             case BinOpC::Sub:
@@ -2011,13 +2721,28 @@ public:
         }
     }
 
-    CExpr arith(BinOpC opc, CExpr lc, CExpr rc, const CTy& lt, const CTy& rt, Span span) {
+    CExpr arith(BinOpC opc, CExpr lc, CExpr rc, CTy lt, CTy rt, Span span) {
+        adapt_peers(lc, rc);
+        lt = expr_ty(lc);
+        rt = expr_ty(rc);
         if (!is_numeric(lt) || !is_numeric(rt)) {
             diag("arithmetic requires numbers, found " + lt.name() + " and " + rt.name(), span);
         }
-        // If either operand is Float64, both are computed as Float64
-        // (`a + b` in calculate.ts: Int32 a is cast to Float64).
-        CTy result = (lt.tag == CTy::Tag::Float || rt.tag == CTy::Tag::Float) ? cty_float() : cty_int();
+        CTy result = cty_int();
+        if (lt.tag == CTy::Tag::Int && rt.tag == CTy::Tag::Int) {
+            if (!(lt == rt)) {
+                diag("arithmetic requires the same integer type, found " + lt.name() + " and " +
+                         rt.name(),
+                     span);
+            }
+            result = lt.tag == CTy::Tag::Int ? lt : cty_int();
+        } else if (lt.tag == CTy::Tag::Float && rt.tag == CTy::Tag::Float) {
+            result = (lt.bits == 32 && rt.bits == 32) ? cty_float(32) : cty_float(64);
+        } else if (lt.tag == CTy::Tag::Float) {
+            result = lt;
+        } else if (rt.tag == CTy::Tag::Float) {
+            result = rt;
+        }
         CBinary b;
         b.op = opc;
         b.lhs = exptr(std::move(lc));
@@ -2242,7 +2967,7 @@ public:
                     diag("cannot bind a void value in sql.stmt", te->expr->span);
                 } else {
                     diag("cannot bind a " + t.name() +
-                             " value in sql.stmt (bind Int32, Float64, string or bool)",
+                             " value in sql.stmt (bind an integer, float, string or bool)",
                          te->expr->span);
                 }
                 sql += '?';
@@ -2679,8 +3404,11 @@ public:
             std::vector<CTy> sig_params = sit->second.params;
             std::optional<CTy> sig_ret = sit->second.ret;
             bool sig_async = sit->second.is_async;
-            for (size_t i = 0; i < arg_tys.size(); ++i) {
-                if (i < sig_params.size()) coerce(arg_tys[i], sig_params[i], args[i]->span);
+            for (size_t i = 0; i < cargs.size(); ++i) {
+                if (i < sig_params.size()) {
+                    adapt_literal(cargs[i], sig_params[i]);
+                    coerce(expr_ty(cargs[i]), sig_params[i], args[i]->span);
+                }
             }
             CCallFn f;
             f.name = mangled;
@@ -2723,6 +3451,7 @@ public:
         std::optional<CTy> saved_ret_ty = std::move(ret_ty);
         ret_ty.reset();
         bool saved_float = saw_float_ret;
+        uint8_t saved_float_bits = ret_float_bits;
         bool saved_async = is_async_ctx;
         bool saved_toplevel = in_toplevel;
         std::optional<std::pair<CTy, bool>> saved_promise_infer = std::move(promise_infer);
@@ -2730,10 +3459,15 @@ public:
         CFn cf = check_fn(subst);
         ret_ty = std::move(saved_ret_ty);
         saw_float_ret = saved_float;
+        ret_float_bits = saved_float_bits;
         is_async_ctx = saved_async;
         in_toplevel = saved_toplevel;
         promise_infer = std::move(saved_promise_infer);
         CTy ret = cf.ret;
+        for (size_t i = 0; i < cargs.size() && i < params.size(); ++i) {
+            adapt_literal(cargs[i], params[i]);
+            coerce(expr_ty(cargs[i]), params[i], args[i]->span);
+        }
         mono_fns.push_back(std::move(cf));
         if (!pre_ret) {
             FnSig sig;
@@ -2768,7 +3502,8 @@ public:
                         b = actual;
                     } else {
                         const CTy& prev = *b;
-                        if (!(prev == actual) && !(prev.tag == CTy::Tag::Int && actual.tag == CTy::Tag::Float)) {
+                        if (!(prev == actual) && !(prev.tag == CTy::Tag::Int && actual.tag == CTy::Tag::Float) &&
+                            !(prev.tag == CTy::Tag::Float && actual.tag == CTy::Tag::Float)) {
                             diag("type parameter '" + n + "' is bound to " + actual.name() +
                                      " here but " + prev.name() + " elsewhere",
                                  span);
@@ -2962,17 +3697,71 @@ public:
         return cur_fn.size() > prefix.size() && cur_fn.compare(0, prefix.size(), prefix) == 0;
     }
 
-    /// Method call on a class instance: `obj.method(args)` lowers to a call
-    /// of the lowered `Class__method(this, args)` function. Nullopt when the
-    /// class has no such method.
+    /// Method call on a class instance: `obj.method(args)`. The method may
+    /// be inherited; when any subclass overrides it (or the declared class
+    /// is abstract), the call is virtually dispatched on the runtime class
+    /// id, TypeScript-style.
     std::optional<CExpr> check_user_method(CExpr oc, const ObjectTy& obj, const std::string& name,
                                            const std::vector<ast::ExprPtr>& args, Span span) {
-        std::string full = obj.name + "__" + name;
-        auto sit = sigs.find(full);
-        if (sit == sigs.end()) return std::nullopt;
+        auto impl = find_member(obj.id, name, "");
+        // abstract method on an abstract receiver: no implementation exists
+        // anywhere up the chain; the call dispatches virtually
+        if (!impl) {
+            const FnSig* asig = nullptr;
+            for (size_t c = obj.id;;) {
+                auto it = abstract_sigs.find(classes[c].name + "__" + name);
+                if (it != abstract_sigs.end()) {
+                    asig = &it->second;
+                    break;
+                }
+                if (!classes[c].base.has_value()) return std::nullopt;
+                c = *classes[c].base;
+            }
+            if (args.size() != asig->params.size()) {
+                diag("method '" + name + "' of class '" + obj.name + "' takes " +
+                         numstr(asig->params.size()) + " argument(s), got " + numstr(args.size()),
+                     span);
+            }
+            std::vector<CExpr> cargs;
+            for (size_t i = 0; i < args.size(); ++i) {
+                CExpr c = check_expr(*args[i], false);
+                if (i < asig->params.size()) {
+                    adapt_literal(c, asig->params[i]);
+                    coerce(expr_ty(c), asig->params[i], args[i]->span);
+                }
+                cargs.push_back(std::move(c));
+            }
+            if (!asig->ret) {
+                diag("cannot call abstract method '" + name + "' of class '" + obj.name +
+                         "' here: its return type is not yet known (add a return type annotation)",
+                     span);
+                return cbool(false);
+            }
+            CIfaceCall call;
+            call.obj = exptr(std::move(oc));
+            call.iface = classes[obj.id].name;
+            call.method = name;
+            call.args = std::move(cargs);
+            call.ret = *asig->ret;
+            return ce(std::move(call));
+        }
+        auto [definer, mangled] = *impl;
+        const ClassDef& def = classes[definer];
+        bool priv = std::find(def.private_methods.begin(), def.private_methods.end(), name) !=
+                    def.private_methods.end();
+        bool prot = std::find(def.protected_methods.begin(), def.protected_methods.end(), name) !=
+                    def.protected_methods.end();
+        if (!can_access_member(definer, priv, prot)) {
+            diag(std::string("method '" + name + "' of class '" + def.name + "' is " +
+                             (priv ? "private" : "protected") +
+                             " (call it inside the class or a subclass)"),
+                 span);
+            return cbool(false);
+        }
+        const FnSig& fsig = sigs[mangled];
         // param 0 is the implicit `this`
         std::vector<CTy> params;
-        for (size_t i = 1; i < sit->second.params.size(); ++i) params.push_back(sit->second.params[i]);
+        for (size_t i = 1; i < fsig.params.size(); ++i) params.push_back(fsig.params[i]);
         if (args.size() != params.size()) {
             diag("method '" + name + "' of class '" + obj.name + "' takes " +
                      numstr(params.size()) + " argument(s), got " + numstr(args.size()),
@@ -2983,16 +3772,28 @@ public:
         for (size_t i = 0; i < args.size(); ++i) {
             CExpr c = check_expr(*args[i], false);
             if (i < params.size()) {
+                adapt_literal(c, params[i]);
                 coerce(expr_ty(c), params[i], args[i]->span);
             }
             cargs.push_back(std::move(c));
         }
-        if (sit->second.ret) {
+        bool dispatch = classes[obj.id].is_abstract || subtree_overrides(obj.id, name, "");
+        if (dispatch) {
+            CIfaceCall call;
+            call.obj = exptr(std::move(cargs[0]));
+            call.iface = classes[obj.id].name;
+            call.method = name;
+            call.args.assign(std::make_move_iterator(cargs.begin()) + 1,
+                             std::make_move_iterator(cargs.end()));
+            call.ret = fsig.ret ? *fsig.ret : cty_void();
+            return ce(std::move(call));
+        }
+        if (fsig.ret) {
             CCallFn f;
-            f.name = full;
+            f.name = mangled;
             f.args = std::move(cargs);
-            f.ret = *sit->second.ret;
-            f.is_async = sit->second.is_async;
+            f.ret = *fsig.ret;
+            f.is_async = fsig.is_async;
             return ce(std::move(f));
         }
         diag("cannot call method '" + name + "' of class '" + obj.name +
@@ -3001,11 +3802,240 @@ public:
         return cbool(false);
     }
 
+    /// `obj.method(args)` where `obj` has an interface type. The signature
+    /// comes from the interface; codegen dispatches on the runtime class id.
+    CExpr check_iface_method(CExpr oc, const std::string& iname, const std::string& name,
+                             const std::vector<ast::ExprPtr>& args, Span span) {
+        const IfaceMSig* msig = nullptr;
+        auto mit = iface_methods.find(iname);
+        if (mit != iface_methods.end()) {
+            for (const auto& [n, s] : mit->second)
+                if (n == name) {
+                    msig = &s;
+                    break;
+                }
+        }
+        if (!msig) {
+            diag("interface '" + iname + "' has no method '" + name + "'", span);
+            return cbool(false);
+        }
+        if (args.size() != msig->params.size()) {
+            diag("method '" + name + "' of interface '" + iname + "' takes " +
+                     numstr(msig->params.size()) + " argument(s), got " + numstr(args.size()),
+                 span);
+        }
+        std::vector<CExpr> cargs;
+        for (size_t i = 0; i < args.size(); ++i) {
+            CExpr c = check_expr(*args[i], false);
+            if (i < msig->params.size()) {
+                adapt_literal(c, msig->params[i]);
+                coerce(expr_ty(c), msig->params[i], args[i]->span);
+            }
+            cargs.push_back(std::move(c));
+        }
+        CIfaceCall call;
+        call.obj = exptr(std::move(oc));
+        call.iface = iname;
+        call.method = name;
+        call.args = std::move(cargs);
+        call.ret = msig->ret;
+        return ce(std::move(call));
+    }
+
+    /// `Name.staticMethod(args)` — static methods are plain functions with
+    /// no `this`; visibility still applies.
+    CExpr check_static_method_call(size_t cid, const std::string& name,
+                                   const std::vector<ast::ExprPtr>& args, Span span) {
+        auto impl = find_member(cid, name, "static__");
+        if (!impl) {
+            diag("class '" + classes[cid].name + "' has no static method '" + name + "'", span);
+            return cbool(false);
+        }
+        auto [definer, mangled] = *impl;
+        const ClassDef& def = classes[definer];
+        bool priv = std::find(def.private_methods.begin(), def.private_methods.end(), name) !=
+                    def.private_methods.end();
+        bool prot = std::find(def.protected_methods.begin(), def.protected_methods.end(), name) !=
+                    def.protected_methods.end();
+        if (!can_access_member(definer, priv, prot)) {
+            diag(std::string("static method '" + name + "' of class '" + def.name + "' is " +
+                             (priv ? "private" : "protected")),
+                 span);
+            return cbool(false);
+        }
+        const FnSig& fsig = sigs[mangled];
+        if (args.size() != fsig.params.size()) {
+            diag("static method '" + name + "' of class '" + def.name + "' takes " +
+                     numstr(fsig.params.size()) + " argument(s), got " + numstr(args.size()),
+                 span);
+        }
+        std::vector<CExpr> cargs;
+        for (size_t i = 0; i < args.size(); ++i) {
+            CExpr c = check_expr(*args[i], false);
+            if (i < fsig.params.size()) {
+                adapt_literal(c, fsig.params[i]);
+                coerce(expr_ty(c), fsig.params[i], args[i]->span);
+            }
+            cargs.push_back(std::move(c));
+        }
+        if (fsig.ret) {
+            CCallFn f;
+            f.name = mangled;
+            f.args = std::move(cargs);
+            f.ret = *fsig.ret;
+            f.is_async = fsig.is_async;
+            return ce(std::move(f));
+        }
+        diag("cannot call static method '" + name + "' of class '" + def.name +
+                 "' here: its return type is not yet known (add a return type annotation)",
+             span);
+        return cbool(false);
+    }
+
+    /// `super(args)` inside a constructor: calls the nearest base class
+    /// constructor with the current `this`.
+    CExpr check_super_ctor(const std::vector<ast::ExprPtr>& args, Span span) {
+        size_t cid = SIZE_MAX;
+        if (auto c = cur_class_id()) cid = *c;
+        if (cid >= classes.size()) {
+            diag("'super' can only be used inside a class method or constructor", span);
+            return cbool(false);
+        }
+        if (cur_fn.size() < 5 || cur_fn.compare(cur_fn.size() - 5, 5, "__new") != 0) {
+            diag("'super(...)' is only allowed inside a constructor", span);
+            return cbool(false);
+        }
+        if (!classes[cid].base.has_value()) {
+            diag("class '" + classes[cid].name + "' has no base class: 'super(...)' cannot be "
+                 "called",
+                 span);
+            return cbool(false);
+        }
+        // nearest ancestor constructor
+        std::string base_new;
+        size_t base_id = SIZE_MAX;
+        for (size_t c = *classes[cid].base;;) {
+            std::string cand = classes[c].name + "__new";
+            if (sigs.count(cand)) {
+                base_new = cand;
+                base_id = c;
+                break;
+            }
+            if (!classes[c].base.has_value()) break;
+            c = *classes[c].base;
+        }
+        if (base_new.empty()) {
+            diag("no constructor found in the base classes of '" + classes[cid].name +
+                     "': 'super(...)' cannot be called",
+                 span);
+            return cbool(false);
+        }
+        auto this_v = lookup("this", span);
+        if (!this_v) {
+            diag("'super(...)' requires a 'this' binding (internal error)", span);
+            return cbool(false);
+        }
+        auto [this_id, this_ty, iscap] = *this_v;
+        (void)iscap;
+        const FnSig& fsig = sigs[base_new];
+        // param 0 of a lowered ctor is `this`
+        std::vector<CTy> params;
+        for (size_t i = 1; i < fsig.params.size(); ++i) params.push_back(fsig.params[i]);
+        if (args.size() != params.size()) {
+            diag("constructor of '" + classes[base_id].name + "' takes " + numstr(params.size()) +
+                     " argument(s), got " + numstr(args.size()),
+                 span);
+        }
+        std::vector<CExpr> cargs;
+        CExpr self = ce(CIdent{this_id, this_ty});
+        cargs.push_back(std::move(self));
+        for (size_t i = 0; i < args.size(); ++i) {
+            CExpr c = check_expr(*args[i], false);
+            if (i < params.size()) {
+                adapt_literal(c, params[i]);
+                coerce(expr_ty(c), params[i], args[i]->span);
+            }
+            cargs.push_back(std::move(c));
+        }
+        CCallFn f;
+        f.name = base_new;
+        f.args = std::move(cargs);
+        f.ret = cty_void();
+        f.is_async = false;
+        return ce(std::move(f));
+    }
+
+    /// `super.method(args)` inside a class method: a direct (non-virtual)
+    /// call to the base class implementation with the current `this`.
+    CExpr check_super_method(const std::string& name, const std::vector<ast::ExprPtr>& args,
+                             Span span) {
+        size_t cid = SIZE_MAX;
+        if (auto c = cur_class_id()) cid = *c;
+        if (cid >= classes.size()) {
+            diag("'super' can only be used inside a class method or constructor", span);
+            return cbool(false);
+        }
+        if (!classes[cid].base.has_value()) {
+            diag("class '" + classes[cid].name +
+                     "' has no base class: 'super." + name + "' cannot be called",
+                 span);
+            return cbool(false);
+        }
+        auto impl = find_member(*classes[cid].base, name, "");
+        if (!impl) {
+            diag("base class of '" + classes[cid].name + "' has no method '" + name + "'", span);
+            return cbool(false);
+        }
+        auto [definer, mangled] = *impl;
+        const FnSig& fsig = sigs[mangled];
+        std::vector<CTy> params;
+        for (size_t i = 1; i < fsig.params.size(); ++i) params.push_back(fsig.params[i]);
+        if (args.size() != params.size()) {
+            diag("method '" + name + "' of base class '" + classes[definer].name + "' takes " +
+                     numstr(params.size()) + " argument(s), got " + numstr(args.size()),
+                 span);
+        }
+        auto this_v = lookup("this", span);
+        if (!this_v) {
+            diag("'super." + name + "' requires a 'this' binding (internal error)", span);
+            return cbool(false);
+        }
+        auto [this_id, this_ty, iscap] = *this_v;
+        (void)iscap;
+        std::vector<CExpr> cargs;
+        cargs.push_back(ce(CIdent{this_id, this_ty}));
+        for (size_t i = 0; i < args.size(); ++i) {
+            CExpr c = check_expr(*args[i], false);
+            if (i < params.size()) {
+                adapt_literal(c, params[i]);
+                coerce(expr_ty(c), params[i], args[i]->span);
+            }
+            cargs.push_back(std::move(c));
+        }
+        if (fsig.ret) {
+            CCallFn f;
+            f.name = mangled;
+            f.args = std::move(cargs);
+            f.ret = *fsig.ret;
+            f.is_async = fsig.is_async;
+            return ce(std::move(f));
+        }
+        diag("cannot call 'super." + name +
+                 "' here: its return type is not yet known (add a return type annotation)",
+             span);
+        return cbool(false);
+    }
+
     CExpr check_call(const ast::Expr& callee, const std::vector<ast::ExprPtr>& args, Span span) {
+        // super.method(...) — direct call to the base class implementation
+        const ast::EMember* mem = std::get_if<ast::EMember>(&callee.v);
+        if (mem && std::get_if<ast::EIdent>(&mem->obj->v) &&
+            std::get<ast::EIdent>(mem->obj->v).name == "super") {
+            return check_super_method(mem->name, args, span);
+        }
         // std-module and package functions: `net.connect(...)`, `http.get(...)`,
         // `mypkg.fn(...)`, `mod.sub.fn(...)` (modules expose functions under
         // their mangled `<prefix>__<path>__<fn>` names)
-        const ast::EMember* mem = std::get_if<ast::EMember>(&callee.v);
         if (mem) {
             std::vector<std::string> chain;
             if (member_chain(callee, chain) && chain.size() >= 2 &&
@@ -3024,6 +4054,12 @@ public:
                     std::string full = use_prefix_of(m);
                     for (size_t i = 1; i < chain.size(); ++i) full += "__" + chain[i];
                     if (sigs.count(full)) {
+                        if (!exported_fns.count(full)) {
+                            diag("no exported member '" + chain.back() + "' from module '" + m +
+                                     "'",
+                                 span);
+                            return cbool(false);
+                        }
                         ast::Expr ident;
                         ident.span = span;
                         ident.v = ast::EIdent{full};
@@ -3031,6 +4067,12 @@ public:
                     }
                     diag("module '" + m + "' has no function '" + chain.back() + "'", span);
                     return cbool(false);
+                }
+            }
+            // static methods on user classes: `Shape.count()`, `Utils.helpers()`
+            if (auto* o = std::get_if<ast::EIdent>(&mem->obj->v)) {
+                if (!contains_str(uses, o->name) && class_by_name.count(o->name)) {
+                    return check_static_method_call(class_by_name[o->name], mem->name, args, span);
                 }
             }
             // static methods on exported std-module classes:
@@ -3079,13 +4121,21 @@ public:
                 if (ot.tag == CTy::Tag::Stream)
                     return check_stream_method(std::move(oc), name, args, span);
                 if (ot.tag == CTy::Tag::Object) {
-                    if (auto r = check_http_object_method(std::move(oc), ot.object, name, args, span))
-                        return std::move(*r);
+                    // gate on std-module class prefixes: the helper consumes
+                    // its receiver, which must stay intact for user methods
+                    if (ot.object.name.rfind("http_", 0) == 0 ||
+                        ot.object.name.rfind("sql_", 0) == 0) {
+                        if (auto r =
+                                check_http_object_method(std::move(oc), ot.object, name, args, span))
+                            return std::move(*r);
+                    }
                     if (auto r = check_user_method(std::move(oc), ot.object, name, args, span))
                         return std::move(*r);
                     diag("class '" + ot.object.name + "' has no method '" + name + "'", span);
                     return cbool(false);
                 }
+                if (ot.tag == CTy::Tag::Interface)
+                    return check_iface_method(std::move(oc), ot.iface, name, args, span);
                 diag("'" + name + "' is not supported", span);
                 return cbool(false);
             }
@@ -3099,13 +4149,19 @@ public:
             if (ot.tag == CTy::Tag::Stream)
                 return check_stream_method(std::move(oc), name, args, span);
             if (ot.tag == CTy::Tag::Object) {
-                if (auto r = check_http_object_method(std::move(oc), ot.object, name, args, span))
-                    return std::move(*r);
+                if (ot.object.name.rfind("http_", 0) == 0 ||
+                    ot.object.name.rfind("sql_", 0) == 0) {
+                    if (auto r =
+                            check_http_object_method(std::move(oc), ot.object, name, args, span))
+                        return std::move(*r);
+                }
                 if (auto r = check_user_method(std::move(oc), ot.object, name, args, span))
                     return std::move(*r);
                 diag("class '" + ot.object.name + "' has no method '" + name + "'", span);
                 return cbool(false);
             }
+            if (ot.tag == CTy::Tag::Interface)
+                return check_iface_method(std::move(oc), ot.iface, name, args, span);
             diag("member access is only supported for 'console.log(...)' and array methods", span);
             return cbool(false);
         }
@@ -3128,7 +4184,7 @@ public:
                 }
                 size_t idx = check_plain_lambda(*lam->lambda);
                 CExpr ms = check_expr(*args[1], false);
-                if (expr_ty(ms).tag != CTy::Tag::Int) {
+                if (!is_i32(expr_ty(ms))) {
                     diag("setTimeout's delay must be an Int32", args[1]->span);
                 }
                 CSetTimeout st;
@@ -3137,6 +4193,7 @@ public:
                 return ce(std::move(st));
             }
             // user function
+            if (name == "super") return check_super_ctor(args, span);
             if (generic_fns.count(name)) {
                 return check_generic_call(name, nullptr, args, span);
             }
@@ -3154,8 +4211,8 @@ public:
                 for (size_t i = 0; i < args.size(); ++i) {
                     CExpr c = check_expr(*args[i], false);
                     if (i < params.size()) {
-                        CTy at = expr_ty(c);
-                        coerce(at, params[i], args[i]->span);
+                        adapt_literal(c, params[i]);
+                        coerce(expr_ty(c), params[i], args[i]->span);
                     }
                     cargs.push_back(std::move(c));
                 }
@@ -3214,9 +4271,17 @@ public:
         }
         auto& [cur, saw_float] = *promise_infer;
         if (cur == arg) return;
-        if ((cur.tag == CTy::Tag::Int && arg.tag == CTy::Tag::Float) ||
-            (cur.tag == CTy::Tag::Float && arg.tag == CTy::Tag::Int)) {
-            cur = cty_float();
+        if (cur.tag == CTy::Tag::Float && arg.tag == CTy::Tag::Float) {
+            cur = cty_float(cur.bits == 32 && arg.bits == 32 ? 32 : 64);
+            saw_float = true;
+            return;
+        }
+        if (cur.tag == CTy::Tag::Int && arg.tag == CTy::Tag::Float) {
+            cur = arg;
+            saw_float = true;
+            return;
+        }
+        if (cur.tag == CTy::Tag::Float && arg.tag == CTy::Tag::Int) {
             saw_float = true;
             return;
         }
@@ -3261,6 +4326,7 @@ public:
         enter_lambda_scope(idx);
         ret_ty.reset();
         saw_float_ret = false;
+        ret_float_bits = 0;
         std::vector<CStmt> body = check_stmts(l.body);
         CTy r = ret_ty ? *ret_ty : cty_void();
         if (r.tag != CTy::Tag::Void) {
@@ -3310,6 +4376,7 @@ public:
 
         ret_ty.reset();
         saw_float_ret = false;
+        ret_float_bits = 0;
         std::vector<CStmt> body = check_stmts(l.body);
         CTy r = ret_ty ? *ret_ty : cty_void();
         if (r.tag != CTy::Tag::Void) {
@@ -3320,7 +4387,7 @@ public:
         if (promise_infer) {
             auto [ty, saw_float] = *promise_infer;
             promise_infer.reset();
-            t = (saw_float && ty.tag == CTy::Tag::Int) ? cty_float() : ty;
+            t = (saw_float && ty.tag == CTy::Tag::Int) ? cty_float(64) : ty;
         } else {
             promise_infer.reset();
             diag("cannot infer the promise value type: the executor never calls resolve (write "
@@ -3378,12 +4445,15 @@ public:
         }
         ret_ty.reset();
         saw_float_ret = false;
+        ret_float_bits = 0;
+        std::optional<CTy> saved_target = std::move(ret_literal_target);
+        ret_literal_target = expect_ret;
         bool saved_async = is_async_ctx;
         is_async_ctx = l.is_async;
         std::vector<CStmt> body = check_stmts(l.body);
         is_async_ctx = saved_async;
-        CTy ret = ret_ty ? *ret_ty : cty_void();
-        if (saw_float_ret && ret.tag == CTy::Tag::Int) ret = cty_float();
+        ret_literal_target = std::move(saved_target);
+        CTy ret = apply_float_ret(ret_ty ? *ret_ty : cty_void());
         if (expect_ret) {
             coerce(ret, *expect_ret, l.span);
             ret = *expect_ret;
@@ -3433,13 +4503,14 @@ public:
             std::vector<std::pair<std::string, CTy>> def_fields = classes[id].fields;
             std::string def_name = classes[id].name;
             for (const auto& [fname, fty] : def_fields) {
-                const CExpr* c = nullptr;
-                for (const auto& [n, ce2] : cs)
+                CExpr* c = nullptr;
+                for (auto& [n, ce2] : cs)
                     if (n == fname) {
                         c = &ce2;
                         break;
                     }
                 if (c) {
+                    adapt_literal(*c, fty);
                     coerce(expr_ty(*c), fty, span);
                 } else {
                     diag("missing field '" + fname + "' for class '" + def_name + "'", span);
@@ -3500,7 +4571,8 @@ public:
                 CExpr c = check_expr(*el, false);
                 CTy t = expr_ty(c);
                 if (t.tag != CTy::Tag::Void) {
-                    coerce(t, *expected, el->span);
+                    adapt_literal(c, *expected);
+                    coerce(expr_ty(c), *expected, el->span);
                 }
                 cs.push_back(std::move(c));
             }
@@ -3511,6 +4583,19 @@ public:
         }
         std::vector<CExpr> cs;
         for (const auto& el : elems) cs.push_back(check_expr(*el, false));
+        std::optional<CTy> anchor;
+        for (const auto& c : cs) {
+            if (is_num_lit(c)) continue;
+            CTy t = expr_ty(c);
+            if (is_numeric(t)) {
+                anchor = t;
+                break;
+            }
+        }
+        if (anchor) {
+            for (auto& c : cs)
+                if (is_num_lit(c)) adapt_literal(c, *anchor);
+        }
         std::optional<CTy> ty;
         bool saw_float = false;
         for (const auto& c : cs) {
@@ -3525,9 +4610,11 @@ public:
             } else if (*ty == t) {
                 ty = t;
             } else if (ty->tag == CTy::Tag::Int && t.tag == CTy::Tag::Float) {
-                ty = cty_float();
+                ty = t;
             } else if (ty->tag == CTy::Tag::Float && t.tag == CTy::Tag::Int) {
-                ty = cty_float();
+                // keep the float
+            } else if (ty->tag == CTy::Tag::Float && t.tag == CTy::Tag::Float) {
+                ty = cty_float(64);
             } else {
                 diag("inconsistent array element types: " + ty->name() + " and " + t.name(), span);
                 // keep prev
@@ -3535,7 +4622,7 @@ public:
         }
         CTy elem_ty;
         if (ty && ty->tag == CTy::Tag::Int && saw_float) {
-            elem_ty = cty_float();
+            elem_ty = cty_float(64);
         } else if (ty) {
             elem_ty = *ty;
         } else if (expected) {
@@ -3562,7 +4649,7 @@ public:
                 return cbool(false);
             }
             CExpr i = check_expr(*args[0], false);
-            if (expr_ty(i).tag != CTy::Tag::Int) {
+            if (!is_i32(expr_ty(i))) {
                 diag("string.charAt index must be Int32", span);
             }
             CStrMethod m;
@@ -3580,7 +4667,7 @@ public:
             std::vector<CExpr> cargs;
             for (const auto& a : args) {
                 CExpr c = check_expr(*a, false);
-                if (expr_ty(c).tag != CTy::Tag::Int) {
+                if (!is_i32(expr_ty(c))) {
                     diag("string.substring indices must be Int32", span);
                 }
                 cargs.push_back(std::move(c));
@@ -3609,6 +4696,7 @@ public:
             expect_count(1);
             if (args.empty()) return cbool(false); // Rust would panic here; bail out instead
             CExpr a = check_expr(*args[0], false);
+            adapt_literal(a, elem);
             coerce(expr_ty(a), elem, span);
             CArrayOp ao;
             ao.op = name == "push" ? ArrayOpKind::Push : ArrayOpKind::Unshift;
@@ -3630,7 +4718,7 @@ public:
             std::vector<CExpr> cargs;
             for (const auto& a : args) {
                 CExpr c = check_expr(*a, false);
-                if (expr_ty(c).tag != CTy::Tag::Int) {
+                if (!is_i32(expr_ty(c))) {
                     diag("array." + name + " indices must be Int32", span);
                 }
                 cargs.push_back(std::move(c));
@@ -3765,6 +4853,206 @@ public:
              span);
         return cbool(false);
     }
+
+    /// Does this expression contain a `super(...)` call? (also descends
+    /// into nested calls, conditionals and lambdas)
+    bool expr_calls_super(const ast::Expr& e) const {
+        if (auto* c = std::get_if<ast::ECall>(&e.v)) {
+            if (auto* id = std::get_if<ast::EIdent>(&c->callee->v); id && id->name == "super")
+                return true;
+            if (expr_calls_super(*c->callee)) return true;
+            for (const auto& a : c->args)
+                if (expr_calls_super(*a)) return true;
+            return false;
+        }
+        if (auto* m = std::get_if<ast::EMember>(&e.v)) return expr_calls_super(*m->obj);
+        if (auto* u = std::get_if<ast::EUnary>(&e.v)) return expr_calls_super(*u->operand);
+        if (auto* b = std::get_if<ast::EBinary>(&e.v))
+            return expr_calls_super(*b->lhs) || expr_calls_super(*b->rhs);
+        if (auto* g = std::get_if<ast::EIndex>(&e.v))
+            return expr_calls_super(*g->obj) || expr_calls_super(*g->index);
+        return false;
+    }
+
+    bool stmt_calls_super(const ast::Stmt& s) const {
+        if (auto* x = std::get_if<ast::SExpr>(&s.v)) return expr_calls_super(*x->expr);
+        if (auto* x = std::get_if<ast::SLet>(&s.v))
+            return static_cast<bool>(x->init) && expr_calls_super(*x->init);
+        if (auto* x = std::get_if<ast::SAssign>(&s.v)) return expr_calls_super(*x->value);
+        if (auto* x = std::get_if<ast::SMemberAssign>(&s.v)) return expr_calls_super(*x->value);
+        if (auto* x = std::get_if<ast::SIndexAssign>(&s.v)) return expr_calls_super(*x->value);
+        if (auto* x = std::get_if<ast::SIf>(&s.v)) {
+            if (expr_calls_super(*x->cond)) return true;
+            for (const auto& st : x->then_body)
+                if (stmt_calls_super(st)) return true;
+            if (x->else_body)
+                for (const auto& st : *x->else_body)
+                    if (stmt_calls_super(st)) return true;
+            return false;
+        }
+        if (auto* x = std::get_if<ast::SWhile>(&s.v)) {
+            if (expr_calls_super(*x->cond)) return true;
+            for (const auto& st : x->body)
+                if (stmt_calls_super(st)) return true;
+            return false;
+        }
+        if (auto* x = std::get_if<ast::SFor>(&s.v)) {
+            for (const auto& st : x->body)
+                if (stmt_calls_super(st)) return true;
+            return false;
+        }
+        return false;
+    }
+
+    /// Validate every `class D implements I1, I2` clause: the interfaces
+    /// must exist, their fields must be present with matching types, and
+    /// their methods must be implemented (inherited implementations count).
+    void check_implements(const ast::Program& program) {
+        for (const auto& cl : program.classes) {
+            if (cl.interfaces.empty()) continue;
+            if (generic_classes.count(cl.name)) continue; // diagnosed during lowering
+            auto cid_it = class_by_name.find(cl.name);
+            if (cid_it == class_by_name.end() || cid_it->second >= classes.size()) continue;
+            size_t id = cid_it->second;
+            for (const auto& iname : cl.interfaces) {
+                auto it = interfaces.find(iname);
+                if (it == interfaces.end()) {
+                    diag("interface '" + iname + "' is not declared", cl.span);
+                    continue;
+                }
+                ObjectTy o;
+                o.id = id;
+                o.name = classes[id].name;
+                iface_conform(o, iname, cl.span);
+            }
+        }
+        // concrete classes must implement every abstract method inherited
+        // from their base chain (TypeScript: "non-abstract class does not
+        // implement inherited abstract member")
+        for (size_t id = 0; id < classes.size(); ++id) {
+            const ClassDef& def = classes[id];
+            if (def.is_ghost || def.is_abstract) continue;
+            for (size_t anc = id;;) {
+                const std::string pfx = classes[anc].name + "__";
+                for (const auto& [key, asig] : abstract_sigs) {
+                    if (key.size() <= pfx.size() ||
+                        key.compare(0, pfx.size(), pfx) != 0)
+                        continue;
+                    std::string rest = key.substr(pfx.size());
+                    if (rest == "new" || rest.rfind("static__", 0) == 0) continue;
+                    const char* suffix = "";
+                    std::string mname = rest;
+                    if (rest.rfind("get_", 0) == 0) {
+                        suffix = "get_";
+                        mname = rest.substr(4);
+                    } else if (rest.rfind("set_", 0) == 0) {
+                        suffix = "set_";
+                        mname = rest.substr(4);
+                    }
+                    auto impl = find_member(id, mname, suffix);
+                    if (!impl) {
+                        diag("class '" + def.name + "' does not implement abstract method '" +
+                                 mname + "' of '" + classes[anc].name + "'",
+                             def_span(id));
+                        continue;
+                    }
+                    // signature must match the abstract declaration
+                    // (impl sigs carry `this` at index 0, abstract sigs don't)
+                    const FnSig& is_ = sigs[impl->second];
+                    bool mismatch = (is_.params.size() - 1) != asig.params.size() ||
+                                    is_.ret.has_value() != asig.ret.has_value() ||
+                                    (is_.ret.has_value() && asig.ret.has_value() &&
+                                     !(*is_.ret == *asig.ret));
+                    if (!mismatch) {
+                        // param check: compare pairwise (impl has `this` at 0)
+                        for (size_t pi = 0; pi < asig.params.size(); ++pi)
+                            if (!(is_.params[pi + 1] == asig.params[pi])) mismatch = true;
+                    }
+                    if (mismatch) {
+                        diag("method '" + mname + "' of class '" + def.name +
+                                 "' does not match the abstract declaration in '" +
+                                 classes[anc].name + "'",
+                             def_span(id));
+                    }
+                }
+                if (!classes[anc].base.has_value()) break;
+                anc = *classes[anc].base;
+            }
+        }
+    }
+
+    /// After every method body has been checked (so inferred return types
+    /// are known), record the dispatch tables:
+    ///   - class vtables: key `Class\nmember` (member = `name`, `get_x`,
+    ///     `set_x`) → every concrete implementation across the class's
+    ///     subtree, so `CIfaceCall` on an abstract or overridden receiver
+    ///     can pick the right method at runtime.
+    ///   - interfaces: key `iface\nmethod` → implementations (inherited
+    ///     methods count).
+    void publish_iface_impls(Checked& out) const {
+        for (size_t id = 0; id < classes.size(); ++id) {
+            const ClassDef& def = classes[id];
+            if (def.is_ghost || def.is_abstract) continue;
+            // collect member keys declared anywhere in the base chain
+            // (own sigs and abstract signatures); each concrete class gets
+            // a vtable entry in itself and every ancestor, pointing at the
+            // nearest implementation up its chain
+            std::set<std::string> keys;
+            for (size_t c = id;;) {
+                const std::string pfx = classes[c].name + "__";
+                for (const auto& [fname, sig] : sigs) {
+                    (void)sig;
+                    if (fname.size() > pfx.size() &&
+                        fname.compare(0, pfx.size(), pfx) == 0) {
+                        std::string rest = fname.substr(pfx.size());
+                        if (rest == "new" || rest.rfind("static__", 0) == 0)
+                            continue; // constructors and statics are not virtual
+                        keys.insert(std::move(rest));
+                    }
+                }
+                for (const auto& [k, sig] : abstract_sigs) {
+                    (void)sig;
+                    if (k.size() > pfx.size() && k.compare(0, pfx.size(), pfx) == 0)
+                        keys.insert(k.substr(pfx.size()));
+                }
+                if (!classes[c].base.has_value()) break;
+                c = *classes[c].base;
+            }
+            for (const auto& key : keys) {
+                const char* suffix = "";
+                std::string mname = key;
+                if (key.rfind("get_", 0) == 0) {
+                    suffix = "get_";
+                    mname = key.substr(4);
+                } else if (key.rfind("set_", 0) == 0) {
+                    suffix = "set_";
+                    mname = key.substr(4);
+                }
+                auto impl = find_member(id, mname, suffix);
+                if (!impl) continue; // no concrete implementation in the chain
+                for (size_t a = id;;) {
+                    out.iface_impls[classes[a].name + "\n" + key].emplace_back(id, impl->second);
+                    if (!classes[a].base.has_value()) break;
+                    a = *classes[a].base;
+                }
+            }
+        }
+        for (const auto& [iname, methods] : iface_methods) {
+            for (const auto& [mname, msig] : methods) {
+                std::vector<std::pair<size_t, std::string>> impls;
+                for (size_t id = 0; id < classes.size(); ++id) {
+                    const ClassDef& def = classes[id];
+                    if (def.is_ghost || def.is_abstract || def.method_is_private(mname)) continue;
+                    // inherited implementations count: walk the base chain
+                    auto impl = find_member(id, mname, "");
+                    if (!impl) continue;
+                    if (!method_sig_eq(sigs.at(impl->second), msig)) continue;
+                    impls.emplace_back(id, impl->second);
+                }
+                out.iface_impls[iname + "\n" + mname] = std::move(impls);
+            }
+        }
+    }
 };
 
 } // anonymous namespace
@@ -3773,20 +5061,28 @@ public:
 // Entry points
 // ---------------------------------------------------------------------------
 
-/// Lower class constructors/methods into top-level functions before checking:
-///   `constructor(params)`  →  `Name__new(this: Name, params)`
-///   `method(args)`         →  `Name__method(this: Name, args)`
-/// Method bodies reference the instance as `this` (the hidden first
-/// parameter). Generic classes don't support constructors/methods yet —
-/// reported as diagnostics.
+/// Lower class constructors/methods/accessors/statics into top-level
+/// functions before checking:
+///   `constructor(params)`      →  `Name__new(this: Name, params)`
+///   `method(args)`             →  `Name__method(this: Name, args)`
+///   `get x()`                  →  `Name__get_x(this: Name)`
+///   `set x(v)`                 →  `Name__set_x(this: Name, v)`
+///   `static method(args)`      →  `Name__static__method(args)`
+/// Abstract methods have no body and are not lowered (subclasses provide
+/// the implementation; calls dispatch on the runtime class id). The
+/// declarations stay on the ClassDecl so `register_classes` can build the
+/// method/visibility tables.
 std::vector<Diag> lower_classes(ast::Program& program) {
     std::vector<Diag> diags;
     std::vector<ast::FnDecl> hoisted;
     for (auto& cl : program.classes) {
-        if (!cl.ctor && cl.methods.empty()) continue;
-        if (!cl.type_params.empty()) {
+        if (!cl.type_params.empty() &&
+            (cl.ctor || !cl.methods.empty() ||
+             std::any_of(cl.fields.begin(), cl.fields.end(),
+                         [](const ast::ClassField& f) { return f.is_static; }))) {
             diags.push_back(
-                Diag{"generic classes do not support constructors or methods yet", cl.span});
+                Diag{"generic classes do not support constructors, methods, or statics yet",
+                     cl.span});
             continue;
         }
         ast::TyAnn self_ann;
@@ -3807,14 +5103,22 @@ std::vector<Diag> lower_classes(ast::Program& program) {
             hoisted.push_back(std::move(f));
         }
         for (auto& m : cl.methods) {
-            ast::FnDecl f = std::move(m);
-            f.name = cl.name + "__" + f.name;
-            f.params.insert(f.params.begin(), make_this());
+            if (m.is_abstract) continue; // no body; nothing to lower
+            ast::FnDecl f = m;
+            switch (m.kind) {
+                case ast::MemberKind::Getter: f.name = cl.name + "__get_" + m.name; break;
+                case ast::MemberKind::Setter: f.name = cl.name + "__set_" + m.name; break;
+                case ast::MemberKind::Method:
+                    f.name = m.is_static ? cl.name + "__static__" + m.name
+                                         : cl.name + "__" + m.name;
+                    break;
+            }
+            if (!m.is_static) {
+                f.params.insert(f.params.begin(), make_this());
+            }
             f.is_async = false;
             hoisted.push_back(std::move(f));
         }
-        cl.ctor.reset();
-        cl.methods.clear();
     }
     // hoisted methods come first so their (inferred) return types are known
     // by the time `main` and later-declared functions are checked
@@ -3849,6 +5153,9 @@ Checked check_with_diags(const ast::Program& program_in, std::vector<Diag>& diag
     for (const auto& [alias, prefix] : program.use_prefixes) {
         c.use_prefix[alias] = prefix;
     }
+    for (const auto& n : program.exported_fns) c.exported_fns.insert(n);
+    for (const auto& n : program.module_classes) c.module_classes.insert(n);
+    for (const auto& n : program.exported_classes) c.exported_classes.insert(n);
 
     // --- pass 0: register classes + interfaces (hoisting) ---
     c.register_classes(program);
@@ -3903,6 +5210,10 @@ Checked check_with_diags(const ast::Program& program_in, std::vector<Diag>& diag
         c.sigs[f.name] = std::move(sig);
     }
 
+    // `implements` conformance needs the lowered method signatures from
+    // pass 1, so it runs here (after hoisting).
+    c.check_implements(program);
+
     // --- pass 2: top-level *declarations* (first, so functions can reference
     // top-level variables; codegen stores them as module globals). Other
     // top-level statements are deferred until after fn bodies, because they
@@ -3914,6 +5225,7 @@ Checked check_with_diags(const ast::Program& program_in, std::vector<Diag>& diag
         c.in_toplevel = true;
         c.ret_ty.reset();
         c.saw_float_ret = false;
+        c.ret_float_bits = 0;
         c.scopes.emplace_back();
         std::vector<std::optional<CStmt>> slots;
         slots.reserve(program.stmts.size());
@@ -3951,6 +5263,36 @@ Checked check_with_diags(const ast::Program& program_in, std::vector<Diag>& diag
         if (!f.type_params.empty()) {
             continue; // generic: checked per monomorphized instantiation
         }
+        // a derived-class constructor must call super(...) when the base
+        // chain declares a constructor (TypeScript rule)
+        if (f.name.size() > 5 && f.name.compare(f.name.size() - 5, 5, "__new") == 0) {
+            auto cid_opt = c.cur_class_id();
+            size_t cid = cid_opt ? *cid_opt : SIZE_MAX;
+            if (cid < c.classes.size() && c.classes[cid].base.has_value()) {
+                bool base_has_new = false;
+                for (size_t b = *c.classes[cid].base;;) {
+                    if (c.sigs.count(c.classes[b].name + "__new")) {
+                        base_has_new = true;
+                        break;
+                    }
+                    if (!c.classes[b].base.has_value()) break;
+                    b = *c.classes[b].base;
+                }
+                if (base_has_new) {
+                    bool calls_super = false;
+                    for (const auto& st : f.body)
+                        if (c.stmt_calls_super(st)) {
+                            calls_super = true;
+                            break;
+                        }
+                    if (!calls_super) {
+                        c.diag("constructor of '" + c.classes[cid].name +
+                                   "' must call super(...)",
+                               f.span);
+                    }
+                }
+            }
+        }
         CFn cf = c.check_fn(f);
         // publish the (possibly inferred) return type for later functions
         if (c.last_fn_ret) {
@@ -3966,6 +5308,7 @@ Checked check_with_diags(const ast::Program& program_in, std::vector<Diag>& diag
         c.in_toplevel = true;
         c.ret_ty.reset();
         c.saw_float_ret = false;
+        c.ret_float_bits = 0;
         std::vector<std::optional<CStmt>> slots = std::move(*toplevel_slots);
         for (size_t i = 0; i < program.stmts.size(); ++i) {
             if (!slots[i]) slots[i] = c.check_stmt(program.stmts[i]);
@@ -3996,6 +5339,7 @@ Checked check_with_diags(const ast::Program& program_in, std::vector<Diag>& diag
         }
     }
     Checked checked;
+    c.publish_iface_impls(checked);
     checked.fns = std::move(fns);
     checked.lambdas = std::move(c.lambdas);
     checked.toplevel = std::move(toplevel);

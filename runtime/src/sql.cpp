@@ -98,7 +98,7 @@ void sql_bind_mv(sqlite3_stmt* stmt, int idx, const MValue& v) {
             break;
         default:
             rt_panic("sql: cannot bind a value of tag " + std::to_string(v.tag) +
-                     " (bind Int32, Float64, string, bool or null)");
+                     " (bind an integer, float, string, bool or null)");
     }
     if (rc != SQLITE_OK) {
         rt_panic("sql: bind failed");

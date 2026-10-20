@@ -139,6 +139,15 @@ extern "C" void marina_object_set_field(void* o, const MValue* name, const MValu
     marina_object_set(o, i, v);
 }
 
+extern "C" int32_t marina_object_class_id(void* o) {
+    if (!o) return -1;
+    return reinterpret_cast<marina_rt::ObjectObj*>(o)->class_id;
+}
+
+extern "C" void marina_panic(const char* msg) {
+    marina_rt::rt_panic(msg ? msg : "panic");
+}
+
 extern "C" void marina_print(const MValue* v) {
     std::cout << marina_rt::value_to_string(*v) << "\n";
 }

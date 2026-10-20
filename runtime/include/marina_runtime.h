@@ -252,6 +252,12 @@ void marina_object_set(void* o, int64_t i, const MValue* v);
 void marina_object_get_field(void* o, const MValue* name, MValue* out);
 void marina_object_set_field(void* o, const MValue* name, const MValue* v);
 
+/* Class id stored on an object (for interface method dispatch). */
+int32_t marina_object_class_id(void* o);
+
+/* Abort the process with `marina runtime panic: <msg>`. */
+void marina_panic(const char* msg);
+
 /* console.log — prints the value's string form plus a newline. */
 void marina_print(const MValue* v);
 

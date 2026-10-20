@@ -3,7 +3,9 @@
  *
  * Spawns the `marina-lsp` server binary, speaks JSON-RPC over stdio with
  * Content-Length framing, forwards document open/change events, and renders
- * `publishDiagnostics` + `textDocument/hover` results in the editor.
+ * `publishDiagnostics` + `textDocument/hover` results in the editor, and
+ * serves `textDocument/completion` (std-module members, array/string methods,
+ * class fields, keywords, types and program symbols).
  */
 const vscode = require('vscode');
 const { spawn } = require('child_process');
@@ -12,6 +14,20 @@ let server = null;
 let outputChannel = null;
 const pending = new Map(); // id -> {resolve, reject}
 let nextId = 1;
+
+// LSP CompletionItemKind → VS Code CompletionItemKind
+const COMPLETION_KINDS = {
+  2: vscode.CompletionItemKind.Method,
+  3: vscode.CompletionItemKind.Function,
+  4: vscode.CompletionItemKind.Constructor,
+  5: vscode.CompletionItemKind.Field,
+  6: vscode.CompletionItemKind.Variable,
+  7: vscode.CompletionItemKind.Class,
+  8: vscode.CompletionItemKind.Interface,
+  9: vscode.CompletionItemKind.Module,
+  10: vscode.CompletionItemKind.Property,
+  14: vscode.CompletionItemKind.Keyword,
+};
 
 function activate(context) {
   outputChannel = vscode.window.createOutputChannel('marina-lsp');
@@ -28,7 +44,7 @@ function activate(context) {
   server.on('error', (err) => {
     vscode.window.showErrorMessage(
       `marina-lsp: cannot start "${serverPath}" (${err.message}). ` +
-      'Install it with: cargo install --path crates/marina'
+      'Build it from source: cmake -B build && cmake --build build --target marina-lsp'
     );
   });
 
@@ -123,12 +139,40 @@ function activate(context) {
         md.isTrusted = false;
         return new vscode.Hover(md);
       },
-    })
+    }),
+    // completion provider (server returns member lists after `.` and
+    // keywords/types/std-modules/classes/variables at the top level)
+    vscode.languages.registerCompletionItemProvider('marina', {
+      async provideCompletionItems(document, position) {
+        let result;
+        try {
+          result = await request('textDocument/completion', {
+            textDocument: { uri: docUri(document) },
+            position: { line: position.line, character: position.character },
+          });
+        } catch (e) {
+          return null;
+        }
+        const items = (result && result.items) || [];
+        return items.map((it) => {
+          const kind = COMPLETION_KINDS[it.kind] || vscode.CompletionItemKind.Text;
+          const item = new vscode.CompletionItem(it.label, kind);
+          if (it.detail) item.detail = it.detail;
+          if (it.documentation) {
+            const value = typeof it.documentation === 'string'
+              ? it.documentation
+              : it.documentation.value || '';
+            item.documentation = new vscode.MarkdownString(value);
+          }
+          return item;
+        });
+      },
+    }, '.')
   );
 }
 
 function handleMessage(msg, diagnostics) {
-  if (msg.id === undefined && msg.method) return; // notifications we ignore
+  // server → client notifications (no id): publishDiagnostics
   if (msg.method === 'textDocument/publishDiagnostics') {
     const uri = vscode.Uri.parse(msg.params.uri);
     const diags = (msg.params.diagnostics || []).map((d) => {
@@ -144,7 +188,8 @@ function handleMessage(msg, diagnostics) {
     diagnostics.set(uri, diags);
     return;
   }
-  if (msg.id !== undefined && pending.has(msg.id)) {
+  if (msg.id === undefined) return; // other notifications we ignore
+  if (pending.has(msg.id)) {
     const p = pending.get(msg.id);
     pending.delete(msg.id);
     if (msg.error) p.reject(new Error(msg.error.message));

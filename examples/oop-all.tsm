@@ -1,0 +1,192 @@
+// OOP feature sweep: every TypeScript-style OOP feature in one program.
+// Each console.log states the expected output in a comment.
+
+// ===========================================================================
+// 1. Interfaces: fields + methods, ghost + declared conformance
+// ===========================================================================
+
+interface HasName {
+    name: string,
+}
+
+interface Titled {
+    title(): string,
+}
+
+interface NameAndTitle {
+    name: string,
+    title(): string,
+}
+
+// ===========================================================================
+// 2. Abstract class: protected fields, statics, getters, virtual methods
+// ===========================================================================
+
+abstract class Animal {
+    protected name: string
+    protected age: Int32
+    static count: Int32
+
+    constructor(name: string, age: Int32) {
+        this.name = name
+        this.age = age
+        Animal.count = Animal.count + 1
+    }
+
+    // abstract: every concrete subclass must implement
+    abstract speak(): string;
+
+    // virtual: subclasses may override; dispatches on runtime class
+    describe(): string {
+        return `${this.name} (${this.age})`
+    }
+
+    // getter over protected fields
+    get info(): string {
+        return `${this.name}/${this.age}`
+    }
+
+    // static getter
+    static get total(): Int32 {
+        return Animal.count
+    }
+}
+
+// ===========================================================================
+// 3. Concrete subclasses: extends + implements + super + override
+// ===========================================================================
+
+class Dog extends Animal implements Titled {
+    breed: string
+
+    constructor(name: string, age: Int32, breed: string) {
+        super(name, age)          // base constructor
+        this.breed = breed
+    }
+
+    speak(): string {
+        return "woof"
+    }
+
+    title(): string {
+        return `Dog: ${this.breed}`
+    }
+}
+
+class Cat extends Animal implements NameAndTitle {
+    indoor: bool
+
+    constructor(name: string, age: Int32, indoor: bool) {
+        super(name, age)
+        this.indoor = indoor
+    }
+
+    speak(): string {
+        return "meow"
+    }
+
+    // inherited from Animal: name field satisfies HasName/NameAndTitle
+    title(): string {
+        return `Cat: ${this.name}`
+    }
+}
+
+// a subclass that does NOT override describe() — inherits it
+class Fish extends Animal {
+    constructor(name: string, age: Int32) {
+        super(name, age)
+    }
+
+    speak(): string {
+        return "blub"
+    }
+}
+
+// a grandchild: two levels of inheritance, super.method() through the
+// middle class's override
+class Puppy extends Dog {
+    constructor(name: string, age: Int32, breed: string) {
+        super(name, age, breed)
+    }
+
+    override speak(): string {
+        return `${super.speak()} (in a small voice)`  // base impl of speak
+    }
+
+    override describe(): string {
+        return `puppy! ${super.describe()}`
+    }
+}
+
+// ===========================================================================
+// 4. Static factory + polymorphic functions
+// ===========================================================================
+
+function makeAnimal(kind: string): Animal {
+    if kind == "dog" {
+        return new Dog("Rex", 3, "lab")
+    }
+    return new Cat("Mia", 2, true)
+}
+
+function loudest(animals: Array<Animal>): string {
+    let out = ""
+    for (let i = 0; i < animals.length; i++) {
+        out = `${out} ${animals[i].speak()}`
+    }
+    return out
+}
+
+// ===========================================================================
+// 5. main: exercise everything
+// ===========================================================================
+
+function main() {
+    // --- construction + statics ---
+    let d = new Dog("Rex", 3, "lab")
+    let c = new Cat("Mia", 2, true)
+    let f = new Fish("Bubbles", 1)
+    console.log(Animal.count)        // 3 — static incremented per ctor
+
+    // --- virtual dispatch through a base-typed array ---
+    let zoo: Array<Animal> = [d, c, f]
+    console.log(loudest(zoo))        //  woof meow blub
+    console.log(zoo[2].describe())   // Bubbles (1) — inherited describe
+
+    // --- override + super.method ---
+    let p = new Puppy("Max", 1, "beagle")
+    console.log(p.speak())           // woof (in a small voice)
+    console.log(p.describe())        // puppy! Max (1)
+
+    // --- inherited members on subclasses ---
+    console.log(d.info)              // Rex/3 — getter from Animal
+    console.log(d.describe())        // Rex (3)
+
+    // --- static getter + static write from outside ---
+    Animal.count = 10
+    console.log(Animal.total)        // 10
+
+    // --- interfaces ---
+    let t: Titled = d
+    console.log(t.title())           // Dog: lab
+    let nt: NameAndTitle = c
+    console.log(nt.title())          // Cat: Mia
+    console.log(nt.name)             // Mia — interface field by name
+    let h: HasName = c               // satisfied by the inherited field
+    console.log(h.name)              // Mia
+
+    // --- interface arrays: mixed concrete classes ---
+    let titled: Array<Titled> = [d, c]
+    for (let i = 0; i < titled.length; i++) {
+        console.log(titled[i].title())
+    }
+
+    // --- upcast: subclass where base is expected ---
+    console.log(makeAnimal("dog").describe())  // Rex (3)
+    console.log(makeAnimal("cat").speak())     // meow
+
+    // --- base-class variable holding a subclass ---
+    let a: Animal = new Puppy("Zoe", 1, "corgi")
+    console.log(a.speak())           // woof (in a small voice) — virtual
+    console.log(a.info)              // Zoe/1
+}

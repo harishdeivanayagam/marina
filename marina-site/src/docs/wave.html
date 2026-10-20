@@ -63,9 +63,10 @@ $ ./.marina/hello-world</code></pre>
     <p>Wave drives a four-stage pipeline: <strong>lex &amp; parse</strong> → AST, <strong>type check</strong> (strict, with inference — a type error aborts compilation), <strong>codegen</strong> to textual LLVM IR including ARC retain/release insertion and async state machines, then <strong>link</strong> with <code>clang</code> against <code>libmarina_runtime.a</code> — ARC, promises, the poll(2) event loop, and the net/http/fs/crypto/sql std modules.</p>
 
     <h2 id="editor">Editor support</h2>
-    <p>Marina ships its own language server (<code>marina-lsp</code>) — a dependency-free JSON-RPC implementation over stdio that reuses the compiler's lexer/parser/checker. Install it on your <code>PATH</code>, then load the <code>editors/marina-lsp/marina-lsp-0.2.2.vsix</code> extension in Cursor/VS Code for:</p>
+    <p>Marina ships its own language server (<code>marina-lsp</code>) — a dependency-free JSON-RPC implementation over stdio that reuses the compiler's lexer/parser/checker. Install it on your <code>PATH</code>, then load the <code>editors/marina-lsp/marina-lsp-0.3.0.vsix</code> extension in Cursor/VS Code for:</p>
     <ul>
       <li>Live strict diagnostics on open, keystroke and save</li>
+      <li>Autocomplete: std-module members with signatures after <code>.</code> (<code>crypto.</code> → <code>sha256</code>, <code>base64Encode</code>, …), array/string/stream methods, class fields, plus keywords, types and every function, class and variable in the file</li>
       <li>Syntax highlighting via a TextMate grammar, and 🌊 wave file icons</li>
       <li>Hover on declared class names → field shapes (including ghost classes)</li>
     </ul>
