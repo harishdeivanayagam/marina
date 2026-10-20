@@ -1,34 +1,10 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="640" height="150" viewBox="0 0 640 150" role="img" aria-label="Marina">
-  <defs>
-    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
-      <stop offset="0" stop-color="#0B1220"/>
-      <stop offset="1" stop-color="#12233B"/>
-    </linearGradient>
-    <linearGradient id="wave1" x1="0" y1="0" x2="1" y2="0">
-      <stop offset="0" stop-color="#38BDF8"/>
-      <stop offset="1" stop-color="#0EA5E9"/>
-    </linearGradient>
-    <linearGradient id="wave2" x1="0" y1="0" x2="1" y2="0">
-      <stop offset="0" stop-color="#0EA5E9"/>
-      <stop offset="1" stop-color="#0284C7"/>
-    </linearGradient>
-  </defs>
-
-  <rect x="1.5" y="1.5" width="637" height="147" rx="18" fill="url(#bg)" stroke="#1E3A5F" stroke-width="3"/>
-
-  <!-- wave mark -->
-  <g transform="translate(60 44) scale(4)">
-    <path fill="none" stroke="url(#wave1)" stroke-width="1.7" stroke-linecap="round"
-          d="M1 6c1.8-2.6 3.7-2.6 5.5 0s3.7 2.6 5.5 0c.7-1 1.6-1.4 3-1"/>
-    <path fill="none" stroke="url(#wave2)" stroke-width="1.7" stroke-linecap="round"
-          d="M1 10.5c1.8-2.6 3.7-2.6 5.5 0s3.7 2.6 5.5 0c.7-1 1.6-1.4 3-1"/>
-  </g>
-
-  <!-- wordmark: Marina (capital M) -->
-  <text x="130" y="78" font-family="system-ui, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif"
-        font-size="56" font-weight="700" fill="#F1F5F9" letter-spacing="1">Marina</text>
-
-  <!-- subtitle -->
-  <text x="132" y="112" font-family="system-ui, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif"
-        font-size="19" font-weight="400" fill="#7DD3FC">a strictly-typed, AOT-compiled TypeScript subset</text>
+<svg width="87" height="58" viewBox="0 0 87 58" fill="none" xmlns="http://www.w3.org/2000/svg">
+<path d="M24.1898 4.9593L5.35451 14.8401C2.06235 16.5672 0 19.9779 0 23.6956V47.649H87V24.5069C87 16.6918 78.4376 11.897 71.7744 15.9809L62.5149 21.656C58.6688 24.0133 53.7206 23.5037 50.4356 20.412L35.689 6.53278C32.5835 3.61002 27.9663 2.97822 24.1898 4.9593Z" fill="url(#paint0_linear_250_7)"/>
+<path d="M39.3524 0.00329852L57.3307 20.1589C55.3817 20.7766 53.2511 20.2958 51.7562 18.9011L40.6752 8.56262C39.5905 7.55055 39.0112 6.10902 39.094 4.62777L39.3524 0.00329852Z" fill="#FF8F26"/>
+<defs>
+<linearGradient id="paint0_linear_250_7" x1="43.5" y1="-11.351" x2="43.5" y2="47.6491" gradientUnits="userSpaceOnUse">
+<stop stop-color="#0075FF"/>
+<stop offset="1" stop-color="#6EB1FF"/>
+</linearGradient>
+</defs>
 </svg>
