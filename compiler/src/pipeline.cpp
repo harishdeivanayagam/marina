@@ -107,6 +107,40 @@ std::string workspace_root() {
 #endif
 }
 
+// The host's LLVM target triple (e.g. arm64-apple-macosx26.0.0), asked from
+// clang once and cached. The generated .ll would otherwise have an empty
+// module triple, making every clang invocation print a -Woverride-module
+// warning. Returns "" if the triple cannot be determined.
+std::string host_triple() {
+    static const std::string cached = [] {
+        std::optional<std::string> clang = which("clang");
+        for (const char* c : {"clang-21", "clang-20", "clang-18", "cc"}) {
+            if (!clang) clang = which(c);
+        }
+        if (!clang) return std::string();
+        std::string cmd = "'" + *clang + "' -print-target-triple 2>/dev/null";
+        std::string out;
+        if (std::FILE* p = ::popen(cmd.c_str(), "r")) {
+            char buf[256];
+            size_t n = std::fread(buf, 1, sizeof buf, p);
+            ::pclose(p);
+            out.assign(buf, n);
+            while (!out.empty() &&
+                   (out.back() == '\n' || out.back() == '\r' || out.back() == ' '))
+                out.pop_back();
+            // keep only the first line
+            size_t nl = out.find('\n');
+            if (nl != std::string::npos) out.erase(nl);
+            if (out.find_first_not_of("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._-") !=
+                std::string::npos)
+                return std::string(); // unexpected output; treat as unknown
+            return out;
+        }
+        return std::string();
+    }();
+    return cached;
+}
+
 namespace {
 
 std::optional<std::string> locate_runtime() {
@@ -185,6 +219,14 @@ Artifact compile_source(const std::string& src, const std::string& stem,
             fail = fail_tool("cannot write " + ll_path.string());
             return {};
         }
+        // Pin the module to the host triple: without a `target triple` line
+        // the module's triple is empty and clang prints a -Woverride-module
+        // warning for every compile.
+        std::string triple = host_triple();
+        bool has_triple = ir_text.find("target triple") != std::string::npos;
+        if (!triple.empty() && !has_triple) {
+            out << "target triple = \"" << triple << "\"\n\n";
+        }
         out << ir_text;
         out.close();
         if (!out) {
@@ -215,8 +257,11 @@ Artifact compile_source(const std::string& src, const std::string& stem,
     }
     // the runtime contains the sql module (sqlite FFI), so libsqlite3 is
     // always required (macOS ships it; Linux needs the sqlite3 package);
-    // the C++ runtime also needs the C++ standard library and pthreads
-    std::string cmd = "'" + clang + "' -O2 '" + ll_path.string() + "' '" +
+    // the C++ runtime also needs the C++ standard library and pthreads.
+    // -Wno-override-module: the driver retargets the module to the host
+    // triple (macOS derives e.g. arm64-apple-macosx26.0.0 from the SDK);
+    // that override is intended, so don't warn about it.
+    std::string cmd = "'" + clang + "' -O2 -Wno-override-module '" + ll_path.string() + "' '" +
                       *runtime + "' -lsqlite3 -lc++ -lpthread -o '" +
                       bin_path.string() + "'";
     int status = std::system(cmd.c_str());
