@@ -2,19 +2,19 @@
   "meta": {
     "workload": "todos-http-sqlite REST API",
     "instance": "Vultr vc2-1c-1gb (1 vCPU, Xeon Cascadelake), Ubuntu 24.04, loopback wrk",
-    "method": "wrk -t4 -c64 — 10s warmup, 30s GET, 20s POST · RSS sampled every 50–100 ms",
-    "date": "2026-10-19",
-    "marinaVersion": "0.2.0 (evented, AOT binary 2.5 MB)"
+    "method": "wrk — 10s GET at c=2, 30s GET at c=64, 20s POST at c=64 · RSS sampled every 100 ms",
+    "date": "2026-10-21",
+    "marinaVersion": "0.2.0 (evented, AOT binary 274 KB)"
   },
   "throughputGet": {
     "unit": "req/s",
     "subtitle": "GET /todos · wrk -t4 -c64 · 30 s",
     "higherIsBetter": true,
     "rows": [
-      { "name": "Marina 0.2 (evented)", "value": 11102, "total": 333580, "p50": 5.71, "p99": 10.02 },
-      { "name": "Bun 1.4.3", "value": 19903, "total": 597567, "p50": 3.03, "p99": 6.72 },
-      { "name": "Go 1.23", "value": 10566, "total": 317317, "p50": 7.22, "p99": 55.27 },
-      { "name": "Node.js 22.23", "value": 10163, "total": 305387, "p50": 5.82, "p99": 15.19 }
+      { "name": "Marina 0.2 (evented)", "value": 10879, "total": 326831, "p50": 5.85, "p99": 9.79 },
+      { "name": "Bun 1.4.3", "value": 19285, "total": 579090, "p50": 3.10, "p99": 7.35 },
+      { "name": "Go 1.23", "value": 10883, "total": 326888, "p50": 7.03, "p99": 49.59 },
+      { "name": "Node.js 22.23", "value": 9889, "total": 297094, "p50": 5.95, "p99": 15.95 }
     ]
   },
   "throughputPost": {
@@ -22,10 +22,10 @@
     "subtitle": "POST /todos (SQLite insert + validation) · wrk -t4 -c64 · 20 s",
     "higherIsBetter": true,
     "rows": [
-      { "name": "Marina 0.2 (evented)", "value": 1400, "total": 28032 },
-      { "name": "Bun 1.4.3", "value": 964, "total": 19293 },
-      { "name": "Go 1.23", "value": 3015, "total": 60334 },
-      { "name": "Node.js 22.23", "value": 922, "total": 18468 }
+      { "name": "Marina 0.2 (evented)", "value": 1403, "total": 28097 },
+      { "name": "Bun 1.4.3", "value": 990, "total": 19848 },
+      { "name": "Go 1.23", "value": 913, "total": 18293 },
+      { "name": "Node.js 22.23", "value": 942, "total": 18870 }
     ]
   },
   "memory": {
@@ -33,14 +33,14 @@
     "subtitle": "resident set — lower is better",
     "higherIsBetter": false,
     "rows": [
-      { "name": "Marina 0.2 (evented)", "idle": 4.2, "peak": 7.1 },
-      { "name": "Go 1.23", "idle": 11.8, "peak": 20.0 },
-      { "name": "Bun 1.4.3", "idle": 23.1, "peak": 40.7 },
-      { "name": "Node.js 22.23", "idle": 60.2, "peak": 84.5 }
+      { "name": "Marina 0.2 (evented)", "idle": 5.3, "peak": 7.9 },
+      { "name": "Go 1.23", "idle": 10.3, "peak": 18.4 },
+      { "name": "Bun 1.4.3", "idle": 22.3, "peak": 39.4 },
+      { "name": "Node.js 22.23", "idle": 57.9, "peak": 81.1 }
     ]
   },
   "sweep": {
     "connections": [2, 4, 8, 16, 32, 64],
-    "reqs": [10999, 11827, 12193, 13086, 12990, 12469]
+    "reqs": [11487, 12033, 12362, 13057, 13352, 11425]
   }
 }

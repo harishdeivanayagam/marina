@@ -682,14 +682,18 @@ os.exit(0)                                  // terminate with an exit status
 - `os.exec(command) -> string` — runs via `/bin/sh`, returns stdout (stderr passes through); a non-zero exit status panics
 - `os.exit(code: Int64) -> void`
 
-### `sql` — databases (SQLite)
+### `sql` — databases (SQLite, PostgreSQL, MySQL/MariaDB)
 
-SQL with prepared statements via tagged templates. In v0.2 the only driver is **SQLite** (FFI against the system `libsqlite3` — macOS ships it; Linux needs the `sqlite3` package). `mysql`, `pg` and `mariadb` are accepted driver names but abort at compile time (or runtime panic) until implemented.
+SQL with prepared statements via tagged templates. Four drivers are built in:
+
+- **`"sqlite"`** — FFI against the system `libsqlite3` (macOS ships it; Linux needs the `sqlite3` package)
+- **`"pg"`** (aliases `"postgres"`, `"postgresql"`) — a pure-runtime PostgreSQL wire-protocol client: cleartext, MD5 and SCRAM-SHA-256 auth, the extended query protocol, text-format result decoding
+- **`"mysql"`** / **`"mariadb"`** — a pure-runtime MySQL/MariaDB wire-protocol client: `mysql_native_password` and `caching_sha2_password` auth, server-side prepared statements (`COM_STMT_PREPARE`/`EXECUTE`), binary-format result decoding
 
 ```ts
 import sql
 
-// driver: "sqlite" | "mysql" | "pg" | "mariadb" (only sqlite works in v0.2)
+// driver: "sqlite" | "pg" | "mysql" | "mariadb"
 let db = new sql.Connection("sqlite", "/tmp/data.db")
 
 // sql.stmt`...` prepares the statement; ${x} interpolations become ? binds
@@ -702,12 +706,16 @@ let rows: Array<Todo> = db.query(sql.stmt`SELECT id, text FROM todos WHERE id = 
 db.close()
 ```
 
-- `new sql.Connection(driver, url)` — opens the database (SQLite: a file path; the file is created if missing)
+- `new sql.Connection(driver, url)` — opens the database. URLs per driver:
+    - sqlite: a file path (the file is created if missing)
+    - pg: `postgres://[user[:pass]@]host[:port][/db]` (defaults: port 5432, user from `USER`/`PGUSER`, db = user)
+    - mysql/mariadb: `mysql://[user[:pass]@]host[:port][/db]` (defaults: port 3306, user `root`, db = user; `mariadb://` URLs are accepted too)
 - `db.execute(sql.stmt\`...\`)` — runs a statement that returns no rows (CREATE/INSERT/UPDATE/DELETE) and returns a `sql_Result` object with `lastInsertId: Int32` and `rowsAffected: Int32`; executing a statement that returns rows is a runtime panic (use `query`)
 - `db.query(sql.stmt\`...\`)` — runs a statement and returns `Array<sql_Row>`; each row is an object whose fields are the SELECT's column names (integers → `Int32`, floats → `Float64`, text → `string`, NULL → void). Annotate the result with your own interface to get a typed result: `let rows: Array<Todo> = db.query(...)` — the checker accepts it because `sql_Row` is a fieldless interface that coerces to anything
 - `db.close()` — closes the connection; using it afterwards is a runtime panic
-- Binds accept any integer (`Int8`–`Int64`, `UInt8`–`UInt64`), any float (`Float32`, `Float64`), `string`, `bool` and null; anything else is rejected by the checker. Values are passed to SQLite as a 64-bit integer or a 64-bit float (`UInt64` above 2^63−1 does not round-trip through SQLite's signed integer)
+- Binds accept any integer (`Int8`–`Int64`, `UInt8`–`UInt64`), any float (`Float32`, `Float64`), `string`, `bool` and null; anything else is rejected by the checker. On SQLite values bind as 64-bit integers or 64-bit floats (`UInt64` above 2^63−1 does not round-trip through SQLite's signed integer); on the server drivers values travel as typed parameters over the wire
 - Values interpolated into `sql.stmt\`...\`` are always bound as parameters (prepared statements) — never string-concatenated, so no SQL injection
+- The pg/mysql/mariadb drivers are implemented in marina's own runtime (TCP + SHA-1/SHA-256/HMAC/PBKDF2/MD5 helpers) — no external client libraries are linked
 
 ### `map` — a dictionary, written in Marina itself
 
@@ -838,11 +846,13 @@ Marina ships its own language server (`marina-lsp`, in `compiler/lsp/main.cpp`) 
 | `examples/rand-demo.tsm` | `import rand`: the std random generator — `newSeeded`/`newRand`, `next`/`below`/`range`/`float`/`bool`/`int`, `pick`/`shuffle`, reproducible seeds |
 | `examples/jokes.tsm` | a tiny random-joke teller on top of `rand.pick` |
 | `examples/todos-http-sqlite.tsm` | `import sql`: `new sql.Connection`, `sql.stmt\`...\`` prepared statements, `db.execute`/`db.query`, typed rows via interfaces — a persistent todo REST API on SQLite (try `curl localhost:8080/todos`) |
+| `examples/postgres-smoke.tsm` | the PostgreSQL driver end-to-end: SCRAM auth, typed rows, `lastInsertId`, booleans and NULLs (`docker run --rm -d --name marina-pg -e POSTGRES_PASSWORD=secret -e POSTGRES_USER=marina -e POSTGRES_DB=testdb -p 5433:5432 postgres:16-alpine` first) |
+| `examples/mysql-smoke.tsm` | the MySQL/MariaDB driver end-to-end: prepared statements, typed rows, `lastInsertId`, NULLs (run against any MariaDB/MySQL server; edit the URL at the top) |
 
 ## Current limitations (v0.2)
 
 - Packages expose functions and classes only: no top-level statements, no `main`, and no package-on-package dependencies (std modules `net`/`http`/`fs`/`crypto`/`sql`/`time`/`os`/`map`/`rand` are allowed)
-- sql: SQLite only (via the system `libsqlite3`); `mysql`/`pg`/`mariadb` drivers are planned but abort at compile time; rows of `db.query` are dynamically bound to the SELECT's columns (no nested transactions, no prepared-statement reuse across calls)
+- sql: rows of `db.query` are dynamically bound to the SELECT's columns; no nested transactions, no prepared-statement reuse across calls, and no TLS for the pg/mysql/mariadb drivers (localhost or VPN-only servers for now)
 - http: `http://` URLs only (no TLS/https), sequential request handling on the server (one connection at a time), no request headers, no streaming responses; one HTTP server per program; the express-style API supports `get`/`post` routes only
 - Schema validation (`JsonValidator.validate`) aborts the program with a runtime panic on an invalid body (no per-request error responses yet)
 - net reads time out after 30 seconds

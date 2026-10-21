@@ -178,11 +178,11 @@ description: Marina's built-in globals (console, setTimeout, Promise) and all ni
 <span class="f">console</span>.log(<span class="t">os</span>.env(<span class="s">"GREETING"</span>))
 <span class="f">console</span>.log(<span class="t">os</span>.exec(<span class="s">"echo rendered by /bin/sh"</span>))</code></pre>
 
-    <h2 id="sql">sql — SQLite</h2>
-    <p>SQLite via the system <code>libsqlite3</code> (MySQL/Postgres drivers are not available yet). Values are always bound as prepared-statement parameters — never string-concatenated — through the <code>sql.stmt</code> tagged template: <code>${expr}</code> binds a value; only integers, floats, strings and bools can be bound.</p>
+    <h2 id="sql">sql — SQLite, PostgreSQL, MySQL/MariaDB</h2>
+    <p>Values are always bound as prepared-statement parameters — never string-concatenated — through the <code>sql.stmt</code> tagged template: <code>${expr}</code> binds a value; only integers, floats, strings and bools can be bound. Four drivers: <code>"sqlite"</code> (via the system <code>libsqlite3</code>), <code>"pg"</code> (PostgreSQL wire protocol with cleartext/MD5/SCRAM-SHA-256 auth), and <code>"mysql"</code>/<code>"mariadb"</code> (MySQL wire protocol with native-password and caching-SHA-2 auth) — the server drivers are implemented in marina's own runtime, with no external client libraries. Server URLs look like <code>postgres://user:pass@host:5432/db</code> or <code>mysql://user:pass@host:3306/db</code>.</p>
     <table>
       <tr><th>Member</th><th>Description</th></tr>
-      <tr><td><code>new sql.Connection(driver, url)</code></td><td>Open a connection; only <code>"sqlite"</code> is supported.</td></tr>
+      <tr><td><code>new sql.Connection(driver, url)</code></td><td>Open a connection: <code>"sqlite"</code> (file path), <code>"pg"</code>, <code>"mysql"</code> or <code>"mariadb"</code> (server URLs).</td></tr>
       <tr><td><code>db.execute(stmt)</code></td><td>Run a statement that returns no rows; resolves to <code>{ lastInsertId, changes }</code>.</td></tr>
       <tr><td><code>db.query(stmt)</code></td><td>Collect rows as objects whose fields are the column names (<code>Array&lt;Row&gt;</code>).</td></tr>
       <tr><td><code>db.close()</code></td><td>Close the connection.</td></tr>

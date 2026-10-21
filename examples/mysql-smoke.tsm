@@ -1,0 +1,59 @@
+import sql
+
+// URL of a MySQL/MariaDB server (overridden by argv[1] when given)
+const URL = "mysql://marina:secret@127.0.0.1:3307/testdb"
+
+interface Item {
+    id: Int32,
+    name: string,
+    qty: Int32,
+    price: Float64,
+}
+
+interface NullRow {
+    a: Int32,
+    b: string,
+}
+
+async function main() {
+    let url = URL
+
+    let db = new sql.Connection("mysql", url)
+
+    await db.execute(sql.stmt`CREATE TABLE IF NOT EXISTS items (
+        id INTEGER PRIMARY KEY AUTO_INCREMENT,
+        name VARCHAR(64) NOT NULL,
+        qty INTEGER NOT NULL DEFAULT 0,
+        price DECIMAL(10,2) NOT NULL DEFAULT 0
+    )`)
+    await db.execute(sql.stmt`DELETE FROM items`)
+
+    let ins = await db.execute(sql.stmt`INSERT INTO items (name, qty, price) VALUES (${"widget"}, ${3}, ${1.5})`)
+    console.log(`insert: lastInsertId=${ins.lastInsertId} rowsAffected=${ins.rowsAffected}`)
+
+    await db.execute(sql.stmt`INSERT INTO items (name, qty, price) VALUES (${"gadget"}, ${10}, ${9.99})`)
+
+    let rows: Array<Item> = await db.query(sql.stmt`SELECT id, name, qty, price FROM items ORDER BY id`)
+    for (let i = 0; i < rows.length; i++) {
+        console.log(`row: id=${rows[i].id} name=${rows[i].name} qty=${rows[i].qty} price=${rows[i].price}`)
+    }
+
+    let upd = await db.execute(sql.stmt`UPDATE items SET qty = qty + ${1} WHERE name = ${"widget"}`)
+    console.log(`update: rowsAffected=${upd.rowsAffected}`)
+
+    let names: Array<Item> = await db.query(sql.stmt`SELECT name FROM items WHERE qty > ${2} AND price < ${100.0}`)
+    console.log(`filtered count=${names.length}`)
+
+    // NULL columns: rows inserted without `a` come back as undefined
+    await db.execute(sql.stmt`CREATE TABLE IF NOT EXISTS nulls (a INTEGER, b TEXT)`)
+    await db.execute(sql.stmt`DELETE FROM nulls`)
+    await db.execute(sql.stmt`INSERT INTO nulls (a, b) VALUES (${7}, ${"x"})`)
+    await db.execute(sql.stmt`INSERT INTO nulls (a, b) VALUES (NULL, ${"y"})`)
+    let nrows: Array<NullRow> = await db.query(sql.stmt`SELECT a, b FROM nulls ORDER BY b`)
+    console.log(`nulls: r0.a=${nrows[0].a} r1.a=${nrows[1].a}`)
+
+    db.close()
+    console.log(`done`)
+}
+
+main()
