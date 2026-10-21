@@ -273,11 +273,18 @@ Artifact compile_source(const std::string& src, const std::string& stem,
     // the runtime contains the sql module (sqlite FFI), so libsqlite3 is
     // always required (macOS ships it; Linux needs the sqlite3 package);
     // the C++ runtime also needs the C++ standard library and pthreads.
+    // macOS links libc++; Linux links libstdc++ (the runtime is built with
+    // the host C++ compiler, which uses libstdc++ on Ubuntu).
     // -Wno-override-module: the driver retargets the module to the host
     // triple (macOS derives e.g. arm64-apple-macosx26.0.0 from the SDK);
     // that override is intended, so don't warn about it.
+#if defined(__APPLE__)
+    const char* cxxlib = "-lc++";
+#else
+    const char* cxxlib = "-lstdc++";
+#endif
     std::string cmd = "'" + clang + "' -O2 -Wno-override-module '" + ll_path.string() + "' '" +
-                      *runtime + "' -lsqlite3 -lc++ -lpthread -o '" +
+                      *runtime + "' -lsqlite3 " + cxxlib + " -lpthread -o '" +
                       bin_path.string() + "'";
     int status = std::system(cmd.c_str());
     if (status != 0) {

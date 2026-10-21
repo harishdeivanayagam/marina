@@ -642,16 +642,27 @@ ValidatorSpecs& http_validator_specs() {
 // Shared HTTP response writing
 // ---------------------------------------------------------------------------
 
+// Drop the per-request dup of a connection socket. The event loop keeps
+// its own fd for keep-alive; this one exists only so the worker can write
+// the response. Callers must close it.
+void take_res_socket(void* res, int* fd_out) {
+    *fd_out = -1;
+    std::lock_guard<std::mutex> lk(res_sockets().mu);
+    auto it = res_sockets().fds.find(reinterpret_cast<size_t>(res));
+    if (it == res_sockets().fds.end()) return;
+    *fd_out = it->second;
+    res_sockets().fds.erase(it);
+}
+
+void close_res_socket(void* res) {
+    int fd = -1;
+    take_res_socket(res, &fd);
+    if (fd >= 0) ::close(fd);
+}
+
 void http_respond(void* res, const MValue* value, bool json) {
     int fd = -1;
-    {
-        std::lock_guard<std::mutex> lk(res_sockets().mu);
-        auto it = res_sockets().fds.find(reinterpret_cast<size_t>(res));
-        if (it != res_sockets().fds.end()) {
-            fd = ::dup(it->second);
-            res_sockets().fds.erase(it);
-        }
-    }
+    take_res_socket(res, &fd);
     if (fd < 0) {
         // no socket behind this response (e.g. called outside a handler):
         // fall back to printing
@@ -694,6 +705,11 @@ void http_respond(void* res, const MValue* value, bool json) {
     if (http_debug()) {
         std::cerr << "[evloop] responded " << resp.size() << " bytes\n";
     }
+    // The dispatch path dup'd the connection; close that dup. Leaving it
+    // open leaked two fds per request (this one, plus a second dup that
+    // used to be taken here) and the process hit RLIMIT_NOFILE after a
+    // few hundred requests.
+    ::close(fd);
     // nudge the evented listener loop so the connection is retired now
     wake_listener();
 }
@@ -989,7 +1005,10 @@ void evented_listen_thread(std::string host_s, uint16_t port_n, void* promise,
                 Conn c = std::move(conns[i]);
                 conns.erase(conns.begin() + i);
                 ::close(c.fd);
-                if (c.dispatched) release_ptr(c.res);
+                if (c.dispatched) {
+                    close_res_socket(c.res);
+                    release_ptr(c.res);
+                }
             } else {
                 i += 1;
             }
@@ -1070,6 +1089,7 @@ void evented_listen_thread(std::string host_s, uint16_t port_n, void* promise,
                     Conn c = std::move(conns[idx]);
                     conns.erase(conns.begin() + idx);
                     ::close(c.fd);
+                    close_res_socket(c.res);
                     release_ptr(c.res);
                     continue;
                 }
@@ -1198,6 +1218,8 @@ void evented_listen_thread(std::string host_s, uint16_t port_n, void* promise,
                     // rt_guard exits on fatal errors; a null promise here
                     // would mean the handler failed silently — drop the
                     // connection.
+                    close_res_socket(res);
+                    release_ptr(res);
                     ::close(conns[idx].fd);
                     conns.erase(conns.begin() + idx);
                     continue;

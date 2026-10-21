@@ -9,10 +9,10 @@ on a Vultr cloud instance, then the instance was deleted.
 |---|---|
 | Instance | Vultr Cloud Compute `vc2-1c-1gb` ($5/mo), region **blr** (Bangalore) |
 | OS | Ubuntu 24.04 LTS x64, 1 vCPU (Intel Xeon Cascadelake), 1 GB RAM + 2 GB swap |
-| Marina | v0.2.0 (commit `af5022e` + runtime fixes, see below), AOT binary 2.5 MB, evented server (benchmarked 2026-10-19 on `vc2-1c-1gb`) |
+| Marina | v0.2.0 at commit `bac9717` plus the socket-leak fix below, C++ runtime, AOT binary 274 KB, evented server (benchmarked 2026-10-21 on `vc2-1c-1gb`) |
 | Node.js | v22.23.3 (built-in `node:sqlite`) |
 | Bun | 1.4.3 (built-in `bun:sqlite`) |
-| Go | go1.23.3 (module `modernc.org/sqlite`, pure-Go driver) |
+| Go | go1.23.3 (`modernc.org/sqlite` v1.38.2, one connection) |
 
 Each implementation serves the identical API on port 8080:
 `GET /todos`, `POST /todos` (validated, 4–20 chars), `POST /todos/done-all`,
@@ -24,11 +24,15 @@ backed by SQLite at `/tmp/todos-http-sqlite.db` (fresh DB, seeded with 10 rows).
 network path is identical for all four (a public-internet load test from the
 dev machine proved impossible — the user's ISP path blackholes large packets
 and filters the ports, see caveats).
-- Per implementation: fresh DB → 10s warmup → **30 s** `wrk -t4 -c64` GET
-→ **20 s** `wrk -t4 -c64` POST → also a `wrk -t2 -c2` GET run.
-- Memory = process `VmRSS`, sampled every 50–100 ms; peak taken over the
-whole run (idle = right after startup, peak = under the c64 load).
+- Per implementation: fresh DB, seed 10 rows, then **10 s** `wrk -t2 -c2`
+GET, **30 s** `wrk -t4 -c64` GET, **20 s** `wrk -t4 -c64` POST.
+- Memory = process `VmRSS`, sampled every 100 ms; peak taken over the
+whole run (idle = after the seed, peak = under the load).
 - POST inserts a row per request (table grows during the 20 s run for all).
+- The Go server uses one SQLite connection (`SetMaxOpenConns(1)`), the same
+shape as Marina, Node, and Bun. The default `database/sql` pool returns
+`SQLITE_BUSY` under this write load; those responses are HTTP 500, and
+`wrk` still counts them.
 
 ## Results
 
@@ -36,47 +40,58 @@ whole run (idle = right after startup, peak = under the c64 load).
 
 | Runtime | GET req/s (c=2) | GET req/s (c=64) | **GET total in 30 s (c=64)** | GET p50 | GET p99 | POST req/s (c=64) | POST total in 20 s |
 |---|---|---|---|---|---|---|---|
-| **Bun 1.4.3** | 19,829 | **19,903** | **597,567** | 3.03 ms | 6.72 ms | 964 | 19,293 |
-| **Marina 0.2 (evented)** | 10,079 | 11,102 | 333,580 | 5.71 ms | 10.02 ms | **1,400** | 28,032 |
-| **Go 1.23** | 10,742 | 10,566 | 317,317 | 7.22 ms | 55.27 ms | 3,015 | 60,334 |
-| **Node.js 22.23** | 9,609 | 10,163 | 305,387 | 5.82 ms | 15.19 ms | 922 | 18,468 |
+| **Bun 1.4.3** | 19,660 | **19,285** | **579,090** | 3.10 ms | 7.35 ms | 990 | 19,848 |
+| **Go 1.23** | 10,635 | 10,883 | 326,888 | 7.03 ms | 49.59 ms | 913 | 18,293 |
+| **Marina 0.2 (evented)** | 10,261 | 10,879 | 326,831 | 5.85 ms | 9.79 ms | **1,403** | **28,097** |
+| **Node.js 22.23** | 10,530 | 9,889 | 297,094 | 5.95 ms | 15.95 ms | 942 | 18,870 |
 
 ### Memory (resident set)
 
 | Runtime | Idle RSS | **Peak RSS under load** |
 |---|---|---|
-| **Marina** (AOT binary, evented) | **4.2 MB** | **7.1 MB** |
-| **Go** | 11.8 MB | 20.0 MB |
-| Bun | 23.1 MB | 40.7 MB |
-| Node.js | 60.2 MB | 84.5 MB |
+| **Marina** (AOT binary, evented) | **5.3 MB** | **7.9 MB** |
+| **Go** | 10.3 MB | 18.4 MB |
+| Bun | 22.3 MB | 39.4 MB |
+| Node.js | 57.9 MB | 81.1 MB |
 
 ### Marina concurrency sweep (GET /todos, wrk, 5 s each)
 
 | connections | 2 | 4 | 8 | 16 | 32 | 64 |
 |---|---|---|---|---|---|---|
-| req/s (evented) | 10,999 | 11,827 | 12,193 | 13,086 | 12,990 | 12,469 |
+| req/s (evented) | 11,487 | 12,033 | 12,362 | 13,057 | 13,352 | 11,425 |
 
-The sweep is smooth at every concurrency level — no collapse.
+The sweep stays between 11.5k and 13.4k req/s, peaking at 32 connections.
 
 ## Summary
 
-- **Max requests/sec**: Bun wins on GET (~19.9k req/s, ~597k requests in
-30 s). The evented marina build is in the same league as Go and Node —
-~11.1k req/s at c=64 (~334k requests in 30 s), beating both at c=64 with
-tighter p99 latency (10 ms vs 15–55 ms). POST (write + validation) at
-1,400 req/s beats Bun and Node; Go keeps a ~2× edge there.
-- **Memory**: Marina's AOT binary is the lightest by a wide margin
-(4.2 MB idle / 7.1 MB peak) — a third of Go's peak, ~12× lighter than Node.
-- Architecture no longer bottlenecks: the poll(2) event loop + keep-alive +
-promise-based async handlers scale flat across concurrency; the remaining
-~1.8× gap to Bun on GET is per-request allocation churn in the runtime
-(string/json handling), not the server core.
+- **Max requests/sec**: Bun leads GET at 19,285 req/s (579,090 requests in
+30 s). Marina and Go are level at 10,879 and 10,883 req/s; Node.js is at
+9,889. Marina's p99 on that run is 9.79 ms, against 15.95 ms for Node.js
+and 49.59 ms for Go. Bun's p99 is 7.35 ms. POST (write + validation) is
+led by Marina at 1,403 req/s (28,097 inserts in 20 s), ahead of Bun (990),
+Node.js (942), and Go (913).
+- **Memory**: Marina's AOT binary is the lightest (5.3 MB idle / 7.9 MB
+peak) — about 2.3× lighter than Go at peak, and about 10× lighter than Node.
+- The concurrency sweep stays in a band from 2 to 64 connections. GET
+throughput is about 1.8× behind Bun.
 
 ## Fixes required to get marina running
 
+This run is the C++ compiler and runtime. `http_respond` leaked two
+descriptors per request: the dispatch path `dup`s the connection for the
+worker, and the write path `dup`s that again and drops both without
+`close`. The process hit `RLIMIT_NOFILE` after about 500 requests and
+stopped accepting. The write path now takes the existing dup and closes
+it after the response. Linux builds also needed `<optional>` and
+`<cstring>` included where libstdc++ does not pull them in transitively,
+and the link line uses `-lstdc++` on Linux (`-lc++` on macOS).
+
+The notes below are from the 2026-10-19 Rust runtime (commit `af5022e`).
+They are not part of this binary.
+
 Runtime bugs in `crates/marina-runtime/src/lib.rs` were found and fixed
-during these benchmarks (otherwise the example segfaults non-deterministically
-on both macOS and Linux):
+during the October 19 benchmarks (otherwise the example segfaults
+non-deterministically on both macOS and Linux):
 
 1. **Uninitialized-memory UB in heap allocation** — `marina_object_new`,
 
@@ -122,7 +137,7 @@ the resolved promise resumes the handler.
 - Responses are written with a poll(`POLLOUT`) loop so worker threads never
 flip the shared `O_NONBLOCK` flag against the event loop.
 
-Soak tests after the fixes: 200k GETs on Vultr → **RSS 4.4 MB** (before the
+On the October 19 Rust runtime, soak tests after those fixes: 200k GETs on Vultr → **RSS 4.4 MB** (before the
 refcount fixes the same route leaked ~2.5 KB/request → 724 MB); local
 40-connection mixed GET/POST/404 run → 60k requests, zero errors,
 RSS 3.5 MB.
@@ -140,4 +155,4 @@ under wrk load); the loadgen instance was deleted unused.
 and filtered HTTP ports during testing, so remote load generation from the
 dev machine was not viable.
 
-Raw outputs: `bench/raw/`. Scripts: `bench/` (ports in `bench/{node,bun,go}/`).
+Raw outputs: `bench/raw/2026-10-21/`. Scripts: `bench/` (ports in `bench/{node,bun,go}/`).

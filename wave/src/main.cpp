@@ -856,6 +856,26 @@ std::optional<std::string> manifest_save(const Manifest& m) {
     return std::nullopt;
 }
 
+// `wave run <package> <command>` runs `src/<command>.tsm` when package.json
+// "name" is <package> and that file exists. `wave run emsql migrate` is the
+// emsql CLI; `wave run src/migrate.tsm` still works on its own.
+std::optional<std::string> resolve_run_file(const std::vector<std::string>& rest,
+                                            const Manifest* manifest) {
+    if (rest.empty()) return std::nullopt;
+    std::error_code ec;
+    if (fs::is_regular_file(rest[0], ec)) return rest[0];
+    if (fs::is_regular_file(rest[0] + ".tsm", ec)) return rest[0] + ".tsm";
+    if (rest.size() >= 2 && manifest && marina::ir::is_kebab_case(rest[1])) {
+        const Json* n = manifest->root.get("name");
+        const std::string* name = n ? n->as_str() : nullptr;
+        if (name && *name == rest[0]) {
+            std::string cmd = std::string("src/") + rest[1] + ".tsm";
+            if (fs::is_regular_file(cmd, ec)) return cmd;
+        }
+    }
+    return rest[0];
+}
+
 // Entry point resolution: explicit file arg → "main" field → src/main.tsm.
 std::optional<fs::path> entry_path(std::optional<std::string> explicit_file,
                                    const Manifest* manifest, std::string& err) {
@@ -1311,7 +1331,7 @@ int cmd_run(const std::vector<std::string>& rest) {
         }
     }
     std::string err;
-    auto entry = entry_path(rest.empty() ? std::nullopt : std::optional<std::string>(rest[0]),
+    auto entry = entry_path(resolve_run_file(rest, m ? &*m : nullptr),
                             m ? &*m : nullptr, err);
     if (!entry) {
         std::cerr << "error: " << err << std::endl;
@@ -1343,6 +1363,8 @@ COMMANDS:
     check [file]       validate package.json + type-check the entry point
     build [file]       compile to a native binary (in ./.marina/)
     run [file]         compile + execute
+    run <pkg> <cmd>    run src/<cmd>.tsm when package.json name is <pkg>
+                       (example: wave run emsql migrate)
 
 Without [file], the project entry point is used:
     "main" field from package.json, defaulting to src/main.tsm)HELP" << "\n";

@@ -5,6 +5,7 @@
 #include <cctype>
 #include <cerrno>
 #include <cstdlib>
+#include <optional>
 #include <stdexcept>
 
 namespace marina::lex {
