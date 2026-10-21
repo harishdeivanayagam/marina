@@ -8,7 +8,7 @@ RESULTS=/root/results2.txt
 run_impl() {
   local NAME=$1; shift
   echo "=== starting $NAME" >&2
-  rm -f /tmp/todos-http-sqlite.db "/tmp/${NAME}.peak"
+  rm -f /tmp/todos-http-sqlite.db /tmp/todos-http-sqlite.db-wal /tmp/todos-http-sqlite.db-shm "/tmp/${NAME}.peak"
 
   "$@" > "/tmp/${NAME}.log" 2>&1 &
   local PID=$!

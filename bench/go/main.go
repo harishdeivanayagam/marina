@@ -97,6 +97,11 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
+	// One connection, same as the marina/node/bun ports. The default
+	// database/sql pool opens several connections, and SQLite then
+	// returns SQLITE_BUSY for the extra writers (HTTP 500).
+	db.SetMaxOpenConns(1)
+	db.SetMaxIdleConns(1)
 	if _, err := db.Exec("CREATE TABLE IF NOT EXISTS todos (id INTEGER PRIMARY KEY AUTOINCREMENT, text TEXT NOT NULL, done INTEGER NOT NULL DEFAULT 0)"); err != nil {
 		log.Fatal(err)
 	}

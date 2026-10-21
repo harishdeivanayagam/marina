@@ -1,0 +1,84 @@
+=== c=2 t=2 ===
+Running 5s test @ http://127.0.0.1:8080/todos
+  2 threads and 2 connections
+  Thread Stats   Avg      Stdev     Max   +/- Stdev
+    Latency   173.55us   45.22us   2.06ms   78.43%
+    Req/Sec     5.77k   198.64     6.08k    54.90%
+  Latency Distribution
+     50%  171.00us
+     75%  196.00us
+     90%  223.00us
+     99%  271.00us
+  58584 requests in 5.10s, 28.44MB read
+Requests/sec:  11487.07
+Transfer/sec:      5.58MB
+=== c=4 t=4 ===
+Running 5s test @ http://127.0.0.1:8080/todos
+  4 threads and 4 connections
+  Thread Stats   Avg      Stdev     Max   +/- Stdev
+    Latency   331.44us   82.96us   1.51ms   65.63%
+    Req/Sec     3.02k   122.34     3.25k    59.31%
+  Latency Distribution
+     50%  330.00us
+     75%  390.00us
+     90%  435.00us
+     99%  533.00us
+  61374 requests in 5.10s, 29.79MB read
+Requests/sec:  12033.09
+Transfer/sec:      5.84MB
+=== c=8 t=4 ===
+Running 5s test @ http://127.0.0.1:8080/todos
+  4 threads and 8 connections
+  Thread Stats   Avg      Stdev     Max   +/- Stdev
+    Latency   644.47us  180.43us   1.80ms   66.03%
+    Req/Sec     3.11k   194.45     3.51k    63.24%
+  Latency Distribution
+     50%  646.00us
+     75%  773.00us
+     90%    0.87ms
+     99%    1.08ms
+  63055 requests in 5.10s, 30.61MB read
+Requests/sec:  12362.29
+Transfer/sec:      6.00MB
+=== c=16 t=4 ===
+Running 5s test @ http://127.0.0.1:8080/todos
+  4 threads and 16 connections
+  Thread Stats   Avg      Stdev     Max   +/- Stdev
+    Latency     1.22ms  358.75us   4.92ms   65.77%
+    Req/Sec     3.28k   274.30     3.89k    62.50%
+  Latency Distribution
+     50%    1.22ms
+     75%    1.48ms
+     90%    1.67ms
+     99%    2.01ms
+  65321 requests in 5.00s, 31.71MB read
+Requests/sec:  13057.23
+Transfer/sec:      6.34MB
+=== c=32 t=4 ===
+Running 5s test @ http://127.0.0.1:8080/todos
+  4 threads and 32 connections
+  Thread Stats   Avg      Stdev     Max   +/- Stdev
+    Latency     2.38ms  756.35us   5.37ms   65.47%
+    Req/Sec     3.36k   268.84     4.17k    69.50%
+  Latency Distribution
+     50%    2.42ms
+     75%    2.90ms
+     90%    3.36ms
+     99%    4.08ms
+  66848 requests in 5.01s, 32.45MB read
+Requests/sec:  13351.82
+Transfer/sec:      6.48MB
+=== c=64 t=4 ===
+Running 5s test @ http://127.0.0.1:8080/todos
+  4 threads and 64 connections
+  Thread Stats   Avg      Stdev     Max   +/- Stdev
+    Latency     5.57ms    1.62ms  15.38ms   70.89%
+    Req/Sec     2.87k   273.89     3.54k    69.50%
+  Latency Distribution
+     50%    5.52ms
+     75%    6.57ms
+     90%    7.52ms
+     99%   10.02ms
+  57283 requests in 5.01s, 27.81MB read
+Requests/sec:  11425.35
+Transfer/sec:      5.55MB
