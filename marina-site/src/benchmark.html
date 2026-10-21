@@ -11,11 +11,12 @@ description: Marina HTTP + SQLite benchmarks vs Bun, Go and Node.js — throughp
       Workload: the <strong>todos REST API</strong> (HTTP + SQLite) — <code>examples/todos-http-sqlite.tsm</code> —
       with the identical API implemented for Node.js, Bun and Go. Load generated with <code>wrk</code> on
       loopback on a Vultr <code>vc2-1c-1gb</code> instance (1 vCPU Xeon Cascadelake, Ubuntu 24.04).
-      Marina v0.2.0 evented build, AOT binary 2.5&nbsp;MB. Benchmarked 2026-10-19.
+      Marina v0.2.0 evented build, AOT binary 274&nbsp;KB. Benchmarked 2026-10-21.
     </p>
     <blockquote>
-      Per runtime: fresh SQLite DB (10 seeded rows) → 10&nbsp;s warmup → 30&nbsp;s <code>wrk -t4 -c64</code> GET →
-      20&nbsp;s <code>wrk -t4 -c64</code> POST. RSS sampled every 50–100&nbsp;ms.
+      Per runtime: fresh SQLite DB (10 seeded rows) → 10&nbsp;s <code>wrk -t2 -c2</code> GET →
+      30&nbsp;s <code>wrk -t4 -c64</code> GET → 20&nbsp;s <code>wrk -t4 -c64</code> POST.
+      RSS sampled every 100&nbsp;ms.
     </blockquote>
 
     <div class="bench-card">
@@ -105,13 +106,13 @@ description: Marina HTTP + SQLite benchmarks vs Bun, Go and Node.js — throughp
     <div>
       <h3>Takeaways</h3>
       <p>
-        Bun wins raw GET throughput (~19.9k req/s), but the evented Marina build sits in the same league as Go and Node —
-        <strong>11.1k req/s</strong> at c=64 with a tighter p99 than both, and <strong>1,400 POST req/s</strong> (write + validation),
-        beating Bun and Node on writes.
+        Bun leads raw GET throughput at about 19.3k req/s. The evented Marina build is level with Go at
+        <strong>10,879 req/s</strong> (c=64), with a p99 of 9.79&nbsp;ms. POST (write + validation) is led by Marina at
+        <strong>1,403 req/s</strong>.
       </p>
       <p>
-        The headline is memory: Marina's AOT binary idles at <strong>4.2&nbsp;MB</strong> and peaks at
-        <strong>7.1&nbsp;MB</strong> — a third of Go's peak, and roughly <strong>12× lighter than Node.js</strong>.
+        The headline is memory: Marina's AOT binary idles at <strong>5.3&nbsp;MB</strong> and peaks at
+        <strong>7.9&nbsp;MB</strong> — about 2.3× lighter than Go at peak, and about <strong>10× lighter than Node.js</strong>.
       </p>
     </div>
   </div>
