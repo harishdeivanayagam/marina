@@ -390,14 +390,16 @@ void marina_crypto_random_hex(int64_t num_bytes, MValue* out);
 void marina_crypto_uuid(MValue* out);
 
 /* ------------------------------------------------------------------ */
-/* std module: sql (SQLite via the system libsqlite3)                  */
+/* std module: sql (SQLite, PostgreSQL, MySQL/MariaDB)                 */
 /* ------------------------------------------------------------------ */
 
 /* Connections live in a runtime table (not ARC-managed): a
  * `sql.Connection` object stores an id in field 0; `db.close()` removes
- * it. MySQL/Postgres/MariaDB drivers are not available yet. */
+ * it. SQLite uses the system libsqlite3; pg/mysql/mariadb are native
+ * wire-protocol clients built on the runtime's own TCP + crypto. */
 
-/* `new sql.Connection(driver, url)` — only `sqlite` is supported. */
+/* `new sql.Connection(driver, url)` — `sqlite`, `pg` (aliases
+ * `postgres`/`postgresql`), `mysql` or `mariadb`. */
 void marina_sql_open(const MValue* driver, const MValue* url, int32_t class_id,
                      MValue* out);
 

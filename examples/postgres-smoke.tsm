@@ -1,0 +1,59 @@
+import sql
+
+// URL of a PostgreSQL server (overridden by argv[1] when given)
+const URL = "postgres://marina:secret@127.0.0.1:5433/testdb"
+
+interface Item {
+    id: Int32,
+    name: string,
+    qty: Int32,
+    price: Float64,
+}
+
+interface FlagRow {
+    a: bool,
+    b: string,
+}
+
+async function main() {
+    let url = URL
+
+    let db = new sql.Connection("pg", url)
+
+    await db.execute(sql.stmt`CREATE TABLE IF NOT EXISTS items (
+        id SERIAL PRIMARY KEY,
+        name TEXT NOT NULL,
+        qty INTEGER NOT NULL DEFAULT 0,
+        price NUMERIC(10,2) NOT NULL DEFAULT 0
+    )`)
+    await db.execute(sql.stmt`DELETE FROM items`)
+
+    let ins = await db.execute(sql.stmt`INSERT INTO items (name, qty, price) VALUES (${"widget"}, ${3}, ${1.5})`)
+    console.log(`insert: lastInsertId=${ins.lastInsertId} rowsAffected=${ins.rowsAffected}`)
+
+    await db.execute(sql.stmt`INSERT INTO items (name, qty, price) VALUES (${"gadget"}, ${10}, ${9.99})`)
+
+    let rows: Array<Item> = await db.query(sql.stmt`SELECT id, name, qty, price FROM items ORDER BY id`)
+    for (let i = 0; i < rows.length; i++) {
+        console.log(`row: id=${rows[i].id} name=${rows[i].name} qty=${rows[i].qty} price=${rows[i].price}`)
+    }
+
+    let upd = await db.execute(sql.stmt`UPDATE items SET qty = qty + ${1} WHERE name = ${"widget"}`)
+    console.log(`update: rowsAffected=${upd.rowsAffected}`)
+
+    let names: Array<Item> = await db.query(sql.stmt`SELECT name FROM items WHERE qty > ${2} AND price < ${100.0}`)
+    console.log(`filtered count=${names.length}`)
+
+    // NULL columns + booleans
+    await db.execute(sql.stmt`CREATE TABLE IF NOT EXISTS flags (a BOOLEAN, b TEXT)`)
+    await db.execute(sql.stmt`DELETE FROM flags`)
+    await db.execute(sql.stmt`INSERT INTO flags (a, b) VALUES (${true}, ${"x"})`)
+    await db.execute(sql.stmt`INSERT INTO flags (a, b) VALUES (NULL, ${"y"})`)
+    let frows: Array<FlagRow> = await db.query(sql.stmt`SELECT a, b FROM flags ORDER BY b`)
+    console.log(`flags: r0.a=${frows[0].a} r1.a=${frows[1].a}`)
+
+    db.close()
+    console.log(`done`)
+}
+
+main()

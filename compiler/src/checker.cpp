@@ -2428,14 +2428,10 @@ public:
                 // catch an unknown driver early when it is a literal
                 if (auto* ds = std::get_if<ast::EStr>(&x->args[0]->v)) {
                     const std::string& d = ds->value;
-                    if (!(d == "sqlite" || d == "mysql" || d == "pg" || d == "mariadb")) {
+                    if (!(d == "sqlite" || d == "mysql" || d == "pg" || d == "mariadb" ||
+                          d == "postgres" || d == "postgresql")) {
                         diag("unknown sql driver '" + d +
                                  "' (supported: sqlite, mysql, pg, mariadb)",
-                             x->args[0]->span);
-                    }
-                    if (d != "sqlite") {
-                        diag("sql driver '" + d +
-                                 "' is not supported yet (only 'sqlite' is supported in v0.2)",
                              x->args[0]->span);
                     }
                 }
